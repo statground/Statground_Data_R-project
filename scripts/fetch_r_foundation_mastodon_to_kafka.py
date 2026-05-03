@@ -793,6 +793,54 @@ Source body:
 {content}"""
 
 
+def translation_prompt(title: str, content: str) -> str:
+    return f"""You are an editorial Korean translator for R, statistics, data analysis, and open-source community posts.
+
+Translate and lightly edit the source for a Korean Web-R community board post.
+
+Output rules:
+- Return only a valid JSON object. Do not wrap it in Markdown fences.
+- JSON keys must be exactly "title" and "content_html".
+- "title" must be one concise Korean line.
+- "content_html" must be a compact HTML fragment. The first character of the value must be "<".
+- Never use <html>, <head>, or <body>.
+- Allowed HTML tags only: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>.
+- Do not output hyperlinks, URLs, Markdown links, HTML <a> tags, href attributes, citations, source links, or "read more" links.
+- If the source contains a link, keep only the human-readable text when it is useful, and omit the URL.
+- Use polite formal Korean ending in ~합니다 or ~입니다.
+- Preserve R, package names, function names, version numbers, numeric values, acronyms, and proper nouns when appropriate.
+- Do not add an introduction, explanation, label, or meta-commentary.
+
+Source title:
+{title}
+
+Source body:
+{content}"""
+
+
+def strip_json_fence(value: str) -> str:
+    value = (value or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"(?is)^```(?:json)?\s*", "", value)
+        value = re.sub(r"(?is)\s*```$", "", value).strip()
+    return value
+
+
+def parse_translation_json(value: str) -> tuple[str, str]:
+    value = strip_json_fence(value)
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find("{")
+        end = value.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        decoded = json.loads(value[start : end + 1])
+    if not isinstance(decoded, dict):
+        raise ValueError("translation response is not a JSON object")
+    return str(decoded.get("title") or ""), str(decoded.get("content_html") or "")
+
+
 def source_title(payload: dict[str, Any]) -> str:
     text = remove_urls(str(payload.get("content_text") or ""))
     spoiler = remove_urls(str(payload.get("spoiler_text") or ""))
@@ -824,14 +872,15 @@ def translate_payload(ai: AIClient, payload: dict[str, Any]) -> tuple[str, str]:
     translated_title = src_title
     translated_content = src_content
 
-    if src_title and not looks_korean(src_title, 0.2):
-        translated_title = ai.chat(title_prompt(src_title), TRANSLATION_MODEL)
+    needs_title_translation = bool(src_title and not looks_korean(src_title, 0.2))
+    needs_content_translation = bool(src_content and not looks_korean(src_content, 0.25))
+    if needs_title_translation or needs_content_translation:
+        translated_title, translated_content = parse_translation_json(ai.chat(translation_prompt(src_title, src_content), TRANSLATION_MODEL))
+
     translated_title = clean_title_output(translated_title)
     if not translated_title:
         translated_title = clean_title_output(src_title)
 
-    if src_content and not looks_korean(src_content, 0.25):
-        translated_content = ai.chat(content_prompt(src_title, src_content), TRANSLATION_MODEL)
     translated_content = sanitize_html_fragment(translated_content)
     if not translated_content:
         translated_content = sanitize_html_fragment(f"<p>{html_lib.escape(remove_urls(first_non_empty(src_content, translated_title)))}</p>")
