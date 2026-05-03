@@ -55,9 +55,13 @@ FAIL_ON_TRANSLATION_ERROR = os.getenv("FAIL_ON_TRANSLATION_ERROR", os.getenv("MA
     "yes",
     "y",
 }
-TRANSLATION_MODEL = os.getenv("MASTODON_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free").strip()
+TRANSLATION_MODEL = os.getenv("MASTODON_TRANSLATION_MODEL", "openai/gpt-oss-20b").strip()
 AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT", "300"))
+AI_PROVIDER_MAX_ATTEMPTS = int(os.getenv("AI_PROVIDER_MAX_ATTEMPTS", os.getenv("MASTODON_AI_PROVIDER_MAX_ATTEMPTS", "3")))
+AI_RETRY_BASE_SECONDS = float(os.getenv("AI_RETRY_BASE_SECONDS", os.getenv("MASTODON_AI_RETRY_BASE_SECONDS", "2")))
+AI_RETRY_MAX_SECONDS = float(os.getenv("AI_RETRY_MAX_SECONDS", os.getenv("MASTODON_AI_RETRY_MAX_SECONDS", "30")))
 MAX_TRANSLATION_SOURCE_CHARS = int(os.getenv("MASTODON_MAX_TRANSLATION_SOURCE_CHARS", "5000"))
+RETRY_MISSING_BOARD_TRANSLATIONS = os.getenv("RETRY_MISSING_BOARD_TRANSLATIONS", "true").lower() in {"1", "true", "yes", "y"}
 
 EXCLUDE_REBLOGS = os.getenv("EXCLUDE_REBLOGS", "true").lower() in {"1", "true", "yes", "y"}
 EXCLUDE_REPLIES = os.getenv("EXCLUDE_REPLIES", "false").lower() in {"1", "true", "yes", "y"}
@@ -84,7 +88,16 @@ MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)")
 TAG_RE = re.compile(r"(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>")
 FIRST_ALLOWED_TAG_RE = re.compile(r"(?is)<\s*(h2|h3|p|ul|ol|li|strong|em|code|pre|blockquote)\b")
 SPACE_RE = re.compile(r"[ \t\xA0]+")
+TRY_AGAIN_IN_RE = re.compile(r"(?i)try again in\s+([0-9.]+)\s*s")
 ALLOWED_CONTENT_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "code", "pre", "blockquote"}
+BOARD_STATE_KEYS = {
+    "board_payload_hash",
+    "board_translation_status",
+    "board_translated_at",
+    "board_translation_attempted_at",
+    "board_translation_attempts",
+    "board_translation_error",
+}
 
 
 @dataclass
@@ -309,7 +322,7 @@ class AIClient:
         errors: list[str] = []
         for provider in providers:
             try:
-                result = self.call_provider(provider, prompt, model)
+                result = self.call_provider_with_retries(provider, prompt, model)
             except Exception as exc:  # noqa: BLE001 - preserve provider fallback behavior
                 errors.append(f"{provider}: {exc}")
                 continue
@@ -317,22 +330,52 @@ class AIClient:
                 return result.strip()
         raise RuntimeError(" | ".join(errors) or "no AI provider returned content")
 
+    def provider_model(self, provider: str, model: str) -> str:
+        if provider == "openrouter":
+            return first_non_empty(os.getenv("MASTODON_OPENROUTER_MODEL"), os.getenv("OPENROUTER_MODEL"), model)
+        if provider == "groq":
+            return first_non_empty(os.getenv("MASTODON_GROQ_MODEL"), os.getenv("GROQ_MODEL"), model)
+        if provider == "cerebras":
+            return first_non_empty(os.getenv("MASTODON_CEREBRAS_MODEL"), os.getenv("CEREBRAS_MODEL"), model)
+        if provider == "gh_models":
+            return first_non_empty(os.getenv("MASTODON_GH_MODELS_MODEL"), os.getenv("GH_MODELS_MODEL"), model)
+        return model
+
+    def call_provider_with_retries(self, provider: str, prompt: str, model: str) -> str:
+        last_error: Exception | None = None
+        attempts = max(1, AI_PROVIDER_MAX_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.call_provider(provider, prompt, model)
+            except AIHTTPError as exc:
+                last_error = exc
+                if attempt >= attempts or not exc.retryable():
+                    break
+                delay = exc.retry_delay(attempt)
+                print(f"{provider} returned HTTP {exc.status_code}. Retry {attempt}/{attempts} after {delay:.1f}s.", file=sys.stderr)
+                time.sleep(delay)
+            except Exception as exc:  # noqa: BLE001 - provider fallback path records the final provider error
+                last_error = exc
+                break
+        raise RuntimeError(str(last_error) if last_error else "provider did not return content")
+
     def provider_request(self, provider: str, model: str) -> tuple[str, dict[str, str], str]:
         headers = {"Content-Type": "application/json"}
+        requested_model = self.provider_model(provider, model)
         if provider == "openrouter":
             headers["Authorization"] = "Bearer " + self.keys[provider]
-            return "https://openrouter.ai/api/v1/chat/completions", headers, model
+            return "https://openrouter.ai/api/v1/chat/completions", headers, normalize_openrouter_model(requested_model)
         if provider == "groq":
             headers["Authorization"] = "Bearer " + self.keys[provider]
-            return "https://api.groq.com/openai/v1/chat/completions", headers, normalize_groq_model(model)
+            return "https://api.groq.com/openai/v1/chat/completions", headers, normalize_groq_model(requested_model)
         if provider == "cerebras":
             headers["Authorization"] = "Bearer " + self.keys[provider]
-            return "https://api.cerebras.ai/v1/chat/completions", headers, normalize_cerebras_model(model)
+            return "https://api.cerebras.ai/v1/chat/completions", headers, normalize_cerebras_model(requested_model)
         if provider == "gh_models":
             headers["Authorization"] = "Bearer " + self.keys[provider]
             headers["Accept"] = "application/vnd.github+json"
             headers["X-GitHub-Api-Version"] = "2026-03-10"
-            return "https://models.github.ai/inference/chat/completions", headers, normalize_gh_model(model)
+            return "https://models.github.ai/inference/chat/completions", headers, normalize_gh_model(requested_model)
         raise ValueError(f"unsupported AI provider: {provider}")
 
     def call_provider(self, provider: str, prompt: str, model: str) -> str:
@@ -344,7 +387,7 @@ class AIClient:
         }
         response = self.session.post(endpoint, headers=headers, json=body, timeout=self.timeout)
         if response.status_code // 100 != 2:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:1000]}")
+            raise AIHTTPError(response.status_code, response.text[:1000], response.headers.get("Retry-After"))
         decoded = response.json()
         choices = decoded.get("choices") or []
         if not choices:
@@ -352,6 +395,39 @@ class AIClient:
         first = choices[0] or {}
         message = first.get("message") or {}
         return str(message.get("content") or first.get("text") or "")
+
+
+class AIHTTPError(RuntimeError):
+    def __init__(self, status_code: int, body: str, retry_after: str | None = None) -> None:
+        self.status_code = status_code
+        self.body = body
+        self.retry_after = retry_after
+        super().__init__(f"HTTP {status_code}: {body}")
+
+    def retryable(self) -> bool:
+        return self.status_code in {408, 425, 429, 500, 502, 503, 504}
+
+    def retry_delay(self, attempt: int) -> float:
+        if self.retry_after:
+            try:
+                return min(AI_RETRY_MAX_SECONDS, max(0.5, float(self.retry_after)))
+            except ValueError:
+                pass
+        match = TRY_AGAIN_IN_RE.search(self.body)
+        if match:
+            try:
+                return min(AI_RETRY_MAX_SECONDS, max(0.5, float(match.group(1))))
+            except ValueError:
+                pass
+        jitter = random.uniform(0, AI_RETRY_BASE_SECONDS)
+        return min(AI_RETRY_MAX_SECONDS, AI_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)) + jitter)
+
+
+def normalize_openrouter_model(model: str) -> str:
+    model = first_non_empty(model, "openai/gpt-oss-20b").removesuffix(":free")
+    if model.startswith("google/gemini-2.0-flash-exp"):
+        return "openai/gpt-oss-20b"
+    return model
 
 
 def normalize_groq_model(model: str) -> str:
@@ -363,6 +439,8 @@ def normalize_groq_model(model: str) -> str:
 
 def normalize_cerebras_model(model: str) -> str:
     model = first_non_empty(model, "gpt-oss-120b").removesuffix(":free")
+    if model.startswith(("google/", "anthropic/", "x-ai/")):
+        return "gpt-oss-120b"
     if model in {"", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "gpt-oss-20b"}:
         return "gpt-oss-120b"
     return model.replace("openai/", "")
@@ -802,6 +880,67 @@ def board_payload(
     return payload
 
 
+def carried_board_state(previous: dict[str, Any]) -> dict[str, Any]:
+    return {key: previous[key] for key in BOARD_STATE_KEYS if key in previous}
+
+
+def board_translation_due(previous: dict[str, Any], raw_payload: dict[str, Any]) -> bool:
+    if not TRANSLATE_ENABLED:
+        return False
+    if FORCE_REPUBLISH:
+        return True
+    if str(previous.get("payload_hash") or "") != str(raw_payload.get("payload_hash") or ""):
+        return True
+    if not RETRY_MISSING_BOARD_TRANSLATIONS:
+        return False
+    return str(previous.get("board_payload_hash") or "") != str(raw_payload.get("payload_hash") or "")
+
+
+def board_translation_attempt_count(previous: dict[str, Any]) -> int:
+    try:
+        return int(previous.get("board_translation_attempts") or 0) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def board_translation_success_state(raw_payload: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now_iso()
+    return {
+        "board_payload_hash": raw_payload.get("payload_hash"),
+        "board_translation_status": "published",
+        "board_translated_at": now,
+        "board_translation_attempted_at": now,
+        "board_translation_attempts": board_translation_attempt_count(previous),
+        "board_translation_error": "",
+    }
+
+
+def board_translation_failure_state(raw_payload: dict[str, Any], previous: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    now = utc_now_iso()
+    state = carried_board_state(previous)
+    state.update(
+        {
+            "board_translation_status": "failed",
+            "board_translation_attempted_at": now,
+            "board_translation_attempts": board_translation_attempt_count(previous),
+            "board_translation_error": truncate_chars(str(exc), 1200),
+        }
+    )
+    return state
+
+
+def board_tombstone_state(raw_payload: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now_iso()
+    return {
+        "board_payload_hash": raw_payload.get("payload_hash"),
+        "board_translation_status": "tombstone_published",
+        "board_translated_at": now,
+        "board_translation_attempted_at": now,
+        "board_translation_attempts": board_translation_attempt_count(previous),
+        "board_translation_error": "",
+    }
+
+
 def log_payload(stage: str, created_log: dict[str, Any]) -> dict[str, Any]:
     now = now_kst_string()
     return {
@@ -915,6 +1054,9 @@ def main() -> None:
                     "sync_mode": SYNC_MODE,
                     "force_republish": FORCE_REPUBLISH,
                     "translate_enabled": TRANSLATE_ENABLED,
+                    "translation_model": TRANSLATION_MODEL,
+                    "retry_missing_board_translations": RETRY_MISSING_BOARD_TRANSLATIONS,
+                    "ai_provider_max_attempts": AI_PROVIDER_MAX_ATTEMPTS,
                     "crawl_images_base64": CRAWL_IMAGES_BASE64,
                     "started_at": run_started_at,
                 },
@@ -924,6 +1066,7 @@ def main() -> None:
     seen_ids: set[str] = set()
     published_raw = 0
     published_board = 0
+    attempted_board = 0
     translation_errors: list[str] = []
 
     for payload in normalized_payloads:
@@ -931,20 +1074,26 @@ def main() -> None:
         seen_ids.add(status_id)
         previous = known_statuses.get(status_id) or {}
         previous_hash = previous.get("payload_hash")
-        if FORCE_REPUBLISH or previous_hash != payload["payload_hash"]:
+        raw_changed = FORCE_REPUBLISH or previous_hash != payload["payload_hash"]
+        board_state = carried_board_state(previous)
+        if raw_changed:
             events_to_publish.append((RAW_EVENT_TYPE, payload))
             published_raw += 1
-            if TRANSLATE_ENABLED:
-                try:
-                    title, content = translate_payload(ai, payload)
-                    events_to_publish.append((BOARD_EVENT_TYPE, board_payload(payload, title, content)))
-                    published_board += 1
-                except Exception as exc:  # noqa: BLE001 - log and optionally fail after run summary
-                    translation_errors.append(f"{status_id}: {exc}")
-                    if FAIL_ON_TRANSLATION_ERROR:
-                        raise
 
-        known_statuses[status_id] = {
+        if board_translation_due(previous, payload):
+            attempted_board += 1
+            try:
+                title, content = translate_payload(ai, payload)
+                events_to_publish.append((BOARD_EVENT_TYPE, board_payload(payload, title, content)))
+                published_board += 1
+                board_state = board_translation_success_state(payload, previous)
+            except Exception as exc:  # noqa: BLE001 - log and optionally fail after run summary
+                board_state = board_translation_failure_state(payload, previous, exc)
+                translation_errors.append(f"{status_id}: {exc}")
+                if FAIL_ON_TRANSLATION_ERROR:
+                    raise
+
+        status_state = {
             "uuid": payload.get("uuid"),
             "payload_hash": payload["payload_hash"],
             "status_created_at": payload.get("status_created_at"),
@@ -956,6 +1105,8 @@ def main() -> None:
             "last_seen_at": utc_now_iso(),
             "active": 1,
         }
+        status_state.update(board_state)
+        known_statuses[status_id] = status_state
 
     if full_backfill:
         missing_ids = known_ids - seen_ids
@@ -968,11 +1119,13 @@ def main() -> None:
             events_to_publish.append((BOARD_EVENT_TYPE, board_payload(payload, "", "", reason="mastodon_board_tombstone")))
             published_raw += 1
             published_board += 1
+            attempted_board += 1
             known_statuses[status_id] = {
                 **old,
                 "payload_hash": payload["payload_hash"],
                 "last_seen_at": utc_now_iso(),
                 "active": 0,
+                **board_tombstone_state(payload, old),
             }
 
     done_at = now_kst_string()
@@ -985,11 +1138,13 @@ def main() -> None:
                     "sync_mode": SYNC_MODE,
                     "fetched_count": len(statuses),
                     "published_raw": published_raw,
+                    "attempted_board": attempted_board,
                     "published_board": published_board,
                     "translation_errors": translation_errors[:50],
                     "prompt_language": "en",
                     "target_language": "ko",
                     "hyperlink_policy": "remove_urls_markdown_links_a_tags_and_href",
+                    "retry_missing_board_translations": RETRY_MISSING_BOARD_TRANSLATIONS,
                     "done_at": done_at,
                 },
             ),
@@ -1019,6 +1174,7 @@ def main() -> None:
             "last_sync_mode": SYNC_MODE,
             "fetched_count": len(statuses),
             "published_raw_count": published_raw,
+            "attempted_board_count": attempted_board,
             "published_board_count": published_board,
             "published_event_count": len(events_to_publish),
             "known_count": len(known_statuses),
