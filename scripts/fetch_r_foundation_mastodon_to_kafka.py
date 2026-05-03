@@ -770,7 +770,7 @@ def board_payload(
     reason: str = "mastodon_board_translation",
 ) -> dict[str, Any]:
     active = int(raw_payload.get("active") or 0)
-    created_at = first_non_empty(str(raw_payload.get("status_created_at") or ""), str(raw_payload.get("fetched_at") or ""), now_kst_string())
+    created_at = first_non_empty(str(raw_payload.get("status_created_at") or ""), now_kst_string())
     payload: dict[str, Any] = {
         "uuid": raw_payload["uuid"],
         "status_url": raw_payload.get("status_url"),

@@ -18,10 +18,8 @@ on:
         type: boolean
 
   schedule:
-    # UTC. Avoid the top of the hour to reduce delayed/dropped scheduled runs.
-    - cron: "17,47 * * * *"
-    # Weekly full verification. UTC Sunday 18:13 = KST Monday 03:13.
-    - cron: "13 18 * * 0"
+    # UTC. Run once per hour and avoid the top of the hour.
+    - cron: "17 * * * *"
 
 permissions:
   contents: write
@@ -115,10 +113,6 @@ jobs:
           mode="${{ inputs.mode }}"
           if [ -z "$mode" ]; then
             mode="incremental"
-          fi
-
-          if [ "${{ github.event.schedule }}" = "13 18 * * 0" ]; then
-            mode="backfill"
           fi
 
           force_republish="${{ inputs.force_republish }}"
