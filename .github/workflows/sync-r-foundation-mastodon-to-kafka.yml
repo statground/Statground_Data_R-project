@@ -22,7 +22,7 @@ on:
     - cron: "17 * * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-r-foundation-mastodon-to-kafka
@@ -45,11 +45,15 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Validate required Kafka secrets
+      - name: Validate required secrets
         env:
           KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
           KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
           KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL || secrets.CH_HTTP_URL }}
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
@@ -59,6 +63,9 @@ jobs:
           test -n "$KAFKA_BROKERS" || { echo "KAFKA_BROKERS or KAFKA_BOOTSTRAP_SERVERS secret is required"; exit 1; }
           test -n "$KAFKA_USERNAME" || { echo "Kafka SASL username is required. Add KAFKA_USERNAME or KAFKA_EXTERNAL_USER"; exit 1; }
           test -n "$KAFKA_PASSWORD" || { echo "Kafka SASL password is required. Add KAFKA_PASSWORD or KAFKA_EXTERNAL_PASSWORD"; exit 1; }
+          test -n "$CLICKHOUSE_URL$CLICKHOUSE_HOST" || { echo "CLICKHOUSE_URL/CH_HTTP_URL or CLICKHOUSE_HOST/CH_HOST secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_USER" || { echo "CLICKHOUSE_USER or CH_USER secret is required"; exit 1; }
+          test -n "$CLICKHOUSE_PASSWORD" || { echo "CLICKHOUSE_PASSWORD or CH_PASSWORD secret is required"; exit 1; }
           case ",$KAFKA_BROKERS," in
             *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
               echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
@@ -91,6 +98,17 @@ jobs:
           KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
           KAFKA_PRODUCER_MESSAGE_MAX_BYTES: "12582912"
 
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL || secrets.CH_HTTP_URL }}
+          CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST || secrets.CH_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT || secrets.CH_PORT }}
+          CLICKHOUSE_SCHEME: ${{ secrets.CLICKHOUSE_SCHEME || secrets.CH_SCHEME || 'http' }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
+          CLICKHOUSE_DATABASE: "webr_mastodon"
+          CLICKHOUSE_LOG_TABLE: "webr_mastodon.log"
+          CLICKHOUSE_RAW_TABLE: "webr_mastodon.raw"
+          CLICKHOUSE_BOARD_TABLE: "webr_mastodon.board"
+
           TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
           MASTODON_TRANSLATION_MODEL: ${{ vars.MASTODON_TRANSLATION_MODEL || 'openai/gpt-oss-20b' }}
           FAIL_ON_TRANSLATION_ERROR: ${{ vars.MASTODON_FAIL_ON_TRANSLATION_ERROR || 'false' }}
@@ -103,7 +121,6 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
 
-          STATE_FILE: "data/mastodon/r_foundation/state.json"
           EXCLUDE_REBLOGS: "true"
           EXCLUDE_REPLIES: "false"
           CRAWL_IMAGES_BASE64: "true"
@@ -126,16 +143,3 @@ jobs:
 
           echo "SYNC_MODE=$mode"
           SYNC_MODE="$mode" FORCE_REPUBLISH="$force_republish" python scripts/fetch_r_foundation_mastodon_to_kafka.py
-
-      - name: Commit crawler state
-        run: |
-          if [ -n "$(git status --porcelain data/mastodon/r_foundation)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add data/mastodon/r_foundation
-            git commit -m "Update R Foundation Mastodon crawler state"
-            git pull --rebase
-            git push
-          else
-            echo "No state changes."
-          fi

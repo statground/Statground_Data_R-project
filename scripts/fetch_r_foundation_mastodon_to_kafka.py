@@ -16,7 +16,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -45,7 +44,18 @@ KAFKA_USERNAME = first_non_empty(os.getenv("KAFKA_USERNAME"), os.getenv("KAFKA_E
 KAFKA_PASSWORD = first_non_empty(os.getenv("KAFKA_PASSWORD"), os.getenv("KAFKA_EXTERNAL_PASSWORD"))
 KAFKA_PRODUCER_MESSAGE_MAX_BYTES = int(os.getenv("KAFKA_PRODUCER_MESSAGE_MAX_BYTES", "12582912"))
 
-STATE_FILE = Path(os.getenv("STATE_FILE", "data/mastodon/r_foundation/state.json"))
+CLICKHOUSE_URL = first_non_empty(os.getenv("CLICKHOUSE_URL"), os.getenv("CH_HTTP_URL"))
+CLICKHOUSE_HOST = first_non_empty(os.getenv("CLICKHOUSE_HOST"), os.getenv("CH_HOST"))
+CLICKHOUSE_PORT = first_non_empty(os.getenv("CLICKHOUSE_PORT"), os.getenv("CH_PORT"))
+CLICKHOUSE_SCHEME = first_non_empty(os.getenv("CLICKHOUSE_SCHEME"), os.getenv("CH_SCHEME"), "http").lower()
+CLICKHOUSE_USER = first_non_empty(os.getenv("CLICKHOUSE_USER"), os.getenv("CH_USER"))
+CLICKHOUSE_PASSWORD = first_non_empty(os.getenv("CLICKHOUSE_PASSWORD"), os.getenv("CH_PASSWORD"))
+CLICKHOUSE_DATABASE = first_non_empty(os.getenv("CLICKHOUSE_DATABASE"), os.getenv("CH_DATABASE"), "webr_mastodon")
+CLICKHOUSE_LOG_TABLE = os.getenv("CLICKHOUSE_LOG_TABLE", "webr_mastodon.log").strip()
+CLICKHOUSE_RAW_TABLE = os.getenv("CLICKHOUSE_RAW_TABLE", "webr_mastodon.raw").strip()
+CLICKHOUSE_BOARD_TABLE = os.getenv("CLICKHOUSE_BOARD_TABLE", "webr_mastodon.board").strip()
+CLICKHOUSE_TIMEOUT_SECONDS = int(os.getenv("CLICKHOUSE_TIMEOUT", "30"))
+
 SYNC_MODE = os.getenv("SYNC_MODE", "incremental").strip().lower()
 FORCE_REPUBLISH = os.getenv("FORCE_REPUBLISH", "false").lower() in {"1", "true", "yes", "y"}
 TRANSLATE_ENABLED = os.getenv("TRANSLATE_ENABLED", os.getenv("MASTODON_TRANSLATE_ENABLED", "true")).lower() in {"1", "true", "yes", "y"}
@@ -82,6 +92,7 @@ USER_AGENT = os.getenv(
 RAW_EVENT_TYPE = "webr.mastodon.raw.v1"
 LOG_EVENT_TYPE = "webr.mastodon.log.v1"
 BOARD_EVENT_TYPE = "webr.mastodon.board.v1"
+STATE_SNAPSHOT_STAGE = "state_snapshot"
 LINK_RE = re.compile(r"<([^>]+)>;\s*rel=\"([^\"]+)\"")
 URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>()\"']+")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)")
@@ -89,6 +100,7 @@ TAG_RE = re.compile(r"(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>")
 FIRST_ALLOWED_TAG_RE = re.compile(r"(?is)<\s*(h2|h3|p|ul|ol|li|strong|em|code|pre|blockquote)\b")
 SPACE_RE = re.compile(r"[ \t\xA0]+")
 TRY_AGAIN_IN_RE = re.compile(r"(?i)try again in\s+([0-9.]+)\s*s")
+CLICKHOUSE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$")
 ALLOWED_CONTENT_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "code", "pre", "blockquote"}
 BOARD_STATE_KEYS = {
     "board_payload_hash",
@@ -496,21 +508,175 @@ def request_json(url: str, params: dict[str, Any] | None = None) -> tuple[Any, r
     raise RuntimeError(f"Request failed after retries: {last_error}") from last_error
 
 
-def load_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {"statuses": {}}
-    with STATE_FILE.open("r", encoding="utf-8") as fp:
-        state = json.load(fp)
-    if "statuses" not in state or not isinstance(state["statuses"], dict):
+def clickhouse_endpoint() -> str:
+    if CLICKHOUSE_URL:
+        return CLICKHOUSE_URL.rstrip("/")
+    if not CLICKHOUSE_HOST:
+        return ""
+    if CLICKHOUSE_HOST.startswith(("http://", "https://")):
+        return CLICKHOUSE_HOST.rstrip("/")
+    port = CLICKHOUSE_PORT or ("8443" if CLICKHOUSE_SCHEME == "https" else "8123")
+    host = CLICKHOUSE_HOST.strip()
+    if host.startswith("[") or re.search(r":\d+$", host):
+        return f"{CLICKHOUSE_SCHEME}://{host}"
+    return f"{CLICKHOUSE_SCHEME}://{host}:{port}"
+
+
+def ch_table_name(value: str) -> str:
+    if not CLICKHOUSE_TABLE_RE.match(value):
+        raise ValueError(f"invalid ClickHouse table name: {value!r}")
+    return value
+
+
+def ch_string(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+class ClickHouseClient:
+    def __init__(self) -> None:
+        self.endpoint = clickhouse_endpoint()
+        self.session = requests.Session()
+
+    def validate(self) -> None:
+        if not self.endpoint:
+            raise RuntimeError("CLICKHOUSE_URL or CLICKHOUSE_HOST/CH_HOST secret is required for crawler state")
+        if not CLICKHOUSE_USER:
+            raise RuntimeError("CLICKHOUSE_USER or CH_USER secret is required for crawler state")
+        if not CLICKHOUSE_PASSWORD:
+            raise RuntimeError("CLICKHOUSE_PASSWORD or CH_PASSWORD secret is required for crawler state")
+
+    def query(self, sql: str) -> str:
+        self.validate()
+        response = self.session.post(
+            self.endpoint,
+            params={"database": CLICKHOUSE_DATABASE},
+            data=sql.encode("utf-8"),
+            auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+            timeout=CLICKHOUSE_TIMEOUT_SECONDS,
+        )
+        if response.status_code // 100 != 2:
+            raise RuntimeError(f"ClickHouse query failed HTTP {response.status_code}: {response.text[:1000]}")
+        return response.text
+
+    def select_json_each_row(self, sql: str) -> list[dict[str, Any]]:
+        text = self.query(sql)
+        rows: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+        return rows
+
+
+def normalize_state(value: Any) -> dict[str, Any]:
+    state = value if isinstance(value, dict) else {}
+    statuses = state.get("statuses")
+    if not isinstance(statuses, dict):
         state["statuses"] = {}
     return state
 
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with STATE_FILE.open("w", encoding="utf-8") as fp:
-        json.dump(state, fp, ensure_ascii=False, indent=2, sort_keys=True)
-        fp.write("\n")
+def load_state_snapshot(clickhouse: ClickHouseClient) -> dict[str, Any] | None:
+    rows = clickhouse.select_json_each_row(
+        f"""
+SELECT
+    JSONExtractString(toString(created_log), 'state_json') AS state_json
+FROM {ch_table_name(CLICKHOUSE_LOG_TABLE)}
+WHERE JSONExtractString(toString(created_log), 'type') = 'mastodon_pipeline'
+  AND JSONExtractString(toString(created_log), 'stage') = {ch_string(STATE_SNAPSHOT_STAGE)}
+  AND JSONExtractString(toString(created_log), 'instance') = {ch_string(INSTANCE)}
+  AND JSONExtractString(toString(created_log), 'acct') = {ch_string(ACCT)}
+ORDER BY created_at DESC, uuid DESC
+LIMIT 1
+FORMAT JSONEachRow
+"""
+    )
+    if not rows:
+        return None
+    state_json = str(rows[0].get("state_json") or "").strip()
+    if not state_json:
+        return None
+    state = normalize_state(json.loads(state_json))
+    print(f"Loaded crawler state from ClickHouse log snapshot. known_count={len(state['statuses'])}")
+    return state
+
+
+def load_state_from_clickhouse_tables(clickhouse: ClickHouseClient) -> dict[str, Any]:
+    raw_rows = clickhouse.select_json_each_row(
+        f"""
+SELECT
+    status_id,
+    toString(argMax(uuid, tuple(fetched_at, created_at))) AS uuid,
+    argMax(payload_hash, tuple(fetched_at, created_at)) AS payload_hash,
+    toString(argMax(status_created_at, tuple(fetched_at, created_at))) AS status_created_at,
+    argMax(status_uri, tuple(fetched_at, created_at)) AS status_uri,
+    argMax(status_url, tuple(fetched_at, created_at)) AS status_url,
+    argMax(visibility, tuple(fetched_at, created_at)) AS visibility,
+    argMax(language, tuple(fetched_at, created_at)) AS language,
+    argMax(language_code, tuple(fetched_at, created_at)) AS language_code,
+    toUInt8(argMax(active, tuple(fetched_at, created_at))) AS active
+FROM {ch_table_name(CLICKHOUSE_RAW_TABLE)}
+WHERE instance_host = {ch_string(instance_host())}
+  AND account_acct = {ch_string(ACCT)}
+GROUP BY status_id
+FORMAT JSONEachRow
+"""
+    )
+    if not raw_rows:
+        print("No existing Mastodon raw rows in ClickHouse. Starting with an empty crawler state.")
+        return {"statuses": {}}
+
+    board_rows = clickhouse.select_json_each_row(
+        f"""
+SELECT
+    toString(uuid) AS uuid,
+    toUInt8(ifNull(argMax(active, version_at), 0)) AS active,
+    toString(max(version_at)) AS board_translated_at
+FROM {ch_table_name(CLICKHOUSE_BOARD_TABLE)}
+WHERE language_code = 'ko'
+GROUP BY uuid
+FORMAT JSONEachRow
+"""
+    )
+    board_by_uuid = {str(row.get("uuid") or ""): row for row in board_rows}
+    statuses: dict[str, Any] = {}
+    for row in raw_rows:
+        status_id = str(row.get("status_id") or "")
+        if not status_id:
+            continue
+        status_state: dict[str, Any] = {
+            "uuid": row.get("uuid"),
+            "payload_hash": row.get("payload_hash"),
+            "status_created_at": row.get("status_created_at"),
+            "status_uri": row.get("status_uri"),
+            "status_url": row.get("status_url"),
+            "visibility": row.get("visibility"),
+            "language": row.get("language"),
+            "language_code": row.get("language_code"),
+            "last_seen_at": utc_now_iso(),
+            "active": int(row.get("active") or 0),
+        }
+        board_row = board_by_uuid.get(str(row.get("uuid") or ""))
+        if board_row:
+            board_active = int(board_row.get("active") or 0)
+            status_state.update(
+                {
+                    "board_payload_hash": row.get("payload_hash"),
+                    "board_translation_status": "published" if board_active else "tombstone_published",
+                    "board_translated_at": board_row.get("board_translated_at") or utc_now_iso(),
+                    "board_translation_attempted_at": board_row.get("board_translated_at") or utc_now_iso(),
+                    "board_translation_attempts": 1,
+                    "board_translation_error": "",
+                }
+            )
+        statuses[status_id] = status_state
+
+    state = {"statuses": statuses}
+    print(f"Rebuilt crawler state from ClickHouse raw/board tables. known_count={len(statuses)}")
+    return state
+
+
+def load_state(clickhouse: ClickHouseClient) -> dict[str, Any]:
+    return load_state_snapshot(clickhouse) or load_state_from_clickhouse_tables(clickhouse)
 
 
 def lookup_account() -> dict[str, Any]:
@@ -1000,6 +1166,20 @@ def log_payload(stage: str, created_log: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def state_snapshot_payload(state: dict[str, Any]) -> dict[str, Any]:
+    return log_payload(
+        STATE_SNAPSHOT_STAGE,
+        {
+            "instance": INSTANCE,
+            "instance_host": instance_host(),
+            "acct": ACCT,
+            "known_count": len(state.get("statuses") or {}),
+            "state_format": "crawler_state_v1",
+            "state_json": canonical_json(state),
+        },
+    )
+
+
 def make_producer() -> Producer:
     validate_kafka_brokers()
 
@@ -1077,11 +1257,12 @@ def main() -> None:
     if SYNC_MODE not in {"incremental", "backfill"}:
         raise ValueError("SYNC_MODE must be incremental or backfill")
 
+    clickhouse = ClickHouseClient()
     ai = AIClient()
     if TRANSLATE_ENABLED and not ai.enabled():
         raise RuntimeError("TRANSLATE_ENABLED is true, but no AI provider key is configured")
 
-    state = load_state()
+    state = load_state(clickhouse)
     known_statuses: dict[str, Any] = state.get("statuses", {})
     known_ids = set(known_statuses.keys())
 
@@ -1123,7 +1304,7 @@ def main() -> None:
         seen_ids.add(status_id)
         previous = known_statuses.get(status_id) or {}
         previous_hash = previous.get("payload_hash")
-        raw_changed = FORCE_REPUBLISH or previous_hash != payload["payload_hash"]
+        raw_changed = FORCE_REPUBLISH or str(previous_hash or "") != str(payload["payload_hash"])
         board_state = carried_board_state(previous)
         if raw_changed:
             events_to_publish.append((RAW_EVENT_TYPE, payload))
@@ -1178,35 +1359,8 @@ def main() -> None:
             }
 
     done_at = now_kst_string()
-    events_to_publish.append(
-        (
-            LOG_EVENT_TYPE,
-            log_payload(
-                "run_done",
-                {
-                    "sync_mode": SYNC_MODE,
-                    "fetched_count": len(statuses),
-                    "published_raw": published_raw,
-                    "attempted_board": attempted_board,
-                    "published_board": published_board,
-                    "translation_errors": translation_errors[:50],
-                    "prompt_language": "en",
-                    "target_language": "ko",
-                    "hyperlink_policy": "remove_urls_markdown_links_a_tags_and_href",
-                    "retry_missing_board_translations": RETRY_MISSING_BOARD_TRANSLATIONS,
-                    "done_at": done_at,
-                },
-            ),
-        )
-    )
-
-    if events_to_publish:
-        producer = make_producer()
-        produce_events(producer, events_to_publish)
-    else:
-        print("No new or changed statuses to publish.")
-
     latest_payload = max(normalized_payloads, key=lambda item: item.get("status_created_at") or "", default=None)
+    final_event_count = len(events_to_publish) + 2
     state.update(
         {
             "source": {
@@ -1225,15 +1379,45 @@ def main() -> None:
             "published_raw_count": published_raw,
             "attempted_board_count": attempted_board,
             "published_board_count": published_board,
-            "published_event_count": len(events_to_publish),
+            "published_event_count": final_event_count,
             "known_count": len(known_statuses),
             "latest_status_id": latest_payload.get("status_id") if latest_payload else state.get("latest_status_id"),
             "latest_status_created_at": latest_payload.get("status_created_at") if latest_payload else state.get("latest_status_created_at"),
             "statuses": known_statuses,
         }
     )
-    save_state(state)
-    print(f"State saved to {STATE_FILE}. Published {len(events_to_publish)} Kafka events.")
+    events_to_publish.append((LOG_EVENT_TYPE, state_snapshot_payload(state)))
+    events_to_publish.append(
+        (
+            LOG_EVENT_TYPE,
+            log_payload(
+                "run_done",
+                {
+                    "sync_mode": SYNC_MODE,
+                    "fetched_count": len(statuses),
+                    "published_raw": published_raw,
+                    "attempted_board": attempted_board,
+                    "published_board": published_board,
+                    "translation_errors": translation_errors[:50],
+                    "prompt_language": "en",
+                    "target_language": "ko",
+                    "hyperlink_policy": "remove_urls_markdown_links_a_tags_and_href",
+                    "retry_missing_board_translations": RETRY_MISSING_BOARD_TRANSLATIONS,
+                    "done_at": done_at,
+                    "state_backend": "clickhouse_log",
+                    "state_snapshot_stage": STATE_SNAPSHOT_STAGE,
+                },
+            ),
+        )
+    )
+
+    if events_to_publish:
+        producer = make_producer()
+        produce_events(producer, events_to_publish)
+    else:
+        print("No new or changed statuses to publish.")
+
+    print(f"State snapshot published through ClickHouse log pipeline. Published {len(events_to_publish)} Kafka events.")
 
 
 if __name__ == "__main__":
