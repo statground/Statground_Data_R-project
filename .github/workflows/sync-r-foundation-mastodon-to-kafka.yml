@@ -108,6 +108,7 @@ jobs:
           CLICKHOUSE_LOG_TABLE: "webr_mastodon.log"
           CLICKHOUSE_RAW_TABLE: "webr_mastodon.raw"
           CLICKHOUSE_BOARD_TABLE: "webr_mastodon.board"
+          WEBR_BOT_UUID: "2aeeb31a-5cb1-47d8-bbb0-cb2d271c32ce"
 
           TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
           MASTODON_TRANSLATION_MODEL: ${{ vars.MASTODON_TRANSLATION_MODEL || 'openai/gpt-oss-20b' }}

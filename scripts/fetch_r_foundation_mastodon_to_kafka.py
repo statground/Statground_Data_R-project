@@ -55,6 +55,11 @@ CLICKHOUSE_LOG_TABLE = os.getenv("CLICKHOUSE_LOG_TABLE", "webr_mastodon.log").st
 CLICKHOUSE_RAW_TABLE = os.getenv("CLICKHOUSE_RAW_TABLE", "webr_mastodon.raw").strip()
 CLICKHOUSE_BOARD_TABLE = os.getenv("CLICKHOUSE_BOARD_TABLE", "webr_mastodon.board").strip()
 CLICKHOUSE_TIMEOUT_SECONDS = int(os.getenv("CLICKHOUSE_TIMEOUT", "30"))
+WEBR_BOT_UUID = first_non_empty(
+    os.getenv("WEBR_BOT_UUID"),
+    os.getenv("RPROJECT_BOT_UUID"),
+    "2aeeb31a-5cb1-47d8-bbb0-cb2d271c32ce",
+)
 
 SYNC_MODE = os.getenv("SYNC_MODE", "incremental").strip().lower()
 FORCE_REPUBLISH = os.getenv("FORCE_REPUBLISH", "false").lower() in {"1", "true", "yes", "y"}
@@ -1075,6 +1080,7 @@ def board_payload(
         "created_log": {
             "type": reason,
             "source": "Statground_Data_R-project_Mastodon",
+            "uuid_user": WEBR_BOT_UUID,
             "raw_status_id": raw_payload.get("status_id"),
             "raw_status_url": raw_payload.get("status_url"),
             "raw_created_at": raw_payload.get("status_created_at"),
@@ -1090,6 +1096,7 @@ def board_payload(
         payload["updated_log"] = {
             "type": "mastodon_board_translation_update",
             "source": "Statground_Data_R-project_Mastodon",
+            "uuid_user": WEBR_BOT_UUID,
             "updated_at": updated_at,
         }
     return payload
@@ -1161,7 +1168,7 @@ def log_payload(stage: str, created_log: dict[str, Any]) -> dict[str, Any]:
     return {
         "uuid": uuid7(),
         "created_at": now,
-        "created_log": {"type": "mastodon_pipeline", "stage": stage, **created_log},
+        "created_log": {"type": "mastodon_pipeline", "stage": stage, "uuid_user": WEBR_BOT_UUID, **created_log},
         "language_code": "en",
     }
 
@@ -1215,7 +1222,7 @@ def make_event(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         "event_uuid": uuid7(),
         "source": "actions",
         "host": os.getenv("RUNNER_NAME") or socket.gethostname() or "actions",
-        "uuid_user": "",
+        "uuid_user": WEBR_BOT_UUID,
         "ip": "",
         "url": payload.get("status_url") or f"{INSTANCE}/@{ACCT}",
         "event_type": event_type,
