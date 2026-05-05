@@ -1,2 +1,0 @@
-"""R YouTube intelligence collectors."""
-

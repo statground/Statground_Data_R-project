@@ -1,0 +1,56 @@
+name: R Package Ecosystem
+
+on:
+  schedule:
+    - cron: "3 * * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "all or comma-separated jobs"
+        required: false
+        default: "all"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r-package-ecosystem
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate Kafka settings
+        env:
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+        run: |
+          test -n "$KAFKA_BROKERS" || { echo "Kafka broker secret is required"; exit 1; }
+          test -n "$KAFKA_USERNAME" || { echo "Kafka username secret is required"; exit 1; }
+          test -n "$KAFKA_PASSWORD" || { echo "Kafka password secret is required"; exit 1; }
+      - name: Collect R package ecosystem
+        env:
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
+          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
+          RPKG_KAFKA_TOPIC: ${{ vars.RPKG_KAFKA_TOPIC || 'rpkg.events' }}
+          RPKG_JOB: ${{ github.event.inputs.job || vars.RPKG_JOB || 'all' }}
+          RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}
+          RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '100' }}
+          RPKG_REVERSE_DEPENDENCY_LIMIT: ${{ vars.RPKG_REVERSE_DEPENDENCY_LIMIT || '0' }}
+          RPKG_CRAN_CHECK_LIMIT: ${{ vars.RPKG_CRAN_CHECK_LIMIT || '0' }}
+          RPKG_CRAN_ARCHIVE_LIMIT: ${{ vars.RPKG_CRAN_ARCHIVE_LIMIT || '0' }}
+          RPKG_PACKAGE_NEWS_LIMIT: ${{ vars.RPKG_PACKAGE_NEWS_LIMIT || '50' }}
+          RPKG_R_WEBSITE_LIMIT: ${{ vars.RPKG_R_WEBSITE_LIMIT || '0' }}
+          RPKG_RUNIVERSE_UNIVERSES: ${{ vars.RPKG_RUNIVERSE_UNIVERSES || 'r-universe,ropensci,tidyverse' }}
+        run: go run ./cmd/rproject-collector package --job "$RPKG_JOB"

@@ -1,0 +1,38 @@
+name: R Foundation Mastodon
+
+on:
+  schedule:
+    - cron: "48 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r-foundation-mastodon
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Collect R Foundation public Mastodon RSS
+        env:
+          KAFKA_TOPIC: webr.events
+          KAFKA_CLIENT_ID: statground-mastodon-rss-collector
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
+          PRODUCER_SOURCE: github_actions
+          PRODUCER_IP: "::"
+          MASTODON_INSTANCE: ${{ vars.MASTODON_INSTANCE || 'https://fosstodon.org' }}
+          MASTODON_ACCT: ${{ vars.MASTODON_ACCT || 'R_Foundation' }}
+          MASTODON_LIMIT: ${{ vars.MASTODON_LIMIT || '40' }}
+        run: go run ./cmd/rproject-collector mastodon

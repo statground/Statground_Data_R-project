@@ -1,4 +1,0 @@
-beautifulsoup4>=4.12,<5
-confluent-kafka>=2.8,<3
-requests>=2.32,<3
-youtube-transcript-api>=0.6,<2

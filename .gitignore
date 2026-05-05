@@ -6,4 +6,3 @@ __pycache__/
 venv/
 dist/
 build/
-data/mastodon/**/state.json
