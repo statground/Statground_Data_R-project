@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: "all, seeds, pages, search, or links"
+        description: "all, seeds, pages, search, links, videos, or backfill-metadata"
         required: false
         default: "all"
 
@@ -27,6 +27,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install yt-dlp metadata fallback
+        run: |
+          python3 -m pip install --user yt-dlp
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Validate ClickHouse settings
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -56,7 +60,13 @@ jobs:
           R_YOUTUBE_JOB: ${{ github.event.inputs.job || vars.R_YOUTUBE_JOB || 'all' }}
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '0' }}
           R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '30' }}
+          R_YOUTUBE_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_VIDEO_LIMIT || '30' }}
+          R_YOUTUBE_BACKFILL_LIMIT: ${{ vars.R_YOUTUBE_BACKFILL_LIMIT || '100' }}
           R_YOUTUBE_SEARCH_EVENT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_EVENT_LIMIT || '0' }}
           R_YOUTUBE_SEARCH_QUERY_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_QUERY_LIMIT || '40' }}
           R_YOUTUBE_SEARCH_RESULT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_RESULT_LIMIT || '80' }}
+          R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT || '10' }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY || secrets.GOOGLE_YOUTUBE_API_KEY }}
+          YOUTUBE_API_KEY_ALIAS: ${{ vars.YOUTUBE_API_KEY_ALIAS || 'default' }}
+          YOUTUBE_DL_BIN: yt-dlp
         run: go run ./cmd/rproject-collector youtube --job "$R_YOUTUBE_JOB"

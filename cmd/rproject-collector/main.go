@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ const (
 	defaultYouTubeTopic = "r.youtube.events"
 	defaultWebRTopic    = "webr.events"
 	userAgent           = "StatgroundBot/1.0 (+https://www.statground.net; R ecosystem collector)"
+	youtubeBoilerplateDescription = "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
 )
 
 var (
@@ -49,6 +51,9 @@ var (
 	ytWatchRE      = regexp.MustCompile(`(?:/watch\?v=|watch\\u003fv=|watch\\\?v=)([A-Za-z0-9_-]{11})`)
 	ytChannelRE    = regexp.MustCompile(`/(channel/[A-Za-z0-9_-]+|@[A-Za-z0-9._-]+|c/[A-Za-z0-9._-]+|user/[A-Za-z0-9._-]+)`)
 	ytPlaylistRE   = regexp.MustCompile(`(?:/playlist\?list=|playlist\\u003flist=|playlist\\\?list=)([A-Za-z0-9_-]+)`)
+	githubRepoRE   = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([^/\s?#]+)/([^/\s?#]+)`)
+	cranPackageLinkRE = regexp.MustCompile(`(?i)(?:/web/packages/|\.\./packages/)([^/\s?#"']+)/?`)
+	isoDurationRE  = regexp.MustCompile(`^P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$`)
 	depVersionRE   = regexp.MustCompile(`\s*\(.*?\)\s*`)
 	boardURLRE      = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>()"']+`)
 	boardMdLinkRE   = regexp.MustCompile(`\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)`)
@@ -56,6 +61,7 @@ var (
 	boardAnyTagRE   = regexp.MustCompile(`(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>`)
 	boardAnchorRE   = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
 	boardAnchorOnlyRE = regexp.MustCompile(`(?is)^<a\b[^>]*>(.*?)</a>$`)
+	sitemapLocRE    = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
 	statusOrder     = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
 	newsCandidates  = []string{"news/news.html", "news.html"}
 	defaultWebsites = []string{
@@ -147,6 +153,8 @@ type cranRecord map[string]string
 
 type rssFeed struct {
 	Channel struct {
+		Title string `xml:"title"`
+		Link  string `xml:"link"`
 		Items []rssItem `xml:"item"`
 	} `xml:"channel"`
 }
@@ -157,6 +165,27 @@ type rssItem struct {
 	GUID        string `xml:"guid"`
 	PubDate     string `xml:"pubDate"`
 	Description string `xml:"description"`
+}
+
+type atomFeed struct {
+	Title   string      `xml:"title"`
+	Links   []atomLink  `xml:"link"`
+	Entries []atomEntry `xml:"entry"`
+}
+
+type atomEntry struct {
+	Title     string     `xml:"title"`
+	Links     []atomLink `xml:"link"`
+	ID        string     `xml:"id"`
+	Updated   string     `xml:"updated"`
+	Published string     `xml:"published"`
+	Summary   string     `xml:"summary"`
+	Content   string     `xml:"content"`
+}
+
+type atomLink struct {
+	Href string `xml:"href,attr"`
+	Rel  string `xml:"rel,attr"`
 }
 
 func main() {
@@ -190,8 +219,16 @@ func runPackage(ctx context.Context, args []string) error {
 	reverseLimit := fs.Int("reverse-limit", envInt("RPKG_REVERSE_DEPENDENCY_LIMIT", 0), "reverse dependency edge limit")
 	checkLimit := fs.Int("check-limit", envInt("RPKG_CRAN_CHECK_LIMIT", 0), "CRAN check row limit")
 	archiveLimit := fs.Int("archive-limit", envInt("RPKG_CRAN_ARCHIVE_LIMIT", 0), "CRAN archive row limit")
+	taskViewLimit := fs.Int("task-view-limit", envInt("RPKG_CRAN_TASK_VIEW_LIMIT", 0), "CRAN Task View page limit")
 	newsLimit := fs.Int("package-news-limit", envInt("RPKG_PACKAGE_NEWS_LIMIT", 50), "package NEWS page limit")
 	websiteLimit := fs.Int("website-limit", envInt("RPKG_R_WEBSITE_LIMIT", 0), "website seed limit")
+	websiteCandidateLimit := fs.Int("website-candidate-limit", envInt("RPKG_R_WEBSITE_CANDIDATE_LIMIT", 120), "CRAN DESCRIPTION website candidate limit")
+	websiteFeedLimit := fs.Int("website-feed-limit", envInt("RPKG_R_WEBSITE_FEED_LIMIT", 40), "website feed item limit")
+	websiteLinkLimit := fs.Int("website-link-limit", envInt("RPKG_R_WEBSITE_LINK_LIMIT", 120), "website link edge limit")
+	websiteSitemapLimit := fs.Int("website-sitemap-limit", envInt("RPKG_R_WEBSITE_SITEMAP_LIMIT", 40), "website sitemap URL limit")
+	githubLimit := fs.Int("github-limit", envInt("RPKG_GITHUB_LIMIT", 60), "GitHub repository metadata limit")
+	osvLimit := fs.Int("osv-limit", envInt("RPKG_OSV_LIMIT", 100), "OSV package query limit")
+	bibliometricLimit := fs.Int("bibliometric-limit", envInt("RPKG_BIBLIOMETRIC_LIMIT", 40), "OpenAlex bibliometric query limit")
 	fs.Parse(args)
 
 	pub := newPublisher(*topic, "statground-rpkg-go-collector", *dryRun)
@@ -205,11 +242,16 @@ func runPackage(ctx context.Context, args []string) error {
 		"cran-reverse-dependencies",
 		"cran-checks",
 		"cran-archive",
+		"cran-task-views",
 		"r-core-news",
 		"package-news",
 		"bioconductor",
 		"runiverse",
+		"cran-website-discovery",
 		"r-websites",
+		"github-repos",
+		"osv-security",
+		"bibliometric-mentions",
 	})
 	recordsCache := []cranRecord(nil)
 	getRecords := func() ([]cranRecord, error) {
@@ -232,8 +274,16 @@ func runPackage(ctx context.Context, args []string) error {
 			reverseLimit:   *reverseLimit,
 			checkLimit:     *checkLimit,
 			archiveLimit:   *archiveLimit,
+			taskViewLimit:  *taskViewLimit,
 			newsLimit:      *newsLimit,
 			websiteLimit:   *websiteLimit,
+			websiteCandidateLimit: *websiteCandidateLimit,
+			websiteFeedLimit: *websiteFeedLimit,
+			websiteLinkLimit: *websiteLinkLimit,
+			websiteSitemapLimit: *websiteSitemapLimit,
+			githubLimit:    *githubLimit,
+			osvLimit:       *osvLimit,
+			bibliometricLimit: *bibliometricLimit,
 		})
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
@@ -254,8 +304,16 @@ type packageJobLimits struct {
 	reverseLimit   int
 	checkLimit     int
 	archiveLimit   int
+	taskViewLimit  int
 	newsLimit      int
 	websiteLimit   int
+	websiteCandidateLimit int
+	websiteFeedLimit int
+	websiteLinkLimit int
+	websiteSitemapLimit int
+	githubLimit    int
+	osvLimit       int
+	bibliometricLimit int
 }
 
 func collectPackageJob(job string, records func() ([]cranRecord, error), limits packageJobLimits) ([]genericEvent, error) {
@@ -278,6 +336,8 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		return collectCRANChecks(limits.checkLimit)
 	case "cran-archive":
 		return collectCRANArchive(limits.archiveLimit)
+	case "cran-task-views":
+		return collectCRANTaskViews(limits.taskViewLimit)
 	case "r-core-news":
 		return collectRCoreNEWS()
 	case "package-news":
@@ -290,8 +350,32 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		return collectBioconductor()
 	case "runiverse":
 		return collectRUniverse()
+	case "cran-website-discovery":
+		rows, err := records()
+		if err != nil {
+			return nil, err
+		}
+		return collectCRANWebsiteDiscovery(rows, limits.websiteCandidateLimit), nil
 	case "r-websites":
-		return collectRWebsites(limits.websiteLimit)
+		return collectRWebsites(limits.websiteLimit, limits.websiteFeedLimit, limits.websiteLinkLimit, limits.websiteSitemapLimit)
+	case "github-repos":
+		rows, err := records()
+		if err != nil {
+			return nil, err
+		}
+		return collectGitHubRepositories(rows, limits.githubLimit)
+	case "osv-security":
+		rows, err := records()
+		if err != nil {
+			return nil, err
+		}
+		return collectOSVSecurity(rows, limits.osvLimit)
+	case "bibliometric-mentions":
+		rows, err := records()
+		if err != nil {
+			return nil, err
+		}
+		return collectBibliometricMentions(rows, limits.bibliometricLimit)
 	default:
 		return nil, fmt.Errorf("unknown package job %q", job)
 	}
@@ -299,21 +383,23 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 
 func runYouTube(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("youtube", flag.ExitOnError)
-	job := fs.String("job", envString("R_YOUTUBE_JOB", "all"), "all, seeds, pages, search, links")
+	job := fs.String("job", envString("R_YOUTUBE_JOB", "all"), "all, seeds, pages, search, links, videos, backfill-metadata")
 	topic := fs.String("topic", envString("R_YOUTUBE_KAFKA_TOPIC", defaultYouTubeTopic), "Kafka topic")
 	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "print events instead of Kafka")
 	seedLimit := fs.Int("seed-limit", envInt("R_YOUTUBE_SEED_LIMIT", 0), "seed limit")
 	pageLimit := fs.Int("page-limit", envInt("R_YOUTUBE_PAGE_LIMIT", 30), "HTML page fetch limit")
+	videoLimit := fs.Int("video-limit", envInt("R_YOUTUBE_VIDEO_LIMIT", 30), "YouTube video metadata enrichment limit")
+	backfillLimit := fs.Int("backfill-limit", envInt("R_YOUTUBE_BACKFILL_LIMIT", 30), "existing weak current video metadata backfill limit")
 	fs.Parse(args)
 
 	pub := newPublisher(*topic, "statground-ryoutube-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
 		return err
 	}
-	jobs := expandJobs(*job, []string{"seeds", "pages", "search", "links"})
+	jobs := expandJobs(*job, []string{"seeds", "pages", "search", "links", "videos", "backfill-metadata"})
 	total := 0
 	for _, currentJob := range jobs {
-		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit)
+		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit)
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
@@ -580,6 +666,49 @@ func collectCRANArchive(limit int) ([]genericEvent, error) {
 	return events, nil
 }
 
+func collectCRANTaskViews(limit int) ([]genericEvent, error) {
+	indexURL := envString("RPKG_CRAN_TASK_VIEWS_URL", "https://cran.r-project.org/web/views/")
+	body, err := fetchBytes(indexURL)
+	if err != nil {
+		return nil, err
+	}
+	viewURLs := cranTaskViewURLs(indexURL, string(body), limit)
+	events := make([]genericEvent, 0)
+	for _, viewURL := range viewURLs {
+		viewBody, err := fetchBytes(viewURL)
+		if err != nil {
+			events = append(events, collectionFailureEvent("rpkg.cran.task_view.failure.v1", "cran_task_view_html", viewURL, "CRAN Task Views", "", err))
+			continue
+		}
+		htmlText := string(viewBody)
+		viewName := taskViewName(viewURL, htmlText)
+		packages := taskViewPackages(htmlText)
+		payload := map[string]any{
+			"task_view":         viewName,
+			"title":             firstNonEmpty(firstTitle(htmlText), viewName),
+			"source_url":        viewURL,
+			"package_count":     intString(len(packages)),
+			"packages":          packages,
+			"packages_json":     mustJSON(packages),
+			"headings":          textMatches(headingRE, htmlText, 20),
+			"source_method":     "cran_task_view_html",
+			"collection_status": "collected",
+		}
+		events = append(events, newGenericEvent("rpkg.cran.task_view.snapshot.v1", "cran_task_view_html", viewURL, "CRAN Task Views", "", "", "", payload))
+		for _, packageName := range packages {
+			edgePayload := map[string]any{
+				"task_view":         viewName,
+				"package":           packageName,
+				"source_url":        viewURL,
+				"source_method":     "cran_task_view_package_link_parser",
+				"collection_status": "collected",
+			}
+			events = append(events, newGenericEvent("rpkg.cran.task_view.package_edge_snapshot.v1", "cran_task_view_package_link_parser", viewURL, "CRAN Task Views", packageName, "", "", edgePayload))
+		}
+	}
+	return events, nil
+}
+
 func collectRCoreNEWS() ([]genericEvent, error) {
 	sourceURL := envString("RPKG_R_CORE_NEWS_URL", "https://cran.r-project.org/doc/manuals/r-release/NEWS.html")
 	body, err := fetchBytes(sourceURL)
@@ -699,19 +828,56 @@ func collectRUniverse() ([]genericEvent, error) {
 	return events, nil
 }
 
-func collectRWebsites(limit int) ([]genericEvent, error) {
+func collectCRANWebsiteDiscovery(records []cranRecord, limit int) []genericEvent {
+	events := make([]genericEvent, 0)
+	seen := map[string]bool{}
+	for _, record := range records {
+		packageName := record["Package"]
+		if packageName == "" {
+			continue
+		}
+		for _, candidateURL := range descriptionURLs(record) {
+			if limit > 0 && len(events) >= limit {
+				return events
+			}
+			key := packageName + "|" + candidateURL
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			parsed := parseYouTubeRef(candidateURL)
+			payload := map[string]any{
+				"package":           packageName,
+				"version":           record["Version"],
+				"candidate_url":     candidateURL,
+				"url_hash":          shaHex(candidateURL),
+				"host":              hostFromURL(candidateURL),
+				"source_fields":     "URL/BugReports",
+				"parsed_ref_type":   parsed["parsed_ref_type"],
+				"is_youtube":        boolOrString(strings.Contains(strings.ToLower(hostFromURL(candidateURL)), "youtube.") || strings.Contains(strings.ToLower(hostFromURL(candidateURL)), "youtu.be")),
+				"source_method":     "cran_description_url_bugreports_discovery",
+				"collection_status": "collected",
+			}
+			events = append(events, newGenericEvent("rpkg.r_website.candidate_snapshot.v1", "cran_description_url_bugreports_discovery", candidateURL, "R-Web", packageName, record["Version"], "", payload))
+		}
+	}
+	return events
+}
+
+func collectRWebsites(limit, feedLimit, linkLimit, sitemapLimit int) ([]genericEvent, error) {
 	urls := configuredURLs("RPKG_R_WEBSITE_URLS", defaultWebsites)
 	mentions := splitCSV(envString("RPKG_WEBSITE_MENTION_PACKAGES", "ggplot2,dplyr,shiny,tidymodels,quarto,data.table,tidyverse"))
 	events := make([]genericEvent, 0)
+	feedCount := 0
+	linkCount := 0
+	sitemapCount := 0
 	for idx, targetURL := range urls {
 		if limit > 0 && idx >= limit {
 			break
 		}
 		payload := fetchWebsitePayload(targetURL)
 		events = append(events, newGenericEvent("rpkg.r_website.fetch_snapshot.v1", "r_website_seed_fetcher", targetURL, "R-Web", "", "", "", payload))
-		text := strings.ToLower(stringAny(payload["page_text"]))
-		for _, packageName := range mentions {
-			if packageName != "" && strings.Contains(text, strings.ToLower(packageName)) {
+		for _, packageName := range packageMentionsInText(stringAny(payload["page_text"]), mentions) {
 				events = append(events, newGenericEvent("rpkg.r_website.package_mention_snapshot.v1", "r_website_seed_fetcher", targetURL, "R-Web", packageName, "", "", map[string]any{
 					"source_url":        targetURL,
 					"package":           packageName,
@@ -723,16 +889,295 @@ func collectRWebsites(limit int) ([]genericEvent, error) {
 					"source_method":     "html_text_scan_no_api",
 					"collection_status": "collected",
 				}))
+		}
+		for _, linkURL := range anyStringSlice(payload["link_urls"]) {
+			if linkLimit > 0 && linkCount >= linkLimit {
+				break
 			}
+			linkPayload := map[string]any{
+				"source_url":        targetURL,
+				"target_url":        linkURL,
+				"target_host":       hostFromURL(linkURL),
+				"url_hash":          shaHex(targetURL + ">" + linkURL),
+				"source_method":     "r_website_html_link_scan",
+				"collection_status": "collected",
+			}
+			events = append(events, newGenericEvent("rpkg.r_website.link_edge_snapshot.v1", "r_website_html_link_scan", linkURL, "R-Web", "", "", "", linkPayload))
+			linkCount++
+		}
+		for _, feedURL := range anyStringSlice(payload["feed_urls"]) {
+			if feedLimit > 0 && feedCount >= feedLimit {
+				break
+			}
+			events = append(events, newGenericEvent("rpkg.r_website.feed.discovered.v1", "r_website_feed_discovery", feedURL, "R-Web", "", "", "", map[string]any{
+				"source_url":        targetURL,
+				"feed_url":          feedURL,
+				"feed_host":         hostFromURL(feedURL),
+				"source_method":     "html_feed_link_discovery",
+				"collection_status": "collected",
+			}))
+			feedEvents, consumed := collectRWebsiteFeedItems(feedURL, mentions, maxInt(1, envInt("RPKG_R_WEBSITE_FEED_ITEMS_PER_FEED", 10)), maxInt(0, feedLimit-feedCount))
+			events = append(events, feedEvents...)
+			feedCount += consumed
+		}
+		if sitemapLimit <= 0 || sitemapCount < sitemapLimit {
+			sitemapEvents, consumed := collectRWebsiteSitemap(targetURL, maxInt(0, sitemapLimit-sitemapCount))
+			events = append(events, sitemapEvents...)
+			sitemapCount += consumed
 		}
 	}
 	return events, nil
 }
 
-func collectYouTubeJob(job string, seedLimit, pageLimit int) ([]genericEvent, error) {
-	seeds, err := loadYouTubeSeedsFromClickHouse(seedLimit)
+func collectRWebsiteFeedItems(feedURL string, mentionPackages []string, perFeedLimit, remainingLimit int) ([]genericEvent, int) {
+	if remainingLimit == 0 {
+		remainingLimit = perFeedLimit
+	}
+	body, err := fetchBytes(feedURL)
 	if err != nil {
-		return nil, err
+		return []genericEvent{collectionFailureEvent("rpkg.r_website.feed_item.failure.v1", "r_website_feed_fetch", feedURL, "R-Web", "", err)}, 0
+	}
+	items := parseFeedItems(feedURL, body)
+	if perFeedLimit > 0 && len(items) > perFeedLimit {
+		items = items[:perFeedLimit]
+	}
+	if remainingLimit > 0 && len(items) > remainingLimit {
+		items = items[:remainingLimit]
+	}
+	events := make([]genericEvent, 0, len(items)*2)
+	for _, item := range items {
+		itemURL := firstNonEmpty(item["item_url"], feedURL)
+		observed := item["published_at"]
+		payload := map[string]any{
+			"feed_url":          feedURL,
+			"feed_host":         hostFromURL(feedURL),
+			"item_id":           item["item_id"],
+			"item_title":        item["item_title"],
+			"item_url":          itemURL,
+			"published_at":      observed,
+			"summary_text":      item["summary_text"],
+			"summary_html":      item["summary_html"],
+			"source_method":     item["source_method"],
+			"collection_status": "collected",
+		}
+		events = append(events, newGenericEvent("rpkg.r_website.feed_item_snapshot.v1", item["source_method"], itemURL, "R-Web", "", "", observed, payload))
+		mentionText := item["item_title"] + " " + item["summary_text"]
+		for _, packageName := range packageMentionsInText(mentionText, mentionPackages) {
+			events = append(events, newGenericEvent("rpkg.r_website.package_mention_snapshot.v1", "r_website_feed_item_scan", itemURL, "R-Web", packageName, "", observed, map[string]any{
+				"source_url":        itemURL,
+				"feed_url":          feedURL,
+				"package":           packageName,
+				"repository":        "CRAN",
+				"mention_context":   packageName,
+				"confidence":        0.55,
+				"detected_at":       utcNow(),
+				"source":            "r_website_feed_item_scan",
+				"source_method":     "feed_item_text_scan_no_api",
+				"collection_status": "collected",
+			}))
+		}
+	}
+	return events, len(items)
+}
+
+func collectRWebsiteSitemap(targetURL string, remainingLimit int) ([]genericEvent, int) {
+	sitemapURL := sitemapURLFor(targetURL)
+	if sitemapURL == "" {
+		return nil, 0
+	}
+	body, err := fetchBytes(sitemapURL)
+	if err != nil {
+		return nil, 0
+	}
+	urls := sitemapURLs(body)
+	if remainingLimit > 0 && len(urls) > remainingLimit {
+		urls = urls[:remainingLimit]
+	}
+	events := make([]genericEvent, 0, len(urls))
+	for _, pageURL := range urls {
+		payload := map[string]any{
+			"sitemap_url":       sitemapURL,
+			"page_url":          pageURL,
+			"page_host":         hostFromURL(pageURL),
+			"url_hash":          shaHex(pageURL),
+			"source_method":     "sitemap_xml_url_parser",
+			"collection_status": "collected",
+		}
+		events = append(events, newGenericEvent("rpkg.r_website.sitemap_url_snapshot.v1", "sitemap_xml_url_parser", pageURL, "R-Web", "", "", "", payload))
+	}
+	return events, len(urls)
+}
+
+type packageRepoRef struct {
+	packageName string
+	version     string
+	repoURL     string
+	owner       string
+	repo        string
+}
+
+func collectGitHubRepositories(records []cranRecord, limit int) ([]genericEvent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	token := firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GH_TOKEN"))
+	refs := githubRepoRefs(records, limit)
+	events := make([]genericEvent, 0, len(refs))
+	for _, ref := range refs {
+		apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s", url.PathEscape(ref.owner), url.PathEscape(ref.repo))
+		var decoded map[string]any
+		headers := map[string]string{
+			"Accept":               "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+		}
+		if token != "" {
+			headers["Authorization"] = "Bearer " + token
+		}
+		if err := fetchJSONWithHeaders(apiURL, headers, &decoded); err != nil {
+			events = append(events, collectionFailureEvent("rpkg.github.collection.failure.v1", "github_rest_repos", apiURL, "GitHub", ref.packageName, err))
+			continue
+		}
+		license := mapAny(decoded["license"])
+		payload := map[string]any{
+			"package":           ref.packageName,
+			"version":           ref.version,
+			"repository_url":    ref.repoURL,
+			"repo_host":         "github",
+			"repo_owner":        ref.owner,
+			"repo_name":         ref.repo,
+			"full_name":         stringAny(decoded["full_name"]),
+			"html_url":          stringAny(decoded["html_url"]),
+			"description":       stringAny(decoded["description"]),
+			"homepage":          stringAny(decoded["homepage"]),
+			"default_branch":    stringAny(decoded["default_branch"]),
+			"language":          stringAny(decoded["language"]),
+			"license_spdx":      stringAny(license["spdx_id"]),
+			"topics_json":       mustJSON(anySlice(decoded["topics"])),
+			"stargazers_count":  intString(decoded["stargazers_count"]),
+			"forks_count":       intString(decoded["forks_count"]),
+			"watchers_count":    intString(decoded["watchers_count"]),
+			"open_issues_count": intString(decoded["open_issues_count"]),
+			"subscribers_count": intString(decoded["subscribers_count"]),
+			"created_at":        stringAny(decoded["created_at"]),
+			"updated_at":        stringAny(decoded["updated_at"]),
+			"pushed_at":         stringAny(decoded["pushed_at"]),
+			"archived":          boolString(decoded["archived"]),
+			"disabled":          boolString(decoded["disabled"]),
+			"source_method":     "github_rest_repos",
+			"collection_status": "collected",
+		}
+		events = append(events, newGenericEvent("rpkg.github.repo_snapshot.v1", "github_rest_repos", apiURL, "GitHub", ref.packageName, ref.version, stringAny(decoded["updated_at"]), payload))
+	}
+	return events, nil
+}
+
+func collectOSVSecurity(records []cranRecord, limit int) ([]genericEvent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ecosystems := splitCSV(envString("RPKG_OSV_ECOSYSTEMS", "CRAN,Bioconductor"))
+	if len(ecosystems) == 0 {
+		ecosystems = []string{"CRAN"}
+	}
+	events := make([]genericEvent, 0, limit*len(ecosystems))
+	count := 0
+	for _, record := range records {
+		packageName := record["Package"]
+		if packageName == "" {
+			continue
+		}
+		if count >= limit {
+			break
+		}
+		count++
+		for _, ecosystem := range ecosystems {
+			requestPayload := map[string]any{"package": map[string]any{"name": packageName, "ecosystem": ecosystem}}
+			var decoded map[string]any
+			sourceURL := "https://api.osv.dev/v1/query"
+			if err := postJSON(sourceURL, requestPayload, &decoded); err != nil {
+				events = append(events, collectionFailureEvent("rpkg.security.osv.failure.v1", "osv_query", sourceURL, ecosystem, packageName, err))
+				continue
+			}
+			vulns := anySlice(decoded["vulns"])
+			vulnIDs := make([]string, 0, len(vulns))
+			for _, item := range vulns {
+				row := mapAny(item)
+				if id := stringAny(row["id"]); id != "" {
+					vulnIDs = append(vulnIDs, id)
+				}
+			}
+			payload := map[string]any{
+				"package":             packageName,
+				"version":             record["Version"],
+				"ecosystem":           ecosystem,
+				"vulnerability_count": intString(len(vulnIDs)),
+				"vuln_ids":            vulnIDs,
+				"vuln_ids_json":       mustJSON(vulnIDs),
+				"osv_response_json":   truncate(mustJSON(decoded), 50000),
+				"source_method":       "osv_query_api",
+				"collection_status":   "collected",
+			}
+			events = append(events, newGenericEvent("rpkg.security.osv_snapshot.v1", "osv_query", sourceURL, ecosystem, packageName, record["Version"], "", payload))
+		}
+	}
+	return events, nil
+}
+
+func collectBibliometricMentions(records []cranRecord, limit int) ([]genericEvent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	events := make([]genericEvent, 0, limit)
+	count := 0
+	for _, record := range records {
+		packageName := record["Package"]
+		if packageName == "" {
+			continue
+		}
+		if count >= limit {
+			break
+		}
+		query := fmt.Sprintf("\"R package %s\"", packageName)
+		sourceURL := "https://api.openalex.org/works?search=" + url.QueryEscape(query) + "&per-page=1"
+		var decoded map[string]any
+		if err := fetchJSON(sourceURL, &decoded); err != nil {
+			events = append(events, collectionFailureEvent("rpkg.bibliometric.openalex.failure.v1", "openalex_works_search", sourceURL, "OpenAlex", packageName, err))
+			count++
+			continue
+		}
+		meta := mapAny(decoded["meta"])
+		results := anySlice(decoded["results"])
+		top := map[string]any{}
+		if len(results) > 0 {
+			top = mapAny(results[0])
+		}
+		payload := map[string]any{
+			"package":              packageName,
+			"version":              record["Version"],
+			"query":                query,
+			"result_count":         intString(meta["count"]),
+			"top_work_id":          stringAny(top["id"]),
+			"top_work_title":       stringAny(top["title"]),
+			"top_work_year":        intString(top["publication_year"]),
+			"top_work_cited_by":    intString(top["cited_by_count"]),
+			"source_method":        "openalex_works_search",
+			"collection_status":    "collected",
+			"confidence":           "phrase_search",
+		}
+		events = append(events, newGenericEvent("rpkg.bibliometric.mention_snapshot.v1", "openalex_works_search", sourceURL, "OpenAlex", packageName, record["Version"], "", payload))
+		count++
+	}
+	return events, nil
+}
+
+func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLimit int) ([]genericEvent, error) {
+	var seeds []map[string]any
+	var err error
+	if job != "backfill-metadata" {
+		seeds, err = loadYouTubeSeedsFromClickHouse(seedLimit)
+		if err != nil {
+			return nil, err
+		}
 	}
 	switch job {
 	case "seeds":
@@ -743,6 +1188,10 @@ func collectYouTubeJob(job string, seedLimit, pageLimit int) ([]genericEvent, er
 		return youtubeSearchEvents(seeds, envInt("R_YOUTUBE_SEARCH_EVENT_LIMIT", 0)), nil
 	case "links":
 		return youtubeLinkEvents(pageLimit), nil
+	case "videos":
+		return youtubeVideoEvents(seeds, videoLimit), nil
+	case "backfill-metadata":
+		return youtubeMetadataBackfillEvents(backfillLimit)
 	default:
 		return nil, fmt.Errorf("unknown youtube job %q", job)
 	}
@@ -831,6 +1280,82 @@ FORMAT JSONEachRow`, queryLimit),
 	return firstNAnyMaps(rows, queryLimit), nil
 }
 
+func loadYouTubeMetadataBackfillRows(limit int) ([]map[string]any, error) {
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return nil, err
+	}
+	queryLimit := limit
+	if queryLimit <= 0 {
+		queryLimit = envInt("R_YOUTUBE_BACKFILL_QUERY_LIMIT", 100)
+	}
+	queryLimit = maxInt(1, queryLimit)
+	query := fmt.Sprintf(`SELECT
+    youtube_video_id,
+    source_tag,
+    uuid_article,
+    argMax(toString(uuid), collected_at) AS stable_uuid,
+    argMax(canonical_url, collected_at) AS canonical_url,
+    argMax(video_title, collected_at) AS video_title,
+    argMax(video_description, collected_at) AS video_description,
+    argMax(thumbnail_url, collected_at) AS thumbnail_url,
+    argMax(youtube_channel_id, collected_at) AS youtube_channel_id,
+    argMax(channel_title, collected_at) AS channel_title,
+    ifNull(toString(argMax(published_at, collected_at)), '') AS published_at,
+    toString(ifNull(argMax(duration_seconds, collected_at), 0)) AS duration_seconds,
+    toString(argMax(view_count, collected_at)) AS view_count,
+    toString(argMax(like_count, collected_at)) AS like_count,
+    toString(argMax(comment_count, collected_at)) AS comment_count,
+    toString(argMax(caption_available, collected_at)) AS caption_available,
+    argMax(default_audio_language, collected_at) AS default_audio_language,
+    argMax(default_language, collected_at) AS default_language,
+    argMax(tags_json, collected_at) AS tags_json,
+    argMax(source_method, collected_at) AS source_method,
+    argMax(source_category, collected_at) AS source_category,
+    argMax(source_confidence, collected_at) AS source_confidence,
+    argMax(language_code, collected_at) AS language_code,
+    argMax(payload_json, collected_at) AS payload_json,
+    '' AS payload_hash,
+    max(collected_at) AS last_collected_at
+FROM
+(
+    SELECT
+        youtube_video_id,
+        source_tag,
+        ifNull(toString(uuid_article), '') AS uuid_article,
+        uuid,
+        canonical_url,
+        video_title,
+        video_description,
+        thumbnail_url,
+        youtube_channel_id,
+        channel_title,
+        published_at,
+        duration_seconds,
+        view_count,
+        like_count,
+        comment_count,
+        caption_available,
+        default_audio_language,
+        default_language,
+        tags_json,
+        source_method,
+        source_category,
+        source_confidence,
+        language_code,
+        payload_json,
+        collected_at
+    FROM Data_R_Youtube_Service.r_youtube_video_current FINAL
+    WHERE active = 1
+      AND notEmpty(youtube_video_id)
+)
+GROUP BY youtube_video_id, source_tag, uuid_article
+ORDER BY last_collected_at ASC, youtube_video_id
+LIMIT %d
+FORMAT JSONEachRow`, queryLimit)
+	return cfg.queryJSONEachRow(query)
+}
+
 func youtubePageEvents(seeds []map[string]any, limit int) []genericEvent {
 	events := make([]genericEvent, 0)
 	for _, seed := range seeds {
@@ -876,6 +1401,7 @@ func youtubePageEvents(seeds []map[string]any, limit int) []genericEvent {
 				"source_confidence":     firstNonEmpty(stringAny(seedPayload["source_confidence"]), "html_discovered"),
 				"collection_status":     "collected",
 			}
+			finalizeYouTubeVideoPayload(payload)
 			events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_public_html", targetURL, "R-YouTube", "", "", "", payload))
 		}
 	}
@@ -902,9 +1428,407 @@ func youtubeLinkEvents(limit int) []genericEvent {
 	return events
 }
 
+type youtubeVideoCandidate struct {
+	videoID string
+	url     string
+	seed    map[string]any
+}
+
+func youtubeVideoEvents(seeds []map[string]any, limit int) []genericEvent {
+	candidates := youtubeVideoCandidates(seeds, limit)
+	events := make([]genericEvent, 0, len(candidates)*2)
+	for _, candidate := range candidates {
+		payload, err := fetchYouTubeVideoSnapshotPayload(candidate.videoID, candidate.url, candidate.seed)
+		if err != nil {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_video_metadata_enrichment", candidate.url, "R-YouTube", "", err))
+			continue
+		}
+		events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", stringAny(payload["source_method"]), candidate.url, "R-YouTube", "", "", stringAny(payload["published_at"]), payload))
+		if strings.Contains(stringAny(payload["source_method"]), "youtube_data_api") {
+			events = append(events, youtubeQuotaUsageEvent(candidate.url))
+		}
+		events = append(events, youtubeMetadataPackageMentionEvents(candidate.videoID, payload)...)
+	}
+	return events
+}
+
+func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
+	rows, err := loadYouTubeMetadataBackfillRows(limit)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]genericEvent, 0, len(rows)*3)
+	for _, row := range rows {
+		videoID := stringAny(row["youtube_video_id"])
+		if videoID == "" {
+			continue
+		}
+		stableUUID := firstNonEmpty(stringAny(row["stable_uuid"]), stableYouTubeVideoUUID(videoID, stringAny(row["source_tag"]), stringAny(row["uuid_article"])))
+		currentPayload := currentYouTubeSnapshotPayload(row, stableUUID, "0")
+		deactivate := newGenericEvent("r.youtube.video.snapshot.v1", "youtube_metadata_refresh_backfill", stringAny(currentPayload["canonical_url"]), "R-YouTube", "", "", stringAny(currentPayload["published_at"]), currentPayload)
+		deactivate.CollectedAt = time.Now().UTC().Add(-2 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")
+		events = append(events, deactivate)
+
+		seed := map[string]any{
+			"title":             stringAny(row["video_title"]),
+			"url":               firstNonEmpty(stringAny(row["canonical_url"]), "https://www.youtube.com/watch?v="+videoID),
+			"category":          stringAny(row["source_category"]),
+			"source_type":       "video",
+			"source_tag":        firstNonEmpty(stringAny(row["source_tag"]), "r_project_ecosystem_youtube"),
+			"source_confidence": firstNonEmpty(stringAny(row["source_confidence"]), "metadata_refresh"),
+			"language_hint":     firstNonEmpty(stringAny(row["language_code"]), "und"),
+			"stable_uuid":       stableUUID,
+			"uuid_article":      stringAny(row["uuid_article"]),
+			"source_code":       "current_video_refresh",
+		}
+		payload, err := fetchYouTubeVideoSnapshotPayload(videoID, stringAny(seed["url"]), seed)
+		if err != nil {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_metadata_refresh_backfill", stringAny(seed["url"]), "R-YouTube", "", err))
+			continue
+		}
+		payload["stable_uuid"] = stableUUID
+		payload["uuid_article"] = stringAny(row["uuid_article"])
+		payload["active"] = "1"
+		payload["source_tag"] = firstNonEmpty(stringAny(row["source_tag"]), stringAny(payload["source_tag"]), "r_project_ecosystem_youtube")
+		payload["source_category"] = firstNonEmpty(stringAny(row["source_category"]), stringAny(payload["source_category"]), "metadata_refresh")
+		payload["source_confidence"] = "metadata_refreshed"
+		payload["previous_payload_hash"] = stringAny(row["payload_hash"])
+		payload["refresh_reason"] = "existing_video_metadata_may_change"
+		payload["source_method"] = firstNonEmpty(stringAny(payload["source_method"]), "youtube_public_metadata") + "+current_metadata_refresh"
+		event := newGenericEvent("r.youtube.video.snapshot.v1", stringAny(payload["source_method"]), stringAny(payload["canonical_url"]), "R-YouTube", "", "", stringAny(payload["published_at"]), payload)
+		events = append(events, event)
+		if strings.Contains(stringAny(payload["source_method"]), "youtube_data_api") {
+			events = append(events, youtubeQuotaUsageEvent(stringAny(payload["canonical_url"])))
+		}
+		events = append(events, youtubeMetadataPackageMentionEvents(videoID, payload)...)
+	}
+	return events, nil
+}
+
+func youtubeQuotaUsageEvent(sourceURL string) genericEvent {
+	return newGenericEvent("r.youtube.quota.usage.v1", "youtube_data_api_v3", sourceURL, "R-YouTube", "", "", "", map[string]any{
+		"quota_date":        time.Now().UTC().Format("2006-01-02"),
+		"api_key_alias":     envString("YOUTUBE_API_KEY_ALIAS", "default"),
+		"method_name":       "videos.list",
+		"quota_cost":        "1",
+		"request_count":     "1",
+		"quota_units_used":  "1",
+		"source_method":     "youtube_data_api_v3_videos_list",
+		"collection_status": "collected",
+	})
+}
+
+func youtubeVideoCandidates(seeds []map[string]any, limit int) []youtubeVideoCandidate {
+	seen := map[string]bool{}
+	out := make([]youtubeVideoCandidate, 0)
+	add := func(videoID, rawURL string, seed map[string]any) {
+		videoID = strings.TrimSpace(videoID)
+		if videoID == "" || seen[videoID] {
+			return
+		}
+		seen[videoID] = true
+		if rawURL == "" {
+			rawURL = "https://www.youtube.com/watch?v=" + videoID
+		}
+		out = append(out, youtubeVideoCandidate{videoID: videoID, url: rawURL, seed: seed})
+	}
+	for _, rawID := range splitCSV(envString("R_YOUTUBE_VIDEO_IDS", "")) {
+		add(rawID, "https://www.youtube.com/watch?v="+rawID, map[string]any{
+			"source_code":       "env_video_ids",
+			"source_confidence": "manual_env",
+			"category":          "manual",
+		})
+	}
+	for _, rawURL := range splitCSV(envString("R_YOUTUBE_VIDEO_URLS", "")) {
+		ref := parseYouTubeRef(rawURL)
+		add(ref["parsed_video_id"], rawURL, map[string]any{
+			"source_code":       "env_video_urls",
+			"source_confidence": "manual_env",
+			"category":          "manual",
+		})
+	}
+	for _, seed := range seeds {
+		payload := normalizeYouTubeSeed(seed)
+		videoID := stringAny(payload["parsed_video_id"])
+		add(videoID, stringAny(payload["url"]), payload)
+	}
+	if limit > 0 && len(out) > limit {
+		return out[:limit]
+	}
+	return out
+}
+
+func fetchYouTubeVideoSnapshotPayload(videoID, canonicalURL string, seed map[string]any) (map[string]any, error) {
+	videoID = firstNonEmpty(videoID, parseYouTubeRef(canonicalURL)["parsed_video_id"])
+	if videoID == "" {
+		return nil, errors.New("youtube video id is required")
+	}
+	canonicalURL = firstNonEmpty(canonicalURL, "https://www.youtube.com/watch?v="+videoID)
+	payload := baseYouTubeVideoPayload(videoID, canonicalURL, seed)
+	methods := make([]string, 0, 3)
+	errs := make([]string, 0, 3)
+	if apiKey := firstNonEmpty(os.Getenv("YOUTUBE_API_KEY"), os.Getenv("GOOGLE_YOUTUBE_API_KEY")); apiKey != "" && !envBool("R_YOUTUBE_DISABLE_DATA_API", false) {
+		if apiPayload, err := fetchYouTubeAPIVideoPayload(videoID, apiKey, seed); err == nil {
+			mergePayload(payload, apiPayload)
+			methods = append(methods, "youtube_data_api_v3_videos_list")
+		} else {
+			errs = append(errs, "youtube_data_api: "+err.Error())
+		}
+	}
+	if needsYouTubeMetadataFill(payload) && !envBool("R_YOUTUBE_DISABLE_YTDLP", false) {
+		if dlPayload, err := fetchYTDLPVideoPayload(canonicalURL, seed); err == nil {
+			mergePayload(payload, dlPayload)
+			methods = append(methods, "yt_dlp_public_metadata_no_api")
+		} else {
+			errs = append(errs, "yt_dlp: "+err.Error())
+		}
+	}
+	if needsYouTubeMetadataFill(payload) {
+		if embedPayload, err := fetchYouTubeOEmbedPayload(canonicalURL); err == nil {
+			mergePayload(payload, embedPayload)
+			methods = append(methods, "youtube_oembed_public_metadata")
+		} else {
+			errs = append(errs, "oembed: "+err.Error())
+		}
+	}
+	if needsYouTubeMetadataFill(payload) {
+		page := fetchWebsitePayload(canonicalURL)
+		if stringAny(page["collection_status"]) == "collected" {
+			mergePayload(payload, map[string]any{
+				"video_title":       stringAny(page["title"]),
+				"video_description": stringAny(page["description"]),
+				"thumbnail_url":     stringAny(page["og_image"]),
+			})
+			methods = append(methods, "youtube_public_html_meta")
+		} else if errCode := stringAny(page["error_code"]); errCode != "" {
+			errs = append(errs, "html: "+errCode)
+		}
+	}
+	if len(methods) == 0 {
+		payload["source_method"] = "youtube_metadata_unavailable"
+		payload["collection_status"] = "failed"
+		payload["metadata_errors_json"] = mustJSON(errs)
+		return payload, errors.New(strings.Join(errs, " | "))
+	}
+	finalizeYouTubeVideoPayload(payload)
+	payload["source_method"] = strings.Join(uniqueStrings(methods), "+")
+	payload["collection_status"] = "collected"
+	if len(errs) > 0 {
+		payload["metadata_errors_json"] = mustJSON(errs)
+	}
+	return payload, nil
+}
+
+func baseYouTubeVideoPayload(videoID, canonicalURL string, seed map[string]any) map[string]any {
+	seed = normalizeYouTubeSeed(seed)
+	sourceTag := firstNonEmpty(stringAny(seed["source_tag"]), "r_project_ecosystem_youtube")
+	uuidArticle := stringAny(seed["uuid_article"])
+	stableUUID := firstNonEmpty(stringAny(seed["stable_uuid"]), stableYouTubeVideoUUID(videoID, sourceTag, uuidArticle))
+	return map[string]any{
+		"youtube_video_id":       videoID,
+		"youtube_channel_id":     "",
+		"playlist_ids_json":      "[]",
+		"video_title":            stringAny(seed["title"]),
+		"video_description":      "",
+		"canonical_url":          firstNonEmpty(canonicalURL, "https://www.youtube.com/watch?v="+videoID),
+		"thumbnail_url":          "",
+		"published_at":           "",
+		"duration_seconds":       "0",
+		"view_count":             "0",
+		"like_count":             "0",
+		"comment_count":          "0",
+		"favorite_count":         "0",
+		"caption_available":      "0",
+		"default_audio_language": "",
+		"default_language":       "",
+		"language_code":          firstNonEmpty(stringAny(seed["language_hint"]), "und"),
+		"tags_json":              "[]",
+		"thumbnail_urls_json":    "{}",
+		"channel_title":          stringAny(seed["title"]),
+		"privacy_status":         "",
+		"source_method":          "youtube_video_metadata_enrichment",
+		"source_tag":             sourceTag,
+		"source_category":        firstNonEmpty(stringAny(seed["category"]), stringAny(seed["source_type"]), "video"),
+		"source_confidence":      firstNonEmpty(stringAny(seed["source_confidence"]), "seed_or_discovered"),
+		"seed_source_code":       stringAny(seed["source_code"]),
+		"stable_uuid":            stableUUID,
+		"uuid_article":           uuidArticle,
+		"active":                 "1",
+		"collection_status":      "pending",
+	}
+}
+
+func currentYouTubeSnapshotPayload(row map[string]any, stableUUID, active string) map[string]any {
+	videoID := stringAny(row["youtube_video_id"])
+	sourceTag := firstNonEmpty(stringAny(row["source_tag"]), "r_project_ecosystem_youtube")
+	uuidArticle := stringAny(row["uuid_article"])
+	stableUUID = firstNonEmpty(stableUUID, stableYouTubeVideoUUID(videoID, sourceTag, uuidArticle))
+	return map[string]any{
+		"youtube_video_id":       videoID,
+		"youtube_channel_id":     stringAny(row["youtube_channel_id"]),
+		"playlist_ids_json":      "[]",
+		"video_title":            stringAny(row["video_title"]),
+		"video_description":      stringAny(row["video_description"]),
+		"canonical_url":          firstNonEmpty(stringAny(row["canonical_url"]), "https://www.youtube.com/watch?v="+videoID),
+		"thumbnail_url":          stringAny(row["thumbnail_url"]),
+		"published_at":           stringAny(row["published_at"]),
+		"duration_seconds":       stringAny(row["duration_seconds"]),
+		"view_count":             stringAny(row["view_count"]),
+		"like_count":             stringAny(row["like_count"]),
+		"comment_count":          stringAny(row["comment_count"]),
+		"favorite_count":         "0",
+		"caption_available":      stringAny(row["caption_available"]),
+		"default_audio_language": stringAny(row["default_audio_language"]),
+		"default_language":       stringAny(row["default_language"]),
+		"language_code":          firstNonEmpty(stringAny(row["language_code"]), "und"),
+		"tags_json":              firstNonEmpty(stringAny(row["tags_json"]), "[]"),
+		"thumbnail_urls_json":    "{}",
+		"channel_title":          stringAny(row["channel_title"]),
+		"privacy_status":         "",
+		"source_method":          "youtube_metadata_refresh_previous_inactive",
+		"source_tag":             sourceTag,
+		"source_category":        stringAny(row["source_category"]),
+		"source_confidence":      firstNonEmpty(stringAny(row["source_confidence"]), "previous_current"),
+		"stable_uuid":            stableUUID,
+		"uuid_article":           uuidArticle,
+		"active":                 active,
+		"collection_status":      "superseded",
+		"previous_payload_hash":  stringAny(row["payload_hash"]),
+	}
+}
+
+func fetchYouTubeAPIVideoPayload(videoID, apiKey string, seed map[string]any) (map[string]any, error) {
+	endpoint := "https://www.googleapis.com/youtube/v3/videos"
+	q := url.Values{}
+	q.Set("part", "snippet,contentDetails,statistics,status")
+	q.Set("id", videoID)
+	q.Set("key", apiKey)
+	var decoded map[string]any
+	if err := fetchJSON(endpoint+"?"+q.Encode(), &decoded); err != nil {
+		return nil, err
+	}
+	items := anySlice(decoded["items"])
+	if len(items) == 0 {
+		return nil, errors.New("videos.list returned no items")
+	}
+	item := mapAny(items[0])
+	snippet := mapAny(item["snippet"])
+	content := mapAny(item["contentDetails"])
+	stats := mapAny(item["statistics"])
+	status := mapAny(item["status"])
+	thumbnails := mapAny(snippet["thumbnails"])
+	bestThumb, thumbJSON := bestYouTubeAPIThumbnail(thumbnails)
+	return map[string]any{
+		"youtube_video_id":       firstNonEmpty(stringAny(item["id"]), videoID),
+		"youtube_channel_id":     stringAny(snippet["channelId"]),
+		"video_title":            stringAny(snippet["title"]),
+		"video_description":      stringAny(snippet["description"]),
+		"canonical_url":          "https://www.youtube.com/watch?v=" + videoID,
+		"thumbnail_url":          bestThumb,
+		"published_at":           stringAny(snippet["publishedAt"]),
+		"duration_seconds":       intString(parseISO8601DurationSeconds(stringAny(content["duration"]))),
+		"view_count":             intString(stats["viewCount"]),
+		"like_count":             intString(stats["likeCount"]),
+		"comment_count":          intString(stats["commentCount"]),
+		"favorite_count":         intString(stats["favoriteCount"]),
+		"caption_available":      boolOrString(stringAny(content["caption"]) == "true"),
+		"default_audio_language": stringAny(content["defaultAudioLanguage"]),
+		"default_language":       stringAny(snippet["defaultLanguage"]),
+		"language_code":          firstNonEmpty(stringAny(snippet["defaultAudioLanguage"]), stringAny(snippet["defaultLanguage"]), stringAny(seed["language_hint"]), "und"),
+		"tags_json":              mustJSON(anySlice(snippet["tags"])),
+		"thumbnail_urls_json":    thumbJSON,
+		"channel_title":          stringAny(snippet["channelTitle"]),
+		"privacy_status":         stringAny(status["privacyStatus"]),
+	}
+}
+
+func fetchYTDLPVideoPayload(canonicalURL string, seed map[string]any) (map[string]any, error) {
+	bin, err := youtubeDLBinary()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxInt(10, envInt("YOUTUBE_DL_TIMEOUT", 90)))*time.Second)
+	defer cancel()
+	template := strings.Join([]string{
+		"%(id)j",
+		"%(title)j",
+		"%(description)j",
+		"%(channel_id)j",
+		"%(channel)j",
+		"%(timestamp)j",
+		"%(upload_date)j",
+		"%(duration)j",
+		"%(view_count)j",
+		"%(like_count)j",
+		"%(comment_count)j",
+		"%(language)j",
+		"%(tags)j",
+		"%(thumbnails)j",
+		"%(availability)j",
+		"%(webpage_url)j",
+	}, "\t")
+	args := []string{"--skip-download", "--no-playlist", "--no-warnings", "--ignore-no-formats-error", "--print", template, canonicalURL}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, truncate(string(out), 800))
+	}
+	decoded, err := parseYTDLPPrintedMetadata(string(out))
+	if err != nil {
+		return nil, err
+	}
+	videoID := firstNonEmpty(stringAny(decoded["id"]), parseYouTubeRef(canonicalURL)["parsed_video_id"])
+	thumbnails := anySlice(decoded["thumbnails"])
+	language := firstNonEmpty(stringAny(decoded["language"]), stringAny(seed["language_hint"]))
+	return map[string]any{
+		"youtube_video_id":       videoID,
+		"youtube_channel_id":     stringAny(decoded["channel_id"]),
+		"playlist_ids_json":      "[]",
+		"video_title":            stringAny(decoded["title"]),
+		"video_description":      stringAny(decoded["description"]),
+		"canonical_url":          firstNonEmpty(stringAny(decoded["webpage_url"]), canonicalURL),
+		"thumbnail_url":          firstNonEmpty(stringAny(decoded["thumbnail"]), bestYTDLPThumbnail(thumbnails)),
+		"published_at":           ytdlpPrintedPublishedAt(decoded),
+		"duration_seconds":       intString(decoded["duration"]),
+		"view_count":             intString(decoded["view_count"]),
+		"like_count":             intString(decoded["like_count"]),
+		"comment_count":          intString(decoded["comment_count"]),
+		"favorite_count":         "0",
+		"caption_available":      "0",
+		"default_audio_language": language,
+		"default_language":       language,
+		"language_code":          firstNonEmpty(language, "und"),
+		"tags_json":              mustJSON(anySlice(decoded["tags"])),
+		"thumbnail_urls_json":    mustJSON(thumbnails),
+		"channel_title":          stringAny(decoded["channel"]),
+		"privacy_status":         stringAny(decoded["availability"]),
+	}
+}
+
+func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {
+	sourceURL := "https://www.youtube.com/oembed?format=json&url=" + url.QueryEscape(canonicalURL)
+	var decoded map[string]any
+	if err := fetchJSON(sourceURL, &decoded); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"video_title":    stringAny(decoded["title"]),
+		"thumbnail_url":  stringAny(decoded["thumbnail_url"]),
+		"channel_title":  stringAny(decoded["author_name"]),
+		"canonical_url":  canonicalURL,
+		"source_oembed":  sourceURL,
+	}, nil
+}
+
 func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
 	queries := youtubeSearchQueries(seeds)
 	events := make([]genericEvent, 0)
+	enrichedVideos := 0
+	enrichLimit := envInt("R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT", 10)
 	for _, query := range queries {
 		if limit > 0 && len(events) >= limit {
 			break
@@ -923,14 +1847,36 @@ func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
 			payload := mapStringAny(result)
 			events = append(events, newGenericEvent("r.youtube.search.result.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", payload))
 			if result["parsed_video_id"] != "" {
+				if enrichLimit > 0 && enrichedVideos < enrichLimit {
+					seedPayload := map[string]any{
+						"title":             query,
+						"url":               result["result_url"],
+						"category":          "search_result",
+						"source_type":       "video",
+						"source_confidence": "search_html_discovered",
+						"language_hint":     "und",
+					}
+					if videoPayload, err := fetchYouTubeVideoSnapshotPayload(result["parsed_video_id"], result["result_url"], seedPayload); err == nil {
+						videoPayload["source_category"] = "search_result"
+						videoPayload["source_confidence"] = "search_html_discovered"
+						videoPayload["search_query"] = query
+						events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", stringAny(videoPayload["source_method"]), result["result_url"], "R-YouTube", "", "", stringAny(videoPayload["published_at"]), videoPayload))
+						if strings.Contains(stringAny(videoPayload["source_method"]), "youtube_data_api") {
+							events = append(events, youtubeQuotaUsageEvent(result["result_url"]))
+						}
+						events = append(events, youtubeMetadataPackageMentionEvents(result["parsed_video_id"], videoPayload)...)
+						enrichedVideos++
+						continue
+					}
+				}
 				videoPayload := map[string]any{
 					"youtube_video_id":       result["parsed_video_id"],
 					"youtube_channel_id":     "",
 					"playlist_ids_json":      "[]",
-					"video_title":            "",
-					"video_description":      "",
+					"video_title":            "YouTube video " + result["parsed_video_id"],
+					"video_description":      "Discovered from YouTube search query: " + query,
 					"canonical_url":          result["result_url"],
-					"thumbnail_url":          "",
+					"thumbnail_url":          "https://i.ytimg.com/vi/" + result["parsed_video_id"] + "/hqdefault.jpg",
 					"published_at":           "",
 					"duration_seconds":       "0",
 					"view_count":             "0",
@@ -942,15 +1888,17 @@ func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
 					"default_language":       "",
 					"language_code":          "und",
 					"tags_json":              "[]",
-					"thumbnail_urls_json":    "{}",
+					"thumbnail_urls_json":    mustJSON(map[string]any{"hqdefault": map[string]any{"url": "https://i.ytimg.com/vi/" + result["parsed_video_id"] + "/hqdefault.jpg"}}),
 					"channel_title":          "",
 					"privacy_status":         "",
-					"source_method":          "youtube_public_search_html_no_data_api",
+					"source_method":          "youtube_public_search_html_unenriched_candidate",
 					"source_tag":             "r_project_ecosystem_youtube",
 					"source_category":        "search_result",
-					"source_confidence":      "search_html_discovered",
+					"source_confidence":      "search_html_discovered_unenriched",
+					"metadata_errors_json":   mustJSON([]string{"metadata_enrich_limit_reached"}),
 					"collection_status":      "collected",
 				}
+				finalizeYouTubeVideoPayload(videoPayload)
 				events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", videoPayload))
 			}
 		}
@@ -1673,6 +2621,167 @@ func repositoryURLs(record cranRecord) []string {
 	return out
 }
 
+func descriptionURLs(record cranRecord) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, field := range []string{record["URL"], record["BugReports"]} {
+		for _, raw := range boardURLRE.FindAllString(field, -1) {
+			candidate := normalizeExternalURL(raw)
+			if candidate == "" || seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func normalizeExternalURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, ".,);]")
+	if strings.HasPrefix(strings.ToLower(raw), "www.") {
+		raw = "https://" + raw
+	}
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func cranTaskViewURLs(indexURL, htmlText string, limit int) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, match := range linkRE.FindAllStringSubmatch(htmlText, -1) {
+		href := strings.TrimSpace(match[1])
+		if !strings.HasSuffix(strings.ToLower(href), ".html") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimSpace(pathBase(href)), ".html")
+		if name == "" || strings.EqualFold(name, "index") || strings.EqualFold(name, "views") {
+			continue
+		}
+		viewURL := absoluteURL(indexURL, href)
+		if seen[viewURL] {
+			continue
+		}
+		seen[viewURL] = true
+		out = append(out, viewURL)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func taskViewName(viewURL, htmlText string) string {
+	name := strings.TrimSuffix(pathBase(viewURL), ".html")
+	title := firstTitle(htmlText)
+	title = strings.TrimSpace(strings.TrimPrefix(title, "CRAN Task View:"))
+	if title != "" && !strings.EqualFold(title, "CRAN Task Views") {
+		return title
+	}
+	return name
+}
+
+func taskViewPackages(htmlText string) []string {
+	out := make([]string, 0)
+	for _, match := range cranPackageLinkRE.FindAllStringSubmatch(htmlText, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		packageName := strings.TrimSpace(html.UnescapeString(match[1]))
+		if packageName != "" {
+			out = append(out, packageName)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func pathBase(raw string) string {
+	if parsed, err := url.Parse(raw); err == nil {
+		raw = parsed.Path
+	}
+	raw = strings.Trim(raw, "/")
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, "/")
+	return parts[len(parts)-1]
+}
+
+func packageMentionsInText(text string, packages []string) []string {
+	lowerText := strings.ToLower(text)
+	out := make([]string, 0)
+	for _, packageName := range packages {
+		packageName = strings.TrimSpace(packageName)
+		if packageName == "" {
+			continue
+		}
+		if strings.Contains(lowerText, strings.ToLower(packageName)) {
+			out = append(out, packageName)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func githubRepoRefs(records []cranRecord, limit int) []packageRepoRef {
+	seen := map[string]bool{}
+	out := make([]packageRepoRef, 0)
+	for _, record := range records {
+		packageName := record["Package"]
+		if packageName == "" {
+			continue
+		}
+		for _, repoURL := range repositoryURLs(record) {
+			owner, repo, ok := parseGitHubRepo(repoURL)
+			if !ok {
+				continue
+			}
+			key := packageName + "|" + owner + "/" + repo
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, packageRepoRef{
+				packageName: packageName,
+				version:     record["Version"],
+				repoURL:     repoURL,
+				owner:       owner,
+				repo:        repo,
+			})
+			if limit > 0 && len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+func parseGitHubRepo(raw string) (string, string, bool) {
+	raw = strings.TrimSpace(strings.TrimSuffix(raw, ".git"))
+	match := githubRepoRE.FindStringSubmatch(raw)
+	if len(match) < 3 {
+		return "", "", false
+	}
+	owner := strings.TrimSpace(match[1])
+	repo := strings.TrimSpace(match[2])
+	repo = strings.TrimSuffix(repo, ".git")
+	repo = strings.Trim(repo, " .")
+	if owner == "" || repo == "" {
+		return "", "", false
+	}
+	if strings.EqualFold(repo, "issues") || strings.EqualFold(repo, "pull") || strings.EqualFold(repo, "releases") {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
 func htmlCells(rowHTML string) []string {
 	matches := cellRE.FindAllStringSubmatch(rowHTML, -1)
 	out := make([]string, 0, len(matches))
@@ -1705,6 +2814,7 @@ func fetchWebsitePayload(targetURL string) map[string]any {
 			"description":       "",
 			"canonical_url":     targetURL,
 			"feed_urls":         []string{},
+			"link_urls":         []string{},
 			"youtube_urls":      []string{},
 			"error_code":        fmt.Sprintf("%T", err),
 			"page_text":         "",
@@ -1716,6 +2826,7 @@ func fetchWebsitePayload(targetURL string) map[string]any {
 	meta := metaValues(text)
 	pageText := stripTags(text)
 	feeds := extractFeedLinks(targetURL, text)
+	links := extractPageLinks(targetURL, text)
 	youtubeLinks := extractYouTubeURLs(text)
 	return map[string]any{
 		"target_url":        targetURL,
@@ -1727,6 +2838,7 @@ func fetchWebsitePayload(targetURL string) map[string]any {
 		"description":       firstNonEmpty(meta["description"], meta["og:description"]),
 		"canonical_url":     firstNonEmpty(meta["canonical"], targetURL),
 		"feed_urls":         feeds,
+		"link_urls":         links,
 		"youtube_urls":      youtubeLinks,
 		"og_image":          meta["og:image"],
 		"error_code":        "",
@@ -1774,12 +2886,109 @@ func extractFeedLinks(base, text string) []string {
 	return firstNStrings(uniqueStrings(out), 20)
 }
 
+func extractPageLinks(base, text string) []string {
+	out := make([]string, 0)
+	for _, match := range linkRE.FindAllStringSubmatch(text, -1) {
+		raw := strings.TrimSpace(html.UnescapeString(match[1]))
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+		lower := strings.ToLower(raw)
+		if strings.HasPrefix(lower, "mailto:") || strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "tel:") {
+			continue
+		}
+		resolved := absoluteURL(base, raw)
+		if strings.HasPrefix(resolved, "http://") || strings.HasPrefix(resolved, "https://") {
+			out = append(out, resolved)
+		}
+	}
+	return firstNStrings(uniqueStrings(out), maxInt(1, envInt("RPKG_R_WEBSITE_PAGE_LINK_LIMIT", 80)))
+}
+
 func extractYouTubeURLs(text string) []string {
 	out := make([]string, 0)
 	for _, match := range youtubeURLRE.FindAllString(text, -1) {
 		out = append(out, strings.TrimRight(match, ".,);]"))
 	}
 	return firstNStrings(uniqueStrings(out), 80)
+}
+
+func parseFeedItems(feedURL string, body []byte) []map[string]string {
+	var rss rssFeed
+	if err := xml.Unmarshal(body, &rss); err == nil && len(rss.Channel.Items) > 0 {
+		out := make([]map[string]string, 0, len(rss.Channel.Items))
+		for _, item := range rss.Channel.Items {
+			itemURL := firstNonEmpty(item.Link, item.GUID)
+			published := parseRSSDate(item.PubDate, time.Now()).UTC().Format("2006-01-02T15:04:05.000Z")
+			summaryHTML := strings.TrimSpace(item.Description)
+			out = append(out, map[string]string{
+				"item_id":       firstNonEmpty(item.GUID, itemURL, shaHex(item.Title+item.PubDate)),
+				"item_title":    stripTags(item.Title),
+				"item_url":      absoluteURL(feedURL, itemURL),
+				"published_at":  published,
+				"summary_text":  truncate(stripTags(summaryHTML), 4000),
+				"summary_html":  truncate(summaryHTML, 8000),
+				"source_method": "rss_feed_item_xml",
+			})
+		}
+		return out
+	}
+	var atom atomFeed
+	if err := xml.Unmarshal(body, &atom); err == nil && len(atom.Entries) > 0 {
+		out := make([]map[string]string, 0, len(atom.Entries))
+		for _, entry := range atom.Entries {
+			itemURL := atomEntryURL(feedURL, entry)
+			publishedRaw := firstNonEmpty(entry.Published, entry.Updated)
+			published := parseRSSDate(publishedRaw, time.Now()).UTC().Format("2006-01-02T15:04:05.000Z")
+			summaryHTML := firstNonEmpty(entry.Summary, entry.Content)
+			out = append(out, map[string]string{
+				"item_id":       firstNonEmpty(entry.ID, itemURL, shaHex(entry.Title+publishedRaw)),
+				"item_title":    stripTags(entry.Title),
+				"item_url":      itemURL,
+				"published_at":  published,
+				"summary_text":  truncate(stripTags(summaryHTML), 4000),
+				"summary_html":  truncate(summaryHTML, 8000),
+				"source_method": "atom_feed_item_xml",
+			})
+		}
+		return out
+	}
+	return nil
+}
+
+func atomEntryURL(feedURL string, entry atomEntry) string {
+	for _, link := range entry.Links {
+		rel := strings.ToLower(strings.TrimSpace(link.Rel))
+		if link.Href != "" && (rel == "" || rel == "alternate") {
+			return absoluteURL(feedURL, link.Href)
+		}
+	}
+	if entry.ID != "" && strings.HasPrefix(entry.ID, "http") {
+		return entry.ID
+	}
+	return feedURL
+}
+
+func sitemapURLFor(targetURL string) string {
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	parsed.Path = "/sitemap.xml"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func sitemapURLs(body []byte) []string {
+	out := make([]string, 0)
+	for _, match := range sitemapLocRE.FindAllStringSubmatch(string(body), -1) {
+		pageURL := strings.TrimSpace(html.UnescapeString(match[1]))
+		if strings.HasPrefix(pageURL, "http://") || strings.HasPrefix(pageURL, "https://") {
+			out = append(out, pageURL)
+		}
+	}
+	return firstNStrings(uniqueStrings(out), maxInt(1, envInt("RPKG_R_WEBSITE_SITEMAP_URLS_PER_SITE", 30)))
 }
 
 func normalizeYouTubeSeed(seed map[string]any) map[string]any {
@@ -1844,6 +3053,294 @@ func parseYouTubeRef(raw string) map[string]string {
 		out["parsed_ref_type"] = "search"
 	}
 	return out
+}
+
+func needsYouTubeMetadataFill(payload map[string]any) bool {
+	return isBadYouTubeMetadataValue(payload["video_title"]) ||
+		isBadYouTubeMetadataValue(payload["video_description"]) ||
+		isBadYouTubeMetadataValue(payload["thumbnail_url"]) ||
+		stringAny(payload["duration_seconds"]) == "0" ||
+		stringAny(payload["view_count"]) == "0"
+}
+
+func mergePayload(dst map[string]any, src map[string]any) {
+	for key, value := range src {
+		if isZeroPayloadValue(value) {
+			continue
+		}
+		if isZeroPayloadValue(dst[key]) {
+			dst[key] = value
+			continue
+		}
+		switch key {
+		case "video_title", "video_description", "thumbnail_url", "youtube_channel_id", "channel_title", "published_at", "privacy_status":
+			dst[key] = value
+		case "duration_seconds", "view_count", "like_count", "comment_count", "favorite_count", "caption_available":
+			if intAny(value) > intAny(dst[key]) {
+				dst[key] = value
+			}
+		case "tags_json", "thumbnail_urls_json", "default_audio_language", "default_language", "language_code":
+			if stringAny(value) != "" && stringAny(value) != "[]" && stringAny(value) != "{}" && stringAny(value) != "und" {
+				dst[key] = value
+			}
+		default:
+			dst[key] = value
+		}
+	}
+}
+
+func isZeroPayloadValue(value any) bool {
+	text := strings.TrimSpace(stringAny(value))
+	return text == "" || text == "0" || text == "[]" || text == "{}" || text == "<nil>" || text == youtubeBoilerplateDescription
+}
+
+func isBadYouTubeMetadataValue(value any) bool {
+	text := strings.TrimSpace(stringAny(value))
+	return text == "" || text == youtubeBoilerplateDescription
+}
+
+func finalizeYouTubeVideoPayload(payload map[string]any) {
+	videoID := stringAny(payload["youtube_video_id"])
+	sourceTag := firstNonEmpty(stringAny(payload["source_tag"]), "r_project_ecosystem_youtube")
+	uuidArticle := stringAny(payload["uuid_article"])
+	if stringAny(payload["stable_uuid"]) == "" && videoID != "" {
+		payload["stable_uuid"] = stableYouTubeVideoUUID(videoID, sourceTag, uuidArticle)
+	}
+	if stringAny(payload["active"]) == "" {
+		payload["active"] = "1"
+	}
+	if isBadYouTubeMetadataValue(payload["video_title"]) && videoID != "" {
+		payload["video_title"] = "YouTube video " + videoID
+	}
+	if isBadYouTubeMetadataValue(payload["thumbnail_url"]) && videoID != "" {
+		payload["thumbnail_url"] = "https://i.ytimg.com/vi/" + videoID + "/hqdefault.jpg"
+	}
+	if isBadYouTubeMetadataValue(payload["video_description"]) {
+		payload["video_description"] = firstNonEmpty(stringAny(payload["video_title"]), videoID)
+	}
+	if stringAny(payload["thumbnail_urls_json"]) == "{}" && !isBadYouTubeMetadataValue(payload["thumbnail_url"]) {
+		payload["thumbnail_urls_json"] = mustJSON(map[string]any{"hqdefault": map[string]any{"url": stringAny(payload["thumbnail_url"])}})
+	}
+}
+
+func stableYouTubeVideoUUID(videoID, sourceTag, uuidArticle string) string {
+	return deterministicUUID("youtube-video:" + videoID + ":" + sourceTag + ":" + uuidArticle)
+}
+
+func youtubeDLBinary() (string, error) {
+	configured := firstNonEmpty(os.Getenv("YOUTUBE_DL_BIN"), os.Getenv("YTDLP_BIN"))
+	candidates := []string{}
+	if configured != "" {
+		candidates = append(candidates, configured)
+	}
+	candidates = append(candidates, "yt-dlp", "youtube-dl")
+	for _, candidate := range candidates {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("yt-dlp or youtube-dl binary was not found")
+}
+
+func bestYouTubeAPIThumbnail(thumbnails map[string]any) (string, string) {
+	order := []string{"maxres", "standard", "high", "medium", "default"}
+	out := map[string]any{}
+	best := ""
+	for _, key := range order {
+		row := mapAny(thumbnails[key])
+		if len(row) == 0 {
+			continue
+		}
+		out[key] = row
+		if best == "" {
+			best = stringAny(row["url"])
+		}
+	}
+	return best, mustJSON(out)
+}
+
+func bestYTDLPThumbnail(thumbnails []any) string {
+	bestURL := ""
+	bestArea := int64(-1)
+	for _, item := range thumbnails {
+		row := mapAny(item)
+		rawURL := stringAny(row["url"])
+		if rawURL == "" {
+			continue
+		}
+		area := intAny(row["width"]) * intAny(row["height"])
+		if area >= bestArea {
+			bestArea = area
+			bestURL = rawURL
+		}
+	}
+	return bestURL
+}
+
+func parseYTDLPPrintedMetadata(text string) (map[string]any, error) {
+	line := strings.TrimRight(text, "\r\n")
+	fields := strings.Split(line, "\t")
+	keys := []string{
+		"id",
+		"title",
+		"description",
+		"channel_id",
+		"channel",
+		"timestamp",
+		"upload_date",
+		"duration",
+		"view_count",
+		"like_count",
+		"comment_count",
+		"language",
+		"tags",
+		"thumbnails",
+		"availability",
+		"webpage_url",
+	}
+	if len(fields) != len(keys) {
+		return nil, fmt.Errorf("yt-dlp printed %d fields, expected %d", len(fields), len(keys))
+	}
+	out := map[string]any{}
+	for i, key := range keys {
+		out[key] = decodeYTDLPPrintedField(fields[i])
+	}
+	return out, nil
+}
+
+func decodeYTDLPPrintedField(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "NA" {
+		return nil
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(value), &decoded); err == nil {
+		return decoded
+	}
+	return value
+}
+
+func ytdlpPrintedPublishedAt(decoded map[string]any) string {
+	if ts := intAny(decoded["timestamp"]); ts > 0 {
+		return time.Unix(ts, 0).UTC().Format(time.RFC3339)
+	}
+	if uploadDate := stringAny(decoded["upload_date"]); len(uploadDate) == 8 {
+		if parsed, err := time.Parse("20060102", uploadDate); err == nil {
+			return parsed.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+func ytdlpPlaylistIDsJSON(decoded map[string]any) string {
+	ids := []string{}
+	for _, key := range []string{"playlist_id", "playlist"} {
+		if value := stringAny(decoded[key]); value != "" {
+			ids = append(ids, value)
+		}
+	}
+	return mustJSON(uniqueStrings(ids))
+}
+
+func ytdlpPublishedAt(decoded map[string]any) string {
+	for _, key := range []string{"timestamp", "release_timestamp", "modified_timestamp"} {
+		if ts := intAny(decoded[key]); ts > 0 {
+			return time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		}
+	}
+	if uploadDate := stringAny(decoded["upload_date"]); len(uploadDate) == 8 {
+		if parsed, err := time.Parse("20060102", uploadDate); err == nil {
+			return parsed.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+func parseISO8601DurationSeconds(value string) int64 {
+	match := isoDurationRE.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) == 0 {
+		return 0
+	}
+	hours, _ := strconv.ParseInt(firstNonEmpty(match[1], "0"), 10, 64)
+	minutes, _ := strconv.ParseInt(firstNonEmpty(match[2], "0"), 10, 64)
+	seconds, _ := strconv.ParseInt(firstNonEmpty(match[3], "0"), 10, 64)
+	return hours*3600 + minutes*60 + seconds
+}
+
+func youtubeMetadataPackageMentionEvents(videoID string, payload map[string]any) []genericEvent {
+	packages := splitCSV(envString("R_YOUTUBE_MENTION_PACKAGES", "ggplot2,dplyr,shiny,tidymodels,quarto,data.table,tidyverse,knitr,rmarkdown,caret,randomForest,xgboost,survival"))
+	if len(packages) == 0 {
+		return nil
+	}
+	sources := map[string]string{
+		"title":       stringAny(payload["video_title"]),
+		"description": stringAny(payload["video_description"]),
+		"tag":         strings.Join(anyStringSliceFromJSON(stringAny(payload["tags_json"])), " "),
+	}
+	events := make([]genericEvent, 0)
+	for _, packageName := range packages {
+		needle := strings.ToLower(packageName)
+		for sourceName, text := range sources {
+			if text == "" || !strings.Contains(strings.ToLower(text), needle) {
+				continue
+			}
+			matchText := mentionContext(text, packageName, 240)
+			confidence := "medium"
+			score := "0.65"
+			if sourceName == "title" || strings.Contains(strings.ToLower(matchText), "r package "+needle) {
+				confidence = "high"
+				score = "0.85"
+			}
+			events = append(events, newGenericEvent("r.youtube.package.mention.v1", "youtube_metadata_mention_extractor", stringAny(payload["canonical_url"]), "CRAN", packageName, "", stringAny(payload["published_at"]), map[string]any{
+				"youtube_video_id":  videoID,
+				"package":           packageName,
+				"mention_source":    sourceName,
+				"language_code":     firstNonEmpty(stringAny(payload["language_code"]), "und"),
+				"segment_start_ms":  "0",
+				"segment_end_ms":    "0",
+				"match_text":        matchText,
+				"confidence":        confidence,
+				"confidence_score":  score,
+				"extractor_version": "rpkg-youtube-metadata-mention-v1",
+				"source_method":     "title_description_tag_scan",
+				"collection_status": "collected",
+			}))
+		}
+	}
+	return events
+}
+
+func mentionContext(text, needle string, limit int) string {
+	runes := []rune(text)
+	lowerRunes := []rune(strings.ToLower(text))
+	needleRunes := []rune(strings.ToLower(needle))
+	idx := -1
+	for i := 0; i+len(needleRunes) <= len(lowerRunes); i++ {
+		if string(lowerRunes[i:i+len(needleRunes)]) == string(needleRunes) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return truncateRunes(text, limit)
+	}
+	start := idx - limit/2
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(needleRunes) + limit/2
+	if end > len(runes) {
+		end = len(runes)
+	}
+	return strings.TrimSpace(string(runes[start:end]))
+}
+
+func anyStringSliceFromJSON(value string) []string {
+	var arr []any
+	if err := json.Unmarshal([]byte(value), &arr); err != nil {
+		return nil
+	}
+	return anyStringSlice(arr)
 }
 
 func newPublisher(topic, clientID string, dryRun bool) *publisher {
@@ -2136,6 +3633,50 @@ func fetchJSON(targetURL string, out any) error {
 	return json.Unmarshal(body, out)
 }
 
+func fetchJSONWithHeaders(targetURL string, headers map[string]string, out any) error {
+	return doJSONRequest(http.MethodGet, targetURL, headers, nil, out)
+}
+
+func postJSON(targetURL string, payload any, out any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return doJSONRequest(http.MethodPost, targetURL, map[string]string{"Content-Type": "application/json"}, body, out)
+}
+
+func doJSONRequest(method, targetURL string, headers map[string]string, body []byte, out any) error {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, targetURL, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json,*/*")
+	for key, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	client := &http.Client{Timeout: time.Duration(envInt("HTTP_TIMEOUT", 90)) * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(envInt("HTTP_MAX_BYTES", 20*1024*1024))))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
+	}
+	return json.Unmarshal(respBody, out)
+}
+
 func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 	cfg := clickHouseQueryConfig{
 		Host:     firstNonEmpty(os.Getenv("CH_HOST"), os.Getenv("CLICKHOUSE_HOST")),
@@ -2302,6 +3843,13 @@ func firstPresent(row map[string]any, keys ...string) any {
 	return nil
 }
 
+func mapAny(value any) map[string]any {
+	if row, ok := value.(map[string]any); ok {
+		return row
+	}
+	return map[string]any{}
+}
+
 func stringAny(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -2313,6 +3861,46 @@ func stringAny(value any) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+func intString(value any) string {
+	return strconv.FormatInt(intAny(value), 10)
+}
+
+func boolString(value any) string {
+	return boolOrString(boolAny(value))
+}
+
+func boolOrString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func boolAny(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return envBoolValue(v)
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case json.Number:
+		n, _ := v.Int64()
+		return n != 0
+	default:
+		return false
+	}
+}
+
+func envBoolValue(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "1" || value == "true" || value == "yes" || value == "y"
 }
 
 func intAny(value any) int64 {
@@ -2394,7 +3982,7 @@ func envBool(name string, fallback bool) bool {
 	if value == "" {
 		return fallback
 	}
-	return value == "1" || value == "true" || value == "yes" || value == "y"
+	return envBoolValue(value)
 }
 
 func cranPackagesURL() string {

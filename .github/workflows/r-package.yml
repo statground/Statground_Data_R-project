@@ -53,7 +53,16 @@ jobs:
           RPKG_REVERSE_DEPENDENCY_LIMIT: ${{ vars.RPKG_REVERSE_DEPENDENCY_LIMIT || '0' }}
           RPKG_CRAN_CHECK_LIMIT: ${{ vars.RPKG_CRAN_CHECK_LIMIT || '0' }}
           RPKG_CRAN_ARCHIVE_LIMIT: ${{ vars.RPKG_CRAN_ARCHIVE_LIMIT || '0' }}
+          RPKG_CRAN_TASK_VIEW_LIMIT: ${{ vars.RPKG_CRAN_TASK_VIEW_LIMIT || '0' }}
           RPKG_PACKAGE_NEWS_LIMIT: ${{ vars.RPKG_PACKAGE_NEWS_LIMIT || '50' }}
           RPKG_R_WEBSITE_LIMIT: ${{ vars.RPKG_R_WEBSITE_LIMIT || '0' }}
+          RPKG_R_WEBSITE_CANDIDATE_LIMIT: ${{ vars.RPKG_R_WEBSITE_CANDIDATE_LIMIT || '120' }}
+          RPKG_R_WEBSITE_FEED_LIMIT: ${{ vars.RPKG_R_WEBSITE_FEED_LIMIT || '40' }}
+          RPKG_R_WEBSITE_LINK_LIMIT: ${{ vars.RPKG_R_WEBSITE_LINK_LIMIT || '120' }}
+          RPKG_R_WEBSITE_SITEMAP_LIMIT: ${{ vars.RPKG_R_WEBSITE_SITEMAP_LIMIT || '40' }}
+          RPKG_GITHUB_LIMIT: ${{ vars.RPKG_GITHUB_LIMIT || '60' }}
+          RPKG_OSV_LIMIT: ${{ vars.RPKG_OSV_LIMIT || '100' }}
+          RPKG_BIBLIOMETRIC_LIMIT: ${{ vars.RPKG_BIBLIOMETRIC_LIMIT || '40' }}
           RPKG_RUNIVERSE_UNIVERSES: ${{ vars.RPKG_RUNIVERSE_UNIVERSES || 'r-universe,ropensci,tidyverse' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: go run ./cmd/rproject-collector package --job "$RPKG_JOB"
