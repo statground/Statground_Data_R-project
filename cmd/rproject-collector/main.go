@@ -1360,65 +1360,113 @@ func loadYouTubeMetadataBackfillRows(limit int) ([]map[string]any, error) {
     youtube_video_id,
     source_tag,
     uuid_article,
-    argMax(toString(uuid), collected_at) AS stable_uuid,
-    argMax(canonical_url, collected_at) AS canonical_url,
-    argMax(video_title, collected_at) AS video_title,
-    argMax(video_description, collected_at) AS video_description,
-    argMax(thumbnail_url, collected_at) AS thumbnail_url,
-    argMax(youtube_channel_id, collected_at) AS youtube_channel_id,
-    argMax(channel_title, collected_at) AS channel_title,
-    ifNull(toString(argMax(published_at, collected_at)), '') AS published_at,
-    toString(ifNull(argMax(duration_seconds, collected_at), 0)) AS duration_seconds,
-    toString(argMax(view_count, collected_at)) AS view_count,
-    toString(argMax(like_count, collected_at)) AS like_count,
-    toString(argMax(comment_count, collected_at)) AS comment_count,
-    toString(argMax(caption_available, collected_at)) AS caption_available,
-    argMax(default_audio_language, collected_at) AS default_audio_language,
-    argMax(default_language, collected_at) AS default_language,
-    argMax(tags_json, collected_at) AS tags_json,
-    argMax(source_method, collected_at) AS source_method,
-    argMax(source_category, collected_at) AS source_category,
-    argMax(source_confidence, collected_at) AS source_confidence,
-    argMax(language_code, collected_at) AS language_code,
-    argMax(payload_json, collected_at) AS payload_json,
+    stable_uuid,
+    canonical_url,
+    video_title,
+    video_description,
+    thumbnail_url,
+    youtube_channel_id,
+    channel_title,
+    published_at,
+    duration_seconds,
+    view_count,
+    like_count,
+    comment_count,
+    caption_available,
+    default_audio_language,
+    default_language,
+    tags_json,
+    source_method,
+    source_category,
+    source_confidence,
+    language_code,
+    payload_json,
     '' AS payload_hash,
-    max(collected_at) AS last_collected_at
+    last_collected_at
 FROM
 (
     SELECT
-        youtube_video_id,
-        source_tag,
-        ifNull(toString(uuid_article), '') AS uuid_article,
-        uuid,
-        canonical_url,
-        video_title,
-        video_description,
-        thumbnail_url,
-        youtube_channel_id,
-        channel_title,
-        published_at,
-        duration_seconds,
-        view_count,
-        like_count,
-        comment_count,
-        caption_available,
-        default_audio_language,
-        default_language,
-        tags_json,
-        source_method,
-        source_category,
-        source_confidence,
-        language_code,
-        payload_json,
-        collected_at
-    FROM Data_R_Youtube_Service.r_youtube_video_current FINAL
-    WHERE active = 1
-      AND notEmpty(youtube_video_id)
+        *,
+        (
+            if(trim(video_title) = '' OR lowerUTF8(trim(video_title)) IN ('youtube', '- youtube') OR endsWith(video_title, ' - YouTube') OR startsWith(video_title, 'YouTube video '), 40, 0) +
+            if(trim(video_description) = '' OR video_description = '%s' OR startsWith(video_description, 'Discovered from YouTube search query:') OR video_description = video_title, 20, 0) +
+            if(trim(thumbnail_url) = '' OR positionCaseInsensitive(thumbnail_url, 'ytimg.com') = 0, 10, 0) +
+            if(trim(youtube_channel_id) = '', 8, 0) +
+            if(trim(channel_title) = '' OR channel_title = video_title, 8, 0) +
+            if(published_at = '', 8, 0) +
+            if(toUInt64OrZero(duration_seconds) = 0, 8, 0) +
+            if(toUInt64OrZero(view_count) = 0, 6, 0) +
+            if(trim(default_audio_language) = '' AND trim(default_language) = '' AND language_code IN ('', 'und'), 4, 0) +
+            if(tags_json IN ('', '[]', '{}'), 3, 0) +
+            if(positionCaseInsensitive(source_method, 'metadata_unavailable') > 0 OR positionCaseInsensitive(source_method, 'unenriched') > 0 OR positionCaseInsensitive(source_method, 'public_html_no_data_api') > 0 OR positionCaseInsensitive(source_method, 'legacy_webr_board_youtube') > 0, 12, 0)
+        ) AS metadata_quality_score
+    FROM
+    (
+        SELECT
+            youtube_video_id,
+            source_tag,
+            uuid_article,
+            argMax(toString(uuid), collected_at) AS stable_uuid,
+            argMax(canonical_url, collected_at) AS canonical_url,
+            argMax(video_title, collected_at) AS video_title,
+            argMax(video_description, collected_at) AS video_description,
+            argMax(thumbnail_url, collected_at) AS thumbnail_url,
+            argMax(youtube_channel_id, collected_at) AS youtube_channel_id,
+            argMax(channel_title, collected_at) AS channel_title,
+            ifNull(toString(argMax(published_at, collected_at)), '') AS published_at,
+            toString(ifNull(argMax(duration_seconds, collected_at), 0)) AS duration_seconds,
+            toString(argMax(view_count, collected_at)) AS view_count,
+            toString(argMax(like_count, collected_at)) AS like_count,
+            toString(argMax(comment_count, collected_at)) AS comment_count,
+            toString(argMax(caption_available, collected_at)) AS caption_available,
+            argMax(default_audio_language, collected_at) AS default_audio_language,
+            argMax(default_language, collected_at) AS default_language,
+            argMax(tags_json, collected_at) AS tags_json,
+            argMax(source_method, collected_at) AS source_method,
+            argMax(source_category, collected_at) AS source_category,
+            argMax(source_confidence, collected_at) AS source_confidence,
+            argMax(language_code, collected_at) AS language_code,
+            argMax(payload_json, collected_at) AS payload_json,
+            max(collected_at) AS last_collected_at
+        FROM
+        (
+            SELECT
+                youtube_video_id,
+                source_tag,
+                ifNull(toString(uuid_article), '') AS uuid_article,
+                uuid,
+                canonical_url,
+                video_title,
+                video_description,
+                thumbnail_url,
+                youtube_channel_id,
+                channel_title,
+                published_at,
+                duration_seconds,
+                view_count,
+                like_count,
+                comment_count,
+                caption_available,
+                default_audio_language,
+                default_language,
+                tags_json,
+                source_method,
+                source_category,
+                source_confidence,
+                language_code,
+                payload_json,
+                collected_at
+            FROM Data_R_Youtube_Service.r_youtube_video_current FINAL
+            WHERE active = 1
+              AND notEmpty(youtube_video_id)
+        )
+        GROUP BY youtube_video_id, source_tag, uuid_article
+    )
 )
-GROUP BY youtube_video_id, source_tag, uuid_article
-ORDER BY last_collected_at ASC, youtube_video_id
+WHERE metadata_quality_score > 0
+ORDER BY metadata_quality_score DESC, last_collected_at ASC, youtube_video_id
 LIMIT %d
-FORMAT JSONEachRow`, queryLimit)
+FORMAT JSONEachRow`, youtubeBoilerplateDescription, queryLimit)
 	return cfg.queryJSONEachRow(query)
 }
 
@@ -3123,7 +3171,7 @@ func parseYouTubeRef(raw string) map[string]string {
 }
 
 func needsYouTubeMetadataFill(payload map[string]any) bool {
-	return isBadYouTubeMetadataValue(payload["video_title"]) ||
+	return isBadYouTubeTitleValue(payload["video_title"]) ||
 		isBadYouTubeMetadataValue(payload["video_description"]) ||
 		isBadYouTubeMetadataValue(payload["thumbnail_url"]) ||
 		stringAny(payload["duration_seconds"]) == "0" ||
@@ -3166,6 +3214,23 @@ func isBadYouTubeMetadataValue(value any) bool {
 	return text == "" || text == youtubeBoilerplateDescription
 }
 
+func isBadYouTubeTitleValue(value any) bool {
+	text := cleanYouTubeTitleValue(value)
+	lower := strings.ToLower(text)
+	return isBadYouTubeMetadataValue(value) ||
+		lower == "youtube" ||
+		lower == "- youtube" ||
+		strings.HasPrefix(text, "YouTube video ")
+}
+
+func cleanYouTubeTitleValue(value any) string {
+	text := strings.TrimSpace(stringAny(value))
+	if strings.HasSuffix(text, " - YouTube") {
+		text = strings.TrimSpace(strings.TrimSuffix(text, " - YouTube"))
+	}
+	return text
+}
+
 func finalizeYouTubeVideoPayload(payload map[string]any) {
 	videoID := stringAny(payload["youtube_video_id"])
 	sourceTag := firstNonEmpty(stringAny(payload["source_tag"]), "r_project_ecosystem_youtube")
@@ -3176,7 +3241,10 @@ func finalizeYouTubeVideoPayload(payload map[string]any) {
 	if stringAny(payload["active"]) == "" {
 		payload["active"] = "1"
 	}
-	if isBadYouTubeMetadataValue(payload["video_title"]) && videoID != "" {
+	if cleanedTitle := cleanYouTubeTitleValue(payload["video_title"]); cleanedTitle != stringAny(payload["video_title"]) {
+		payload["video_title"] = cleanedTitle
+	}
+	if isBadYouTubeTitleValue(payload["video_title"]) && videoID != "" {
 		payload["video_title"] = "YouTube video " + videoID
 	}
 	if isBadYouTubeMetadataValue(payload["thumbnail_url"]) && videoID != "" {
