@@ -1896,10 +1896,11 @@ func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
 					"source_category":        "search_result",
 					"source_confidence":      "search_html_discovered_unenriched",
 					"metadata_errors_json":   mustJSON([]string{"metadata_enrich_limit_reached"}),
-					"collection_status":      "collected",
+					"active":                 "0",
+					"collection_status":      "candidate",
 				}
 				finalizeYouTubeVideoPayload(videoPayload)
-				events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", videoPayload))
+				events = append(events, newGenericEvent("r.youtube.video.candidate.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", videoPayload))
 			}
 		}
 	}
