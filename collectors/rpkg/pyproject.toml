@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statground-rpkg-collectors"
+version = "0.1.0"
+description = "Statground R package intelligence collectors"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "confluent-kafka>=2.8,<3",
+  "requests>=2.32,<3",
+  "youtube-transcript-api>=0.6,<2",
+]
+
+[project.scripts]
+rpkg-collector = "rpkg_collectors.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

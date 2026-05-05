@@ -50,10 +50,10 @@ CLICKHOUSE_PORT = first_non_empty(os.getenv("CLICKHOUSE_PORT"), os.getenv("CH_PO
 CLICKHOUSE_SCHEME = first_non_empty(os.getenv("CLICKHOUSE_SCHEME"), os.getenv("CH_SCHEME"), "http").lower()
 CLICKHOUSE_USER = first_non_empty(os.getenv("CLICKHOUSE_USER"), os.getenv("CH_USER"))
 CLICKHOUSE_PASSWORD = first_non_empty(os.getenv("CLICKHOUSE_PASSWORD"), os.getenv("CH_PASSWORD"))
-CLICKHOUSE_DATABASE = first_non_empty(os.getenv("CLICKHOUSE_DATABASE"), os.getenv("CH_DATABASE"), "webr_mastodon")
-CLICKHOUSE_LOG_TABLE = os.getenv("CLICKHOUSE_LOG_TABLE", "webr_mastodon.log").strip()
-CLICKHOUSE_RAW_TABLE = os.getenv("CLICKHOUSE_RAW_TABLE", "webr_mastodon.raw").strip()
-CLICKHOUSE_BOARD_TABLE = os.getenv("CLICKHOUSE_BOARD_TABLE", "webr_mastodon.board").strip()
+CLICKHOUSE_DATABASE = first_non_empty(os.getenv("CLICKHOUSE_DATABASE"), os.getenv("CH_DATABASE"), "Data_R_Project_Mastodon_Raw")
+CLICKHOUSE_LOG_TABLE = os.getenv("CLICKHOUSE_LOG_TABLE", "Data_R_Project_Mastodon_Log.log").strip()
+CLICKHOUSE_RAW_TABLE = os.getenv("CLICKHOUSE_RAW_TABLE", "Data_R_Project_Mastodon_Raw.raw").strip()
+CLICKHOUSE_BOARD_TABLE = os.getenv("CLICKHOUSE_BOARD_TABLE", "Data_R_Project_Mastodon_Service.board").strip()
 CLICKHOUSE_TIMEOUT_SECONDS = int(os.getenv("CLICKHOUSE_TIMEOUT", "30"))
 WEBR_BOT_UUID = first_non_empty(
     os.getenv("WEBR_BOT_UUID"),
@@ -153,6 +153,7 @@ def stable_u64(value: Any) -> int:
 
 
 def deterministic_uuid(seed: str) -> str:
+    # Source rows use stable external identity for dedupe; event/log UUIDs use uuid7().
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
     value = bytearray(digest[:16])
     value[6] = (value[6] & 0x0F) | 0x50
@@ -1079,7 +1080,7 @@ def board_payload(
         "updated_at": updated_at,
         "created_log": {
             "type": reason,
-            "source": "Statground_Data_R-project_Mastodon",
+            "source": "Statground_Data_R-project",
             "uuid_user": WEBR_BOT_UUID,
             "raw_status_id": raw_payload.get("status_id"),
             "raw_status_url": raw_payload.get("status_url"),
@@ -1095,7 +1096,7 @@ def board_payload(
     if updated_at:
         payload["updated_log"] = {
             "type": "mastodon_board_translation_update",
-            "source": "Statground_Data_R-project_Mastodon",
+            "source": "Statground_Data_R-project",
             "uuid_user": WEBR_BOT_UUID,
             "updated_at": updated_at,
         }

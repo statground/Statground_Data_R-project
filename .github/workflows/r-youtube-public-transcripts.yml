@@ -1,0 +1,49 @@
+name: R YouTube - Public Transcripts
+
+on:
+  schedule:
+    - cron: "25 * * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Limit YouTube video IDs"
+        required: false
+        default: "20"
+      video_ids:
+        description: "Comma-separated YouTube video IDs; defaults to R_YOUTUBE_VIDEO_IDS variable"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r-youtube-public-transcripts
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install collector
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e collectors/rpkg
+      - name: Publish public transcript segments
+        env:
+          RPKG_KAFKA_TOPIC: ${{ vars.R_YOUTUBE_KAFKA_TOPIC || 'r.youtube.events' }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
+          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
+          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          R_YOUTUBE_TRANSCRIPT_LIMIT: ${{ github.event.inputs.limit || vars.R_YOUTUBE_TRANSCRIPT_LIMIT || '20' }}
+          R_YOUTUBE_VIDEO_IDS: ${{ github.event.inputs.video_ids || vars.R_YOUTUBE_VIDEO_IDS }}
+          R_YOUTUBE_MENTION_PACKAGES: ${{ vars.R_YOUTUBE_MENTION_PACKAGES }}
+        run: rpkg-collector youtube-public-transcripts --limit "$R_YOUTUBE_TRANSCRIPT_LIMIT"

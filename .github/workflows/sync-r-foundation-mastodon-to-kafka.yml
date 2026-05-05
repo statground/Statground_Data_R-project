@@ -104,10 +104,10 @@ jobs:
           CLICKHOUSE_SCHEME: ${{ secrets.CLICKHOUSE_SCHEME || secrets.CH_SCHEME || 'http' }}
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || secrets.CH_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD || secrets.CH_PASSWORD }}
-          CLICKHOUSE_DATABASE: "webr_mastodon"
-          CLICKHOUSE_LOG_TABLE: "webr_mastodon.log"
-          CLICKHOUSE_RAW_TABLE: "webr_mastodon.raw"
-          CLICKHOUSE_BOARD_TABLE: "webr_mastodon.board"
+          CLICKHOUSE_DATABASE: "Data_R_Project_Mastodon_Raw"
+          CLICKHOUSE_LOG_TABLE: "Data_R_Project_Mastodon_Log.log"
+          CLICKHOUSE_RAW_TABLE: "Data_R_Project_Mastodon_Raw.raw"
+          CLICKHOUSE_BOARD_TABLE: "Data_R_Project_Mastodon_Service.board"
           WEBR_BOT_UUID: "2aeeb31a-5cb1-47d8-bbb0-cb2d271c32ce"
 
           TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
