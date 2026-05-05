@@ -3188,8 +3188,18 @@ func mergePayload(dst map[string]any, src map[string]any) {
 			continue
 		}
 		switch key {
-		case "video_title", "video_description", "thumbnail_url", "youtube_channel_id", "channel_title", "published_at", "privacy_status":
-			dst[key] = value
+		case "video_title":
+			if !isBadYouTubeTitleValue(value) {
+				dst[key] = cleanYouTubeTitleValue(value)
+			}
+		case "video_description":
+			if !isBadYouTubeMetadataValue(value) {
+				dst[key] = value
+			}
+		case "thumbnail_url", "youtube_channel_id", "channel_title", "published_at", "privacy_status":
+			if !isBadYouTubeMetadataValue(value) {
+				dst[key] = value
+			}
 		case "duration_seconds", "view_count", "like_count", "comment_count", "favorite_count", "caption_available":
 			if intAny(value) > intAny(dst[key]) {
 				dst[key] = value
