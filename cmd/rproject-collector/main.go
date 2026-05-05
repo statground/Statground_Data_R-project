@@ -1739,7 +1739,7 @@ func fetchYouTubeAPIVideoPayload(videoID, apiKey string, seed map[string]any) (m
 		"thumbnail_urls_json":    thumbJSON,
 		"channel_title":          stringAny(snippet["channelTitle"]),
 		"privacy_status":         stringAny(status["privacyStatus"]),
-	}
+	}, nil
 }
 
 func fetchYTDLPVideoPayload(canonicalURL string, seed map[string]any) (map[string]any, error) {
@@ -1806,7 +1806,7 @@ func fetchYTDLPVideoPayload(canonicalURL string, seed map[string]any) (map[strin
 		"thumbnail_urls_json":    mustJSON(thumbnails),
 		"channel_title":          stringAny(decoded["channel"]),
 		"privacy_status":         stringAny(decoded["availability"]),
-	}
+	}, nil
 }
 
 func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {

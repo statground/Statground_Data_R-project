@@ -1,0 +1,687 @@
+# Statground R-language official/community source list.
+# No external API keys are used. All sources below are public RSS/Atom, HTML,
+# or no-auth public endpoints with polite rate limiting in the collector.
+
+sources:
+  # ---------------------------------------------------------------------------
+  # P0. R Project / R Foundation official publications
+  # ---------------------------------------------------------------------------
+  - id: official:r:cran-news
+    type: html_release_notes
+    source_type: official_release_notes
+    platform: r-project
+    name: CRAN R NEWS / R release notes
+    url: https://cran.r-project.org/doc/manuals/r-release/NEWS.html
+    source_url: https://www.r-project.org/news.html
+    heading_regex: "Changes in R"
+    max_items: 20
+    summary_limit: 3000
+    language: en
+    tags: [R, R Project, release-notes, CRAN]
+
+  - id: official:r:whats-new
+    type: html_links
+    source_type: official_index
+    platform: r-project
+    name: R Project What's New
+    url: https://www.r-project.org/news.html
+    emit_page_item: true
+    include_regex: "NEWS|R-announce|R-packages|blog.r-project.org|cran.r-project.org"
+    max_items: 80
+    language: en
+    tags: [R, R Project, official]
+
+  - id: official:r:blog
+    type: rss
+    source_type: official_blog
+    platform: r-project
+    name: The R Blog
+    url: https://blog.r-project.org/index.xml
+    source_url: https://blog.r-project.org/
+    max_items: 200
+    language: en
+    tags: [R, R Project, R Blog]
+
+  - id: official:r:journal-issues
+    type: html_links
+    source_type: official_journal
+    platform: r-project
+    name: The R Journal issues and recent articles
+    url: https://journal.r-project.org/issues.html
+    include_regex: "journal.r-project.org/(archive|issues)|Volume|R News"
+    max_items: 120
+    follow:
+      enabled: true
+      include_regex: "journal.r-project.org/archive/|Volume"
+      first_n: 4
+      extract_include_regex: "journal.r-project.org/archive/.+|RJ-|articles"
+      max_items_per_page: 120
+    language: en
+    tags: [R, The R Journal, R Foundation, journal]
+
+  - id: official:r:conferences
+    type: html_links
+    source_type: official_events
+    platform: r-project
+    name: R Project conferences
+    url: https://www.r-project.org/conferences/
+    emit_page_item: true
+    include_regex: "useR|DSC|conference|2026|2027|r-project.org|mastodon"
+    max_items: 120
+    language: en
+    tags: [R, conference, useR, DSC]
+
+  # ---------------------------------------------------------------------------
+  # Official R mailing list archives, current year pages.
+  # Increase max_items or add previous-year sources if you want deeper backfill.
+  # ---------------------------------------------------------------------------
+  - id: official:r-mail:r-announce
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-announce mailing list archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-announce/{year}/date.html"
+    include_regex: '\.html|R-|announce|released|available'
+    max_items: 200
+    language: en
+    tags: [R, R-announce, mailing-list, official]
+
+  - id: official:r-mail:r-packages
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-packages mailing list archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-packages/{year}/date.html"
+    include_regex: '\.html|package|CRAN|R'
+    max_items: 300
+    language: en
+    tags: [R, R-packages, mailing-list, CRAN]
+
+  - id: official:r-mail:r-help
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-help mailing list archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-help/{year}/date.html"
+    include_regex: '\.html|R|package|error|data|model'
+    max_items: 200
+    language: en
+    tags: [R, R-help, mailing-list]
+
+  - id: official:r-mail:r-devel
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-devel mailing list archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-devel/{year}/date.html"
+    include_regex: '\.html|R|patch|bug|proposal|devel'
+    max_items: 200
+    language: en
+    tags: [R, R-devel, mailing-list]
+
+  - id: official:r-mail:r-package-devel
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-package-devel mailing list archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-package-devel/{year}/date.html"
+    include_regex: '\.html|package|CRAN|check|R CMD'
+    max_items: 200
+    language: en
+    tags: [R, R-package-devel, mailing-list, package-development]
+
+  # R-SIG archives. Some archives may be quiet or absent in a given year; failures
+  # are isolated and recorded in latest_report.json.
+  - id: official:r-sig:mac
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Mac archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-mac/{year}/date.html"
+    include_regex: '\.html|macOS|Mac|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Mac, mailing-list]
+
+  - id: official:r-sig:db
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-DB archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-db/{year}/date.html"
+    include_regex: '\.html|database|DB|SQL|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-DB, mailing-list, database]
+
+  - id: official:r-sig:debian
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Debian archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-debian/{year}/date.html"
+    include_regex: '\.html|Debian|Linux|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Debian, mailing-list]
+
+  - id: official:r-sig:ecology
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Ecology archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-ecology/{year}/date.html"
+    include_regex: '\.html|ecology|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Ecology, mailing-list, ecology]
+
+  - id: official:r-sig:epi
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Epi archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-epi/{year}/date.html"
+    include_regex: '\.html|epidemiology|Epi|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Epi, mailing-list, epidemiology]
+
+  - id: official:r-sig:finance
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Finance archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-finance/{year}/date.html"
+    include_regex: '\.html|finance|quant|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Finance, mailing-list, finance]
+
+  - id: official:r-sig:geo
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-Geo archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-geo/{year}/date.html"
+    include_regex: '\.html|geo|spatial|GIS|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-Geo, mailing-list, geospatial]
+
+  - id: official:r-sig:hpc
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-HPC archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-hpc/{year}/date.html"
+    include_regex: '\.html|HPC|parallel|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-HPC, mailing-list, hpc]
+
+  - id: official:r-sig:mixed-models
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-mixed-models archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-mixed-models/{year}/date.html"
+    include_regex: '\.html|mixed|lmer|model|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-mixed-models, mailing-list, mixed-models]
+
+  - id: official:r-sig:teaching
+    type: html_links
+    source_type: official_mail_archive
+    platform: r-project-mail
+    name: R-SIG-teaching archive, current year
+    url: "https://stat.ethz.ch/pipermail/r-sig-teaching/{year}/date.html"
+    include_regex: '\.html|teaching|education|R'
+    max_items: 80
+    language: en
+    tags: [R, R-SIG-teaching, mailing-list, teaching]
+
+  # ---------------------------------------------------------------------------
+  # Reddit R communities. API key 없이 RSS 우선, public JSON fallback 사용.
+  # ---------------------------------------------------------------------------
+  - id: reddit:r/rstats
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/rstats
+    subreddit: rstats
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, rstats, reddit]
+
+  - id: reddit:r/RStudio
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/RStudio
+    subreddit: RStudio
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, RStudio, Posit, reddit]
+
+  - id: reddit:r/Rlanguage
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/Rlanguage
+    subreddit: Rlanguage
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, R language, reddit]
+
+  - id: reddit:r/rprogramming
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/rprogramming
+    subreddit: rprogramming
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, R programming, reddit]
+
+  - id: reddit:r/rshiny
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/rshiny
+    subreddit: rshiny
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, Shiny, reddit]
+
+  - id: reddit:r/quarto
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/quarto
+    subreddit: quarto
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, Quarto, reddit]
+
+  - id: reddit:r/tidymodels
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/tidymodels
+    subreddit: tidymodels
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, tidymodels, reddit]
+
+  - id: reddit:r/rstatsmemes
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/rstatsmemes
+    subreddit: rstatsmemes
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    language: en
+    tags: [R, rstats, memes, reddit]
+
+  - id: reddit:r/R_Programming
+    type: reddit_subreddit
+    source_type: community_archive
+    platform: reddit
+    name: r/R_Programming archive/closed
+    subreddit: R_Programming
+    limit: 50
+    max_items: 50
+    json_fallback: true
+    language: en
+    tags: [R, archive, reddit]
+
+  - id: reddit:r/learnR
+    type: reddit_subreddit
+    source_type: community_archive
+    platform: reddit
+    name: r/learnR restricted/archive
+    subreddit: learnR
+    limit: 50
+    max_items: 50
+    json_fallback: true
+    language: en
+    tags: [R, learning, archive, reddit]
+
+  - id: reddit:r/RStatsProgram
+    type: reddit_subreddit
+    source_type: community_archive
+    platform: reddit
+    name: r/RStatsProgram archive
+    subreddit: RStatsProgram
+    limit: 50
+    max_items: 50
+    json_fallback: true
+    language: en
+    tags: [R, archive, reddit]
+
+  # ---------------------------------------------------------------------------
+  # Mastodon/Fediverse. API 키 없이 태그 RSS → no-auth public tag API fallback.
+  # Instances can disable public preview; such failures are expected and logged.
+  # ---------------------------------------------------------------------------
+  - id: mastodon:tag
+    type: mastodon_tag
+    source_type: social_tag
+    platform: mastodon
+    name: Mastodon #rstats tag
+    tag: rstats
+    instances:
+      - mastodon.social
+      - fosstodon.org
+      - hachyderm.io
+      - vis.social
+      - mathstodon.xyz
+    limit: 40
+    public_api_fallback: true
+    language: en
+    tags: [R, rstats, Mastodon]
+
+  - id: mastodon:tag
+    type: mastodon_tag
+    source_type: social_tag
+    platform: mastodon
+    name: Mastodon #TidyTuesday tag
+    tag: TidyTuesday
+    instances:
+      - mastodon.social
+      - fosstodon.org
+      - hachyderm.io
+      - vis.social
+    limit: 40
+    public_api_fallback: true
+    language: en
+    tags: [R, TidyTuesday, Mastodon]
+
+  - id: mastodon:account:r-foundation
+    type: mastodon_account
+    source_type: official_social
+    platform: mastodon
+    name: R Foundation on Mastodon
+    url: https://fosstodon.org/@R_Foundation.rss
+    source_url: https://fosstodon.org/@R_Foundation
+    max_items: 80
+    language: en
+    tags: [R, R Foundation, Mastodon]
+
+  - id: mastodon:account:user-conf
+    type: mastodon_account
+    source_type: official_social
+    platform: mastodon
+    name: useR! conference on Mastodon
+    url: https://mastodon.social/@useR_conf.rss
+    source_url: https://mastodon.social/@useR_conf
+    max_items: 80
+    language: en
+    tags: [R, useR, conference, Mastodon]
+
+  - id: mastodon:account:ropensci
+    type: mastodon_account
+    source_type: organization_social
+    platform: mastodon
+    name: rOpenSci on Mastodon
+    url: https://hachyderm.io/@rOpenSci.rss
+    source_url: https://hachyderm.io/@rOpenSci
+    max_items: 80
+    language: en
+    tags: [R, rOpenSci, Mastodon]
+
+  - id: mastodon:account:cranberries
+    type: mastodon_account
+    source_type: bot_feed
+    platform: mastodon
+    name: CRANberries feed on Mastodon
+    url: https://fosstodon.org/@CRANberriesFeed.rss
+    source_url: https://fosstodon.org/@CRANberriesFeed
+    max_items: 100
+    language: en
+    tags: [R, CRAN, CRANberries, Mastodon]
+
+  - id: mastodon:group:rstats
+    type: html_links
+    source_type: fediverse_group
+    platform: mastodon
+    name: rstats@a.gup.pe group profile
+    url: https://a.gup.pe/u/rstats
+    emit_page_item: true
+    include_regex: "rstats|a.gup.pe|ActivityPub|Mastodon"
+    max_items: 40
+    language: en
+    tags: [R, rstats, Fediverse, Mastodon, Guppe]
+
+  # ---------------------------------------------------------------------------
+  # Korean communities: DCInside and Korea R community pages.
+  # ---------------------------------------------------------------------------
+  - id: dcinside:rstatistics
+    type: dcinside_gallery
+    source_type: korean_community_forum
+    platform: dcinside
+    name: DCInside R(언어) 마이너 갤러리
+    gallery_id: rstatistics
+    source_url: https://m.dcinside.com/board/rstatistics
+    pages: 2
+    max_items: 120
+    language: ko
+    tags: [R, DCInside, 한국어]
+
+  - id: dcinside:rstudio
+    type: dcinside_gallery
+    source_type: korean_community_forum
+    platform: dcinside
+    name: DCInside Rstudio 마이너 갤러리
+    gallery_id: rstudio
+    source_url: https://m.dcinside.com/board/rstudio
+    pages: 2
+    max_items: 120
+    language: ko
+    tags: [R, RStudio, DCInside, 한국어]
+
+  - id: korea:r-user-group
+    type: html_links
+    source_type: korean_community_site
+    platform: web
+    name: Korea R User Group / 한국 R 사용자회
+    url: https://r2bit.com/
+    emit_page_item: true
+    include_regex: "R|Seoul|Meetup|사용자|통계|데이터|r2bit"
+    max_items: 120
+    language: ko
+    tags: [R, Korea R User Group, 한국어]
+
+  - id: korea:seoul-r-meetup
+    type: html_links
+    source_type: korean_community_site
+    platform: web
+    name: Seoul R Meetup
+    url: https://r2bit.com/seoul-r/
+    emit_page_item: true
+    include_regex: "R|Meetup|Shiny|tidyverse|Quarto|RMarkdown|데이터"
+    max_items: 120
+    language: ko
+    tags: [R, Seoul R Meetup, 한국어]
+
+  - id: korea:r-kor
+    type: html_links
+    source_type: korean_community_site
+    platform: web
+    name: R Korea
+    url: https://r-kor.org/
+    emit_page_item: true
+    include_regex: "R|Korea|한국|커뮤니티|사용자|데이터"
+    max_items: 120
+    language: ko
+    tags: [R, R Korea, 한국어]
+
+  # ---------------------------------------------------------------------------
+  # Global community/help channels with no-key RSS/HTML alternatives.
+  # ---------------------------------------------------------------------------
+  - id: community:stackoverflow:r
+    type: rss
+    source_type: qna_feed
+    platform: stackoverflow
+    name: Stack Overflow newest [r] questions
+    url: https://stackoverflow.com/feeds/tag?tagnames=r&sort=newest
+    source_url: https://stackoverflow.com/questions/tagged/r?tab=Newest
+    max_items: 100
+    language: en
+    tags: [R, Stack Overflow, Q&A]
+
+  - id: community:stackoverflow:shiny
+    type: rss
+    source_type: qna_feed
+    platform: stackoverflow
+    name: Stack Overflow newest [shiny] questions
+    url: https://stackoverflow.com/feeds/tag?tagnames=shiny&sort=newest
+    source_url: https://stackoverflow.com/questions/tagged/shiny?tab=Newest
+    max_items: 80
+    language: en
+    tags: [R, Shiny, Stack Overflow, Q&A]
+
+  - id: community:posit:latest-r-filtered
+    type: rss
+    source_type: community_forum
+    platform: posit-community
+    name: Posit Community latest topics filtered for R terms
+    url: https://forum.posit.co/latest.rss
+    source_url: https://forum.posit.co/latest
+    item_include_regex: '\bR\b|RStudio|Posit|Shiny|tidyverse|tidymodels|Quarto|RMarkdown|ggplot|dplyr|rstudio'
+    max_items: 150
+    language: en
+    tags: [R, Posit Community, forum]
+
+  - id: community:bioconductor:support-index
+    type: html_links
+    source_type: community_support_index
+    platform: bioconductor
+    name: Bioconductor Support and Community Forum index
+    url: https://bioconductor.org/help/support/
+    emit_page_item: true
+    include_regex: "Support|Community|Zulip|Mastodon|Bioc-devel|forum|Bioconductor"
+    max_items: 120
+    language: en
+    tags: [R, Bioconductor, support]
+
+  - id: community:bioconductor:build-rss-info
+    type: html_links
+    source_type: official_build_rss_index
+    platform: bioconductor
+    name: Bioconductor build system RSS feed documentation
+    url: https://bioconductor.org/developers/rss-feeds/
+    emit_page_item: true
+    include_regex: "RSS|Atom|build|package|Bioconductor"
+    max_items: 120
+    language: en
+    tags: [R, Bioconductor, RSS]
+
+  - id: community:ropensci:blog
+    type: rss
+    source_type: organization_blog
+    platform: ropensci
+    name: rOpenSci blog RSS
+    url: https://ropensci.org/blog/index.xml
+    source_url: https://ropensci.org/blog/
+    item_include_regex: '\bR\b|RStats|package|CRAN|rOpenSci|software|community'
+    max_items: 150
+    language: en
+    tags: [R, rOpenSci, blog]
+
+  - id: community:ropensci:forum-closed-notice
+    type: html_links
+    source_type: organization_notice
+    platform: ropensci
+    name: rOpenSci forum closing notice and alternatives
+    url: https://ropensci.org/blog/2026/02/23/forum-closing/
+    emit_page_item: true
+    include_regex: "RSS|newsletter|GitHub|community|forum|rOpenSci"
+    max_items: 80
+    language: en
+    tags: [R, rOpenSci, forum, archive]
+
+  - id: community:r-bloggers
+    type: rss
+    source_type: aggregator_blog
+    platform: r-bloggers
+    name: R-bloggers feed
+    url: https://www.r-bloggers.com/feed/
+    source_url: https://www.r-bloggers.com/
+    max_items: 200
+    language: en
+    tags: [R, R-bloggers, aggregator]
+
+  - id: community:rweekly
+    type: rss
+    source_type: newsletter
+    platform: rweekly
+    name: R Weekly feed
+    url: https://rweekly.org/atom.xml
+    source_url: https://rweekly.org/
+    max_items: 100
+    language: en
+    tags: [R, R Weekly, newsletter]
+
+  - id: community:runiverse:global
+    type: rss
+    source_type: package_update_feed
+    platform: r-universe
+    name: R-universe global package update feed
+    url: https://r-universe.dev/feed.xml
+    source_url: https://r-universe.dev/
+    max_items: 200
+    language: en
+    tags: [R, R-universe, packages]
+
+  - id: community:runiverse:ropensci
+    type: rss
+    source_type: package_update_feed
+    platform: r-universe
+    name: rOpenSci R-universe package update feed
+    url: https://ropensci.r-universe.dev/feed.xml
+    source_url: https://ropensci.r-universe.dev/
+    max_items: 200
+    language: en
+    tags: [R, R-universe, rOpenSci, packages]
+
+  - id: community:rladies
+    type: html_links
+    source_type: user_group_index
+    platform: r-community
+    name: R-Ladies Community Explorer
+    url: https://r-community.github.io/user-groups/rladies.html
+    emit_page_item: true
+    include_regex: "R-Ladies|Chapter|Meetup|Korea|Seoul|R"
+    max_items: 300
+    language: en
+    tags: [R, R-Ladies, user-groups]
+
+  - id: community:r-user-groups-worldwide
+    type: html_links
+    source_type: user_group_index
+    platform: r-community
+    name: R User Groups Worldwide
+    url: https://r-community.github.io/user-groups/rugs.html
+    emit_page_item: true
+    include_regex: "R|Korea|Seoul|Meetup|User Group|Tidyverse"
+    max_items: 400
+    language: en
+    tags: [R, user-groups, meetup]
