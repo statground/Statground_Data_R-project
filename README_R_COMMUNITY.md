@@ -13,7 +13,7 @@
 
 ## 실행 방식
 
-기본 스케줄은 6시간마다 실행되며 결과는 `data/collected/r/` 아래 JSONL/report로 생성한 뒤 GitHub Actions artifact로 업로드합니다. 수동 실행에서 `commit_output=true`를 선택하면 같은 경로의 결과 파일을 저장소에 커밋할 수 있습니다.
+기본 스케줄은 4시간마다 실행됩니다. 먼저 `data/collected/r/` 아래 JSONL/report를 생성하고, 이어서 `go run ./cmd/rproject-collector community`가 `r.community.events` Kafka 토픽으로 `r.community.item.v1` 이벤트를 발행합니다. GitHub Actions artifact는 운영 디버깅용으로 계속 업로드합니다. 수동 실행에서 `commit_output=true`를 선택하면 같은 경로의 결과 파일을 저장소에 커밋할 수 있습니다.
 
 ```bash
 python scripts/collect_r_sources.py \
@@ -28,4 +28,4 @@ python scripts/collect_r_sources.py \
 
 ## 운영 DDL
 
-`ddl/`에는 AliSQL SSOT 예시 테이블과 ClickHouse 분석 이벤트 로그 예시가 포함되어 있습니다. GitHub Actions는 기본적으로 DB에 직접 쓰지 않고, 생성된 JSONL을 ingest 단계에서 검증 후 반영하는 구조를 전제로 둡니다.
+`ddl/`에는 AliSQL SSOT 예시 테이블과 ClickHouse 분석 이벤트 로그 예시가 포함되어 있습니다. 실제 운영 적재 계약은 `Statground_SQL/Clickhouse/Data_R_Community_*`에 있으며, Kafka -> `Data_R_Community_Log` -> `Data_R_Community_Raw` -> `Data_R_Community_Service`/`Data_R_Community_Mart` 흐름을 기준으로 합니다.

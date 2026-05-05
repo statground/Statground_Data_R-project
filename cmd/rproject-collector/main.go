@@ -31,6 +31,7 @@ import (
 const (
 	defaultPackageTopic = "rpkg.events"
 	defaultYouTubeTopic = "r.youtube.events"
+	defaultCommunityTopic = "r.community.events"
 	defaultWebRTopic    = "webr.events"
 	userAgent           = "StatgroundBot/1.0 (+https://www.statground.net; R ecosystem collector)"
 	youtubeBoilerplateDescription = "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
@@ -190,7 +191,7 @@ type atomLink struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: rproject-collector <package|youtube|mastodon> [flags]"))
+		fatal(errors.New("usage: rproject-collector <package|youtube|community|mastodon> [flags]"))
 	}
 	ctx := context.Background()
 	var err error
@@ -199,6 +200,8 @@ func main() {
 		err = runPackage(ctx, os.Args[2:])
 	case "youtube":
 		err = runYouTube(ctx, os.Args[2:])
+	case "community":
+		err = runCommunity(ctx, os.Args[2:])
 	case "mastodon":
 		err = runMastodon(ctx, os.Args[2:])
 	default:
@@ -296,6 +299,69 @@ func runPackage(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("published=%d\n", total)
 	return nil
+}
+
+func runCommunity(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("community", flag.ExitOnError)
+	jsonlPath := fs.String("jsonl", envString("R_COMMUNITY_JSONL", "data/collected/r/latest.jsonl"), "normalized R Community JSONL path")
+	topic := fs.String("topic", envString("R_COMMUNITY_KAFKA_TOPIC", defaultCommunityTopic), "Kafka topic")
+	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "print events instead of Kafka")
+	limit := fs.Int("limit", envInt("R_COMMUNITY_EVENT_LIMIT", 0), "max JSONL rows to publish; 0 means all")
+	fs.Parse(args)
+
+	events, err := readCommunityJSONLEvents(*jsonlPath, *limit)
+	if err != nil {
+		return err
+	}
+	pub := newPublisher(*topic, "statground-rcommunity-go-collector", *dryRun)
+	if err := pub.validate(ctx); err != nil {
+		return err
+	}
+	if err := pub.publishGeneric(ctx, events); err != nil {
+		return err
+	}
+	fmt.Printf("published=%d topic=%s jsonl=%s\n", len(events), *topic, *jsonlPath)
+	return nil
+}
+
+func readCommunityJSONLEvents(path string, limit int) ([]genericEvent, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]genericEvent, 0)
+	for lineNo, rawLine := range bytes.Split(body, []byte("\n")) {
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 {
+			continue
+		}
+		if limit > 0 && len(events) >= limit {
+			break
+		}
+		var row map[string]any
+		if err := json.Unmarshal(line, &row); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		events = append(events, communityRowEvent(row))
+	}
+	return events, nil
+}
+
+func communityRowEvent(row map[string]any) genericEvent {
+	payload := make(map[string]any, len(row)+6)
+	for key, value := range row {
+		payload[key] = value
+	}
+	payload["payload_schema"] = "r_community_item_jsonl_v1"
+	payload["source_method"] = "r_community_sources_jsonl"
+	payload["collection_status"] = "collected"
+	payload["repository"] = "R-Community"
+	payload["row_external_id"] = stringAny(row["external_id"])
+
+	sourceURL := firstNonEmpty(stringAny(row["canonical_url"]), stringAny(row["source_url"]))
+	source := firstNonEmpty(stringAny(row["source_id"]), stringAny(row["source_name"]), "r_community_sources_jsonl")
+	observedAt := firstNonEmpty(stringAny(row["published_at"]), stringAny(row["collected_at"]))
+	return newGenericEvent("r.community.item.v1", source, sourceURL, "R-Community", "", "", observedAt, payload)
 }
 
 type packageJobLimits struct {
