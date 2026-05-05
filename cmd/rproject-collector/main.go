@@ -50,6 +50,12 @@ var (
 	ytChannelRE    = regexp.MustCompile(`/(channel/[A-Za-z0-9_-]+|@[A-Za-z0-9._-]+|c/[A-Za-z0-9._-]+|user/[A-Za-z0-9._-]+)`)
 	ytPlaylistRE   = regexp.MustCompile(`(?:/playlist\?list=|playlist\\u003flist=|playlist\\\?list=)([A-Za-z0-9_-]+)`)
 	depVersionRE   = regexp.MustCompile(`\s*\(.*?\)\s*`)
+	boardURLRE      = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>()"']+`)
+	boardMdLinkRE   = regexp.MustCompile(`\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)`)
+	boardFirstTagRE = regexp.MustCompile(`(?is)<\s*(h2|h3|p|ul|ol|li|strong|em|code|pre|blockquote)\b`)
+	boardAnyTagRE   = regexp.MustCompile(`(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>`)
+	boardAnchorRE   = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
+	boardAnchorOnlyRE = regexp.MustCompile(`(?is)^<a\b[^>]*>(.*?)</a>$`)
 	statusOrder     = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
 	newsCandidates  = []string{"news/news.html", "news.html"}
 	defaultWebsites = []string{
@@ -66,6 +72,11 @@ var (
 		"https://www.r-consortium.org/news/blogs",
 	}
 )
+
+var boardAllowedTags = map[string]bool{
+	"h2": true, "h3": true, "p": true, "ul": true, "ol": true, "li": true,
+	"strong": true, "em": true, "code": true, "pre": true, "blockquote": true,
+}
 
 type genericEvent struct {
 	EventID        string `json:"event_id"`
@@ -114,6 +125,22 @@ type publisher struct {
 	dryRun       bool
 	writeTimeout time.Duration
 	chunkSize    int
+	createTopic  bool
+	partitions   int
+	replicas     int
+}
+
+type aiClient struct {
+	httpClient *http.Client
+	keys       map[string]string
+	providers  []string
+}
+
+type mastodonDedupState struct {
+	raw           map[string]bool
+	rawByURL      map[string]string
+	translated    map[string]bool
+	translatedURL map[string]bool
 }
 
 type cranRecord map[string]string
@@ -307,15 +334,53 @@ func runMastodon(ctx context.Context, args []string) error {
 	limit := fs.Int("limit", envInt("MASTODON_LIMIT", 40), "RSS item limit")
 	instance := fs.String("instance", envString("MASTODON_INSTANCE", "https://fosstodon.org"), "Mastodon instance")
 	acct := fs.String("acct", envString("MASTODON_ACCT", "R_Foundation"), "Mastodon account")
+	translate := fs.Bool("translate", envBool("MASTODON_TRANSLATE_ENABLED", true), "translate Mastodon board payloads to Korean")
+	staleLimit := fs.Int("stale-translation-limit", envInt("MASTODON_STALE_TRANSLATION_LIMIT", 20), "missing or fallback board rows to translate from ClickHouse")
+	backfillOnly := fs.Bool("backfill-board", envBool("MASTODON_BACKFILL_BOARD", false), "only translate missing or fallback board rows from ClickHouse")
+	translationModel := fs.String("translation-model", envString("MASTODON_TRANSLATION_MODEL", envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free")), "AI model for Korean board translation")
 	fs.Parse(args)
 
+	var ai *aiClient
+	if *translate || *staleLimit > 0 || *backfillOnly {
+		ai = newAIClient(time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second)
+		if !ai.enabled() {
+			return errors.New("Mastodon board translation is enabled, but no AI provider key is configured")
+		}
+	}
 	pub := newPublisher(*topic, "statground-mastodon-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
 		return err
 	}
-	events, err := collectMastodonRSS(*instance, *acct, *limit)
-	if err != nil {
-		return err
+	var chCfg *clickHouseQueryConfig
+	if (*translate && !*dryRun) || *staleLimit > 0 || *backfillOnly {
+		cfg, err := newClickHouseQueryConfig()
+		if err != nil {
+			return err
+		}
+		chCfg = &cfg
+	}
+	dedup := emptyMastodonDedupState()
+	if chCfg != nil && !*backfillOnly {
+		loaded, err := loadMastodonDedupState(ctx, *chCfg)
+		if err != nil {
+			return err
+		}
+		dedup = loaded
+	}
+	events := make([]webREvent, 0)
+	if !*backfillOnly {
+		currentEvents, err := collectMastodonRSS(*instance, *acct, *limit, ai, *translationModel, *translate, dedup)
+		if err != nil {
+			return err
+		}
+		events = append(events, currentEvents...)
+	}
+	if *staleLimit > 0 || *backfillOnly {
+		backfillEvents, err := collectMastodonBoardBackfill(ctx, *chCfg, maxInt(1, *staleLimit), ai, *translationModel)
+		if err != nil {
+			return err
+		}
+		events = append(events, backfillEvents...)
 	}
 	if err := pub.publishWebR(ctx, events); err != nil {
 		return err
@@ -964,7 +1029,7 @@ func extractYouTubeSearchResults(text, query, searchURL string) []map[string]str
 	return firstNMaps(out, maxInt(1, envInt("R_YOUTUBE_SEARCH_RESULT_LIMIT", 80)))
 }
 
-func collectMastodonRSS(instance, acct string, limit int) ([]webREvent, error) {
+func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translationModel string, translate bool, dedup mastodonDedupState) ([]webREvent, error) {
 	instance = strings.TrimRight(firstNonEmpty(instance, "https://fosstodon.org"), "/")
 	acct = strings.TrimPrefix(firstNonEmpty(acct, "R_Foundation"), "@")
 	sourceURL := fmt.Sprintf("%s/@%s.rss", instance, url.PathEscape(acct))
@@ -1002,6 +1067,9 @@ func collectMastodonRSS(instance, acct string, limit int) ([]webREvent, error) {
 		}
 		statusID := stableID(statusURL)
 		rowUUID := deterministicUUID("mastodon:" + host + ":" + acct + ":" + statusID)
+		if existingUUID := dedup.rawByURL[statusURL]; existingUUID != "" {
+			rowUUID = existingUUID
+		}
 		createdAt := parseRSSDate(item.PubDate, time.Now())
 		contentHTML := strings.TrimSpace(item.Description)
 		contentText := stripTags(contentHTML)
@@ -1044,26 +1112,45 @@ func collectMastodonRSS(instance, acct string, limit int) ([]webREvent, error) {
 			"fetched_at":             formatKST(time.Now()),
 			"source_method":          "mastodon_public_rss_no_api",
 		}
-		events = append(events, newWebREvent("webr.mastodon.raw.v1", statusURL, rawPayload, createdAt))
-		boardTitle := firstNonEmpty(stripTags(item.Title), firstWords(contentText, 12), "R Foundation")
-		boardPayload := map[string]any{
-			"uuid":          rowUUID,
-			"title":         boardTitle,
-			"content":       safeHTML(firstNonEmpty(contentText, boardTitle)),
-			"active":        1,
-			"created_at":    formatKST(createdAt),
-			"updated_at":    nil,
-			"language_code": "ko",
-			"created_log": map[string]any{
-				"type":               "mastodon_board_rss_fallback",
-				"source":             "Statground_Data_R-project",
-				"source_method":      "mastodon_public_rss_no_api",
-				"translation_status": "not_translated",
-				"raw_status_url":     statusURL,
-			},
-			"updated_log": nil,
+		if !dedup.raw[rowUUID] && dedup.rawByURL[statusURL] == "" {
+			events = append(events, newWebREvent("webr.mastodon.raw.v1", statusURL, rawPayload, createdAt))
+			dedup.raw[rowUUID] = true
+			dedup.rawByURL[statusURL] = rowUUID
 		}
+		if dedup.translated[rowUUID] || dedup.translatedURL[statusURL] {
+			count++
+			continue
+		}
+		boardTitle := firstNonEmpty(stripTags(item.Title), firstWords(contentText, 12), "R Foundation")
+		boardContent := safeMastodonBoardContent(boardTitle, safeHTML(firstNonEmpty(contentText, boardTitle)))
+		if translate {
+			translatedTitle, translatedContent, err := translateMastodonStatus(ai, translationModel, boardTitle, contentText)
+			if err != nil {
+				events = append(events, newWebREvent("webr.mastodon.log.v1", statusURL, map[string]any{
+					"uuid":          uuid7(),
+					"created_at":    formatKST(nowKST()),
+					"language_code": "en",
+					"created_log": map[string]any{
+						"type":          "mastodon_pipeline",
+						"stage":         "translation_failed",
+						"instance":      instance,
+						"acct":          acct,
+						"status_id":     statusID,
+						"status_url":    statusURL,
+						"error":         err.Error(),
+						"source_method": "mastodon_public_rss_no_api",
+					},
+				}, nowKST()))
+				count++
+				continue
+			}
+			boardTitle = translatedTitle
+			boardContent = translatedContent
+		}
+		boardPayload := mastodonBoardPayload(rowUUID, statusURL, statusID, createdAt, time.Time{}, boardTitle, boardContent)
 		events = append(events, newWebREvent("webr.mastodon.board.v1", statusURL, boardPayload, createdAt))
+		dedup.translated[rowUUID] = true
+		dedup.translatedURL[statusURL] = true
 		count++
 	}
 	done := nowKST()
@@ -1081,6 +1168,379 @@ func collectMastodonRSS(instance, acct string, limit int) ([]webREvent, error) {
 		},
 	}, done))
 	return events, nil
+}
+
+func emptyMastodonDedupState() mastodonDedupState {
+	return mastodonDedupState{
+		raw:           map[string]bool{},
+		rawByURL:      map[string]string{},
+		translated:    map[string]bool{},
+		translatedURL: map[string]bool{},
+	}
+}
+
+func loadMastodonDedupState(ctx context.Context, cfg clickHouseQueryConfig) (mastodonDedupState, error) {
+	state := emptyMastodonDedupState()
+	rawRows, err := cfg.queryJSONEachRow(`SELECT
+    toString(uuid) AS uuid,
+    toString(status_url) AS status_url
+FROM
+(
+    SELECT
+        uuid,
+        status_url,
+        row_number() OVER (
+            PARTITION BY status_url
+            ORDER BY fetched_at DESC, ingested_at DESC
+        ) AS rn
+    FROM Data_R_Project_Mastodon_Raw.raw
+    WHERE active != 0
+      AND notEmpty(status_url)
+)
+WHERE rn = 1
+FORMAT JSONEachRow`)
+	if err != nil {
+		return state, err
+	}
+	for _, row := range rawRows {
+		if uuid := stringAny(row["uuid"]); uuid != "" {
+			state.raw[uuid] = true
+			if statusURL := stringAny(row["status_url"]); statusURL != "" {
+				state.rawByURL[statusURL] = uuid
+			}
+		}
+	}
+	boardRows, err := cfg.queryJSONEachRow(`SELECT
+    toString(uuid) AS uuid,
+    toString(status_url) AS status_url
+FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+WHERE language_code = 'ko'
+  AND active != 0
+  AND position(toString(created_log), 'mastodon_board_translation') > 0
+FORMAT JSONEachRow`)
+	if err != nil {
+		return state, err
+	}
+	for _, row := range boardRows {
+		if uuid := stringAny(row["uuid"]); uuid != "" {
+			state.translated[uuid] = true
+		}
+		if statusURL := stringAny(row["status_url"]); statusURL != "" {
+			state.translatedURL[statusURL] = true
+		}
+	}
+	return state, nil
+}
+
+func collectMastodonBoardBackfill(ctx context.Context, cfg clickHouseQueryConfig, limit int, ai *aiClient, translationModel string) ([]webREvent, error) {
+	if ai == nil || !ai.enabled() {
+		return nil, errors.New("Mastodon board backfill requires an AI provider key")
+	}
+	queryLimit := maxInt(1, limit)
+	query := fmt.Sprintf(`SELECT
+    toString(r.uuid) AS uuid,
+    toString(r.status_url) AS status_url,
+    toString(r.status_id) AS status_id,
+    toString(r.status_created_at) AS status_created_at,
+    toString(r.content_text) AS content_text,
+    toString(r.content_html) AS content_html
+FROM Data_R_Project_Mastodon_Raw.raw AS r
+LEFT JOIN
+(
+    SELECT
+        uuid,
+        toString(created_log) AS board_log
+    FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+    WHERE active != 0
+      AND language_code = 'ko'
+) AS b ON b.uuid = r.uuid
+WHERE r.active != 0
+  AND r.status_url NOT IN
+  (
+      SELECT status_url
+      FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+      WHERE active != 0
+        AND language_code = 'ko'
+        AND notEmpty(status_url)
+        AND position(toString(created_log), 'mastodon_board_translation') > 0
+  )
+  AND ifNull(b.board_log, '') NOT LIKE '%%mastodon_board_translation%%'
+  AND (
+      ifNull(b.board_log, '') = ''
+      OR position(b.board_log, 'mastodon_board_rss_fallback') > 0
+      OR position(b.board_log, '"translation_status":"not_translated"') > 0
+  )
+ORDER BY r.status_created_at DESC
+LIMIT %d
+FORMAT JSONEachRow`, queryLimit)
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]webREvent, 0, len(rows)+2)
+	started := nowKST()
+	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Project_Mastodon_Raw.raw", map[string]any{
+		"uuid":          uuid7(),
+		"created_at":    formatKST(started),
+		"language_code": "en",
+		"created_log": map[string]any{
+			"type":          "mastodon_pipeline",
+			"stage":         "board_backfill_started",
+			"limit":         queryLimit,
+			"source_method": "clickhouse_raw_to_translated_board",
+		},
+	}, started))
+	published := 0
+	for _, row := range rows {
+		rowUUID := stringAny(row["uuid"])
+		statusURL := stringAny(row["status_url"])
+		statusID := stringAny(row["status_id"])
+		statusCreated := parseKSTTime(stringAny(row["status_created_at"]), started)
+		sourceTitle := firstWords(firstNonEmpty(stripTags(stringAny(row["content_html"])), stringAny(row["content_text"]), "R Foundation"), 16)
+		sourceText := firstNonEmpty(stringAny(row["content_text"]), stripTags(stringAny(row["content_html"])), sourceTitle)
+		title, content, err := translateMastodonStatus(ai, translationModel, sourceTitle, sourceText)
+		if err != nil {
+			events = append(events, newWebREvent("webr.mastodon.log.v1", statusURL, map[string]any{
+				"uuid":          uuid7(),
+				"created_at":    formatKST(nowKST()),
+				"language_code": "en",
+				"created_log": map[string]any{
+					"type":          "mastodon_pipeline",
+					"stage":         "board_backfill_translation_failed",
+					"status_id":     statusID,
+					"status_url":    statusURL,
+					"error":         err.Error(),
+					"source_method": "clickhouse_raw_to_translated_board",
+				},
+			}, nowKST()))
+			continue
+		}
+		events = append(events, newWebREvent("webr.mastodon.board.v1", statusURL, mastodonBoardPayload(rowUUID, statusURL, statusID, statusCreated, nowKST(), title, content), statusCreated))
+		published++
+	}
+	done := nowKST()
+	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Project_Mastodon_Raw.raw", map[string]any{
+		"uuid":          uuid7(),
+		"created_at":    formatKST(done),
+		"language_code": "en",
+		"created_log": map[string]any{
+			"type":          "mastodon_pipeline",
+			"stage":         "board_backfill_done",
+			"published":     published,
+			"scanned":       len(rows),
+			"source_method": "clickhouse_raw_to_translated_board",
+		},
+	}, done))
+	return events, nil
+}
+
+func mastodonBoardPayload(rowUUID, statusURL, statusID string, createdAt, updatedAt time.Time, title, content string) map[string]any {
+	title = cleanBoardTitle(title)
+	if title == "" {
+		title = "R Foundation"
+	}
+	content = safeMastodonBoardContent(title, content)
+	var updated any
+	if !updatedAt.IsZero() {
+		updated = formatKST(updatedAt)
+	}
+	return map[string]any{
+		"uuid":          rowUUID,
+		"title":         title,
+		"content":       content,
+		"active":        1,
+		"created_at":    formatKST(createdAt),
+		"updated_at":    updated,
+		"language_code": "ko",
+		"created_log": map[string]any{
+			"type":             "mastodon_board_translation",
+			"source":           "Statground_Data_R-project",
+			"source_method":    "mastodon_public_rss_no_api",
+			"prompt_language":  "en",
+			"target_language":  "ko",
+			"hyperlinks":       "removed",
+			"content_fallback": "title_when_blank",
+			"raw_status_url":   statusURL,
+			"raw_status_id":    statusID,
+			"raw_created_at":   createdAt.UTC().Format(time.RFC3339Nano),
+		},
+		"updated_log": nil,
+	}
+}
+
+func translateMastodonStatus(ai *aiClient, model, title, text string) (string, string, error) {
+	if ai == nil || !ai.enabled() {
+		return "", "", errors.New("AI provider key is not configured")
+	}
+	title = firstNonEmpty(title, firstWords(text, 12), "R Foundation")
+	text = firstNonEmpty(text, title)
+	translatedTitle := title
+	var err error
+	if !looksKorean(title, 0.20) {
+		translatedTitle, err = ai.chat(mastodonTitlePrompt(title, text), model)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	translatedTitle = cleanBoardTitle(translatedTitle)
+	if translatedTitle == "" {
+		translatedTitle = cleanBoardTitle(title)
+	}
+	translatedContent := text
+	if !looksKorean(text, 0.25) {
+		translatedContent, err = ai.chat(mastodonContentPrompt(title, text), model)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	translatedContent, err = sanitizeBoardHTML(translatedContent)
+	if err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(translatedContent) == "" {
+		translatedContent = safeHTML(firstNonEmpty(translatedTitle, title))
+	}
+	return translatedTitle, safeMastodonBoardContent(translatedTitle, translatedContent), nil
+}
+
+func mastodonTitlePrompt(title, text string) string {
+	return fmt.Sprintf(`You are a professional Korean translator for R Project community announcements.
+
+Output rules:
+- Return exactly one Korean title line.
+- Do not include explanations, labels, quotes, Markdown, HTML, URLs, or hyperlinks.
+- Preserve R, CRAN, package names, function names, version numbers, and proper nouns.
+- Keep it concise and natural for a Korean Web-R board.
+
+Source title:
+%s
+
+Source text:
+%s`, title, truncateRunes(text, 1600))
+}
+
+func mastodonContentPrompt(title, text string) string {
+	return fmt.Sprintf(`You are an editorial Korean translator for R Project community announcements.
+
+Translate and lightly edit the source for a Korean Web-R community board post.
+
+Output rules:
+- Return only a compact HTML fragment. The first character must be "<".
+- Never use <html>, <head>, or <body>.
+- Allowed tags only: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>.
+- Do not output hyperlinks, URLs, Markdown links, HTML <a> tags, href attributes, citations, source links, or "read more" links.
+- Use polite formal Korean ending in ~합니다 or ~입니다.
+- Preserve R, CRAN, package names, function names, code, numbers, and version strings.
+- Do not add an introduction, explanation, label, or meta-commentary.
+
+Source title:
+%s
+
+Source body:
+%s`, title, truncateRunes(text, 7000))
+}
+
+func newAIClient(timeout time.Duration) *aiClient {
+	keys := map[string]string{
+		"openrouter":    strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
+		"groq":          strings.TrimSpace(os.Getenv("GROQ_API_KEY")),
+		"cerebras":      strings.TrimSpace(os.Getenv("CEREBRAS_API_KEY")),
+		"github_models": strings.TrimSpace(os.Getenv("GH_MODELS_API_KEY")),
+	}
+	providers := make([]string, 0, 4)
+	for _, provider := range []string{"openrouter", "groq", "cerebras", "github_models"} {
+		if keys[provider] != "" {
+			providers = append(providers, provider)
+		}
+	}
+	return &aiClient{httpClient: &http.Client{Timeout: timeout}, keys: keys, providers: providers}
+}
+
+func (a *aiClient) enabled() bool {
+	return a != nil && len(a.providers) > 0
+}
+
+func (a *aiClient) chat(prompt, model string) (string, error) {
+	errs := make([]string, 0, len(a.providers))
+	for _, provider := range a.providers {
+		out, err := a.callProvider(provider, prompt, model)
+		if err == nil && strings.TrimSpace(out) != "" {
+			return strings.TrimSpace(out), nil
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", provider, err))
+		}
+	}
+	return "", errors.New(strings.Join(errs, " | "))
+}
+
+func (a *aiClient) callProvider(provider, prompt, model string) (string, error) {
+	endpoint, headers, usedModel, err := a.providerRequest(provider, model)
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"model": usedModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"stream": false,
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 700))
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return "", err
+	}
+	choices, _ := decoded["choices"].([]any)
+	if len(choices) == 0 {
+		return "", nil
+	}
+	first, _ := choices[0].(map[string]any)
+	if message, _ := first["message"].(map[string]any); message != nil {
+		return stringAny(message["content"]), nil
+	}
+	return stringAny(first["text"]), nil
+}
+
+func (a *aiClient) providerRequest(provider, model string) (string, map[string]string, string, error) {
+	headers := map[string]string{"Content-Type": "application/json"}
+	switch provider {
+	case "openrouter":
+		headers["Authorization"] = "Bearer " + a.keys[provider]
+		return "https://openrouter.ai/api/v1/chat/completions", headers, model, nil
+	case "groq":
+		headers["Authorization"] = "Bearer " + a.keys[provider]
+		return "https://api.groq.com/openai/v1/chat/completions", headers, normalizeGroqModel(model), nil
+	case "cerebras":
+		headers["Authorization"] = "Bearer " + a.keys[provider]
+		return "https://api.cerebras.ai/v1/chat/completions", headers, normalizeCerebrasModel(model), nil
+	case "github_models":
+		headers["Authorization"] = "Bearer " + a.keys[provider]
+		headers["Accept"] = "application/vnd.github+json"
+		headers["X-GitHub-Api-Version"] = "2026-03-10"
+		return "https://models.github.ai/inference/chat/completions", headers, normalizeGitHubModel(model), nil
+	default:
+		return "", nil, "", fmt.Errorf("unsupported AI provider: %s", provider)
+	}
 }
 
 func fetchCRANPackages() ([]cranRecord, error) {
@@ -1397,6 +1857,9 @@ func newPublisher(topic, clientID string, dryRun bool) *publisher {
 		dryRun:       dryRun,
 		writeTimeout: time.Duration(envInt("KAFKA_WRITE_TIMEOUT", 60)) * time.Second,
 		chunkSize:    maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 100)),
+		createTopic:  envBool("KAFKA_CREATE_TOPIC", envBool("KAFKA_ALLOW_TOPIC_CREATE", true)),
+		partitions:   maxInt(1, envInt("KAFKA_TOPIC_PARTITIONS", 3)),
+		replicas:     maxInt(1, envInt("KAFKA_TOPIC_REPLICATION_FACTOR", 1)),
 	}
 }
 
@@ -1415,6 +1878,37 @@ func (p *publisher) validate(ctx context.Context) error {
 			return fmt.Errorf("Kafka broker %q is not reachable from GitHub Actions", broker)
 		}
 	}
+	dialer := p.dialer()
+	probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	partitions, err := p.readPartitions(probeCtx, dialer)
+	if err != nil {
+		if p.createTopic && kafkaTopicMissing(err) {
+			if createErr := p.createKafkaTopic(probeCtx, dialer); createErr != nil {
+				fmt.Printf("[kafka] topic_create_deferred topic=%s err=%v\n", p.topic, createErr)
+			}
+			partitions, err = p.readPartitions(probeCtx, dialer)
+			if err != nil && kafkaTopicMissing(err) {
+				fmt.Printf("[kafka] topic_metadata_missing topic=%s auto_topic_creation=true\n", p.topic)
+				return nil
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("kafka metadata read failed topic=%s: %w", p.topic, err)
+		}
+	}
+	if len(partitions) == 0 {
+		return fmt.Errorf("kafka metadata found zero partitions topic=%s", p.topic)
+	}
+	for _, partition := range partitions {
+		if isLoopbackHost(partition.Leader.Host) {
+			return fmt.Errorf("kafka metadata advertises loopback listener %s:%d", partition.Leader.Host, partition.Leader.Port)
+		}
+	}
+	return nil
+}
+
+func (p *publisher) dialer() *kafka.Dialer {
 	dialer := &kafka.Dialer{ClientID: p.clientID, Timeout: 10 * time.Second}
 	if p.username != "" || p.password != "" {
 		dialer.SASLMechanism = plain.Mechanism{Username: p.username, Password: p.password}
@@ -1422,22 +1916,42 @@ func (p *publisher) validate(ctx context.Context) error {
 	if p.usesTLS() {
 		dialer.TLS = kafkaTLSConfig()
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	conn, err := dialer.DialContext(probeCtx, "tcp", p.brokers[0])
+	return dialer
+}
+
+func (p *publisher) readPartitions(ctx context.Context, dialer *kafka.Dialer) ([]kafka.Partition, error) {
+	conn, err := dialer.DialContext(ctx, "tcp", p.brokers[0])
 	if err != nil {
-		return fmt.Errorf("kafka preflight failed for %q: %w", p.brokers[0], err)
+		return nil, fmt.Errorf("kafka preflight failed for %q: %w", p.brokers[0], err)
 	}
 	defer conn.Close()
-	partitions, err := conn.ReadPartitions(p.topic)
+	return conn.ReadPartitions(p.topic)
+}
+
+func (p *publisher) createKafkaTopic(ctx context.Context, dialer *kafka.Dialer) error {
+	conn, err := dialer.DialContext(ctx, "tcp", p.brokers[0])
 	if err != nil {
-		return fmt.Errorf("kafka metadata read failed topic=%s: %w", p.topic, err)
+		return err
 	}
-	for _, partition := range partitions {
-		if isLoopbackHost(partition.Leader.Host) {
-			return fmt.Errorf("kafka metadata advertises loopback listener %s:%d", partition.Leader.Host, partition.Leader.Port)
-		}
+	controller, err := conn.Controller()
+	conn.Close()
+	if err != nil {
+		return err
 	}
+	controllerConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+	if err != nil {
+		return err
+	}
+	defer controllerConn.Close()
+	err = controllerConn.CreateTopics(kafka.TopicConfig{
+		Topic:             p.topic,
+		NumPartitions:     p.partitions,
+		ReplicationFactor: p.replicas,
+	})
+	if err != nil && !kafkaTopicAlreadyExists(err) {
+		return err
+	}
+	fmt.Printf("[kafka] topic_ready topic=%s partitions=%d replicas=%d\n", p.topic, p.partitions, p.replicas)
 	return nil
 }
 
@@ -1482,7 +1996,7 @@ func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
 		Topic:                  p.topic,
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
-		AllowAutoTopicCreation: false,
+		AllowAutoTopicCreation: p.createTopic,
 		BatchSize:              p.chunkSize,
 		BatchTimeout:           500 * time.Millisecond,
 		WriteTimeout:           p.writeTimeout,
@@ -1512,6 +2026,26 @@ func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
 
 func (p *publisher) usesTLS() bool {
 	return kafkaSecurityUsesTLS(p.security)
+}
+
+func kafkaTopicMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unknown topic") ||
+		strings.Contains(message, "unknown topic or partition") ||
+		strings.Contains(message, "[3]")
+}
+
+func kafkaTopicAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "topic already exists") ||
+		strings.Contains(message, "already exists") ||
+		strings.Contains(message, "[36]")
 }
 
 func kafkaSecurityUsesTLS(value string) bool {
@@ -1613,13 +2147,13 @@ func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 		Timeout:  time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
 	}
 	if cfg.Host == "" {
-		return cfg, errors.New("CH_HOST or CLICKHOUSE_HOST is required for DB-backed YouTube seeds")
+		return cfg, errors.New("CH_HOST or CLICKHOUSE_HOST is required for DB-backed collectors")
 	}
 	if cfg.User == "" {
-		return cfg, errors.New("CH_USER or CLICKHOUSE_USER is required for DB-backed YouTube seeds")
+		return cfg, errors.New("CH_USER or CLICKHOUSE_USER is required for DB-backed collectors")
 	}
 	if cfg.Password == "" {
-		return cfg, errors.New("CH_PASSWORD or CLICKHOUSE_PASSWORD is required for DB-backed YouTube seeds")
+		return cfg, errors.New("CH_PASSWORD or CLICKHOUSE_PASSWORD is required for DB-backed collectors")
 	}
 	return cfg, nil
 }
@@ -1990,6 +2524,143 @@ func safeHTML(text string) string {
 	return "<p>" + html.EscapeString(text) + "</p>"
 }
 
+func sanitizeBoardHTML(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```html")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(value, "<") {
+		if loc := boardFirstTagRE.FindStringIndex(value); loc != nil {
+			value = strings.TrimSpace(value[loc[0]:])
+		} else {
+			value = "<p>" + html.EscapeString(removeBoardURLs(value)) + "</p>"
+		}
+	}
+	value = removeBoardBlockTag(value, "script")
+	value = removeBoardBlockTag(value, "style")
+	value = removeBoardBlockTag(value, "iframe")
+	value = removeBoardVoidTag(value, "img")
+	for {
+		next := boardAnchorRE.ReplaceAllStringFunc(value, func(match string) string {
+			inner := boardAnchorOnlyRE.FindStringSubmatch(match)
+			if len(inner) < 2 {
+				return ""
+			}
+			return html.EscapeString(removeBoardURLs(stripTags(inner[1])))
+		})
+		if next == value {
+			break
+		}
+		value = next
+	}
+	value = boardMdLinkRE.ReplaceAllString(value, "$1")
+	value = boardURLRE.ReplaceAllString(value, "")
+	value = boardAnyTagRE.ReplaceAllStringFunc(value, func(tag string) string {
+		match := boardAnyTagRE.FindStringSubmatch(tag)
+		if len(match) < 2 {
+			return ""
+		}
+		name := strings.ToLower(match[1])
+		if !boardAllowedTags[name] {
+			return ""
+		}
+		if strings.HasPrefix(strings.TrimSpace(tag), "</") {
+			return "</" + name + ">"
+		}
+		return "<" + name + ">"
+	})
+	value = strings.TrimSpace(value)
+	value = regexp.MustCompile(`\s+</`).ReplaceAllString(value, "</")
+	value = regexp.MustCompile(`>\s+`).ReplaceAllString(value, ">")
+	if !strings.Contains(value, "<") {
+		value = "<p>" + html.EscapeString(removeBoardURLs(value)) + "</p>"
+	}
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "<a") || strings.Contains(lower, "href=") || boardURLRE.MatchString(value) {
+		return "", errors.New("sanitized translation still contains a hyperlink or URL")
+	}
+	return value, nil
+}
+
+func safeMastodonBoardContent(title, content string) string {
+	content = strings.TrimSpace(content)
+	if content != "" && strings.TrimSpace(stripTags(content)) != "" {
+		if sanitized, err := sanitizeBoardHTML(content); err == nil && strings.TrimSpace(stripTags(sanitized)) != "" {
+			return sanitized
+		}
+	}
+	return safeHTML(removeBoardURLs(firstNonEmpty(title, "R Foundation")))
+}
+
+func removeBoardBlockTag(value, name string) string {
+	re := regexp.MustCompile(`(?is)<` + regexp.QuoteMeta(name) + `\b[^>]*>.*?</` + regexp.QuoteMeta(name) + `>`)
+	return re.ReplaceAllString(value, "")
+}
+
+func removeBoardVoidTag(value, name string) string {
+	re := regexp.MustCompile(`(?is)<` + regexp.QuoteMeta(name) + `\b[^>]*>`)
+	return re.ReplaceAllString(value, "")
+}
+
+func cleanBoardTitle(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	if i := strings.IndexAny(value, "\r\n"); i >= 0 {
+		value = value[:i]
+	}
+	prefixRE := regexp.MustCompile(`(?i)^(translation|translated title|title|result|output|번역|번역문|제목|결과|출력)\s*[:\-]\s*`)
+	value = prefixRE.ReplaceAllString(strings.TrimSpace(value), "")
+	value = strings.Trim(value, " \t\"'“”‘’")
+	return removeBoardURLs(value)
+}
+
+func removeBoardURLs(value string) string {
+	value = boardMdLinkRE.ReplaceAllString(value, "$1")
+	value = boardURLRE.ReplaceAllString(value, "")
+	return strings.TrimSpace(spaceRE.ReplaceAllString(value, " "))
+}
+
+func looksKorean(value string, threshold float64) bool {
+	compact := strings.Join(strings.Fields(value), "")
+	if len([]rune(compact)) < 10 {
+		return false
+	}
+	total := 0
+	hangul := 0
+	for _, r := range compact {
+		total++
+		if r >= '가' && r <= '힣' {
+			hangul++
+		}
+	}
+	return total > 0 && float64(hangul)/float64(total) >= threshold
+}
+
+func parseKSTTime(value string, fallback time.Time) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	loc, err := time.LoadLocation("Asia/Seoul")
+	if err != nil {
+		loc = time.FixedZone("KST", 9*3600)
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05.000", "2006-01-02 15:04:05", time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.ParseInLocation(layout, value, loc); err == nil {
+			return parsed
+		}
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.In(loc)
+		}
+	}
+	return fallback
+}
+
 func firstWords(text string, count int) string {
 	parts := strings.Fields(text)
 	if len(parts) > count {
@@ -2003,6 +2674,48 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return value[:limit]
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if limit <= 0 || len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func normalizeGroqModel(model string) string {
+	model = strings.TrimSuffix(firstNonEmpty(model, "openai/gpt-oss-20b"), ":free")
+	if strings.HasPrefix(model, "google/") || strings.HasPrefix(model, "anthropic/") || strings.HasPrefix(model, "x-ai/") {
+		return "openai/gpt-oss-20b"
+	}
+	return model
+}
+
+func normalizeCerebrasModel(model string) string {
+	model = strings.TrimSuffix(firstNonEmpty(model, "gpt-oss-120b"), ":free")
+	switch model {
+	case "", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "gpt-oss-20b":
+		return "gpt-oss-120b"
+	default:
+		if strings.Contains(model, "/") {
+			return "gpt-oss-120b"
+		}
+		return model
+	}
+}
+
+func normalizeGitHubModel(model string) string {
+	model = strings.TrimSuffix(firstNonEmpty(model, "openai/gpt-4.1"), ":free")
+	switch model {
+	case "", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "gpt-oss-20b", "gpt-oss-120b":
+		return "openai/gpt-4.1"
+	default:
+		if strings.Contains(model, "/") {
+			return model
+		}
+		return "openai/gpt-4.1"
+	}
 }
 
 func uniqueStrings(values []string) []string {

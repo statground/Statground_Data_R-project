@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "48 * * * *"
   workflow_dispatch:
+    inputs:
+      backfill_board:
+        description: "translate missing or fallback board rows only"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -30,9 +35,29 @@ jobs:
           KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
           KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
+          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
+          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
+          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
           MASTODON_INSTANCE: ${{ vars.MASTODON_INSTANCE || 'https://fosstodon.org' }}
           MASTODON_ACCT: ${{ vars.MASTODON_ACCT || 'R_Foundation' }}
           MASTODON_LIMIT: ${{ vars.MASTODON_LIMIT || '40' }}
-        run: go run ./cmd/rproject-collector mastodon
+          MASTODON_TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
+          MASTODON_STALE_TRANSLATION_LIMIT: ${{ vars.MASTODON_STALE_TRANSLATION_LIMIT || '20' }}
+          MASTODON_TRANSLATION_MODEL: ${{ vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.0-flash-exp:free' }}
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_DATABASE: Data_R_Project_Mastodon_Service
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.backfill_board }}" = "true" ]; then
+            go run ./cmd/rproject-collector mastodon --backfill-board
+          else
+            go run ./cmd/rproject-collector mastodon
+          fi

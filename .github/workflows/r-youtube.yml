@@ -43,6 +43,9 @@ jobs:
           KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
+          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
+          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
+          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
