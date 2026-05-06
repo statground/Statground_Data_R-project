@@ -10,7 +10,7 @@ on:
         required: false
         default: "all"
       r_youtube_job:
-        description: "R YouTube jobs: all, seeds, pages, search, links, videos, or backfill-metadata"
+        description: "R YouTube jobs: all, seeds, pages, search, links, videos, transcripts, comments, or backfill-metadata"
         required: false
         default: "all"
       rblogger_rebuild_board:
@@ -158,6 +158,13 @@ jobs:
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '0' }}
           R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '30' }}
           R_YOUTUBE_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_VIDEO_LIMIT || '30' }}
+          R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT || '10' }}
+          R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT || '2' }}
+          R_YOUTUBE_TRANSCRIPT_LANGS: ${{ vars.R_YOUTUBE_TRANSCRIPT_LANGS || 'ko,en,en-US' }}
+          R_YOUTUBE_COMMENT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_COMMENT_VIDEO_LIMIT || '10' }}
+          R_YOUTUBE_COMMENT_MAX_RESULTS: ${{ vars.R_YOUTUBE_COMMENT_MAX_RESULTS || '50' }}
+          R_YOUTUBE_COMMENT_PAGE_LIMIT: ${{ vars.R_YOUTUBE_COMMENT_PAGE_LIMIT || '1' }}
+          R_YOUTUBE_INCLUDE_COMMENT_REPLIES: ${{ vars.R_YOUTUBE_INCLUDE_COMMENT_REPLIES || 'true' }}
           R_YOUTUBE_BACKFILL_LIMIT: ${{ vars.R_YOUTUBE_BACKFILL_LIMIT || '100' }}
           R_YOUTUBE_SEARCH_EVENT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_EVENT_LIMIT || '0' }}
           R_YOUTUBE_SEARCH_QUERY_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_QUERY_LIMIT || '40' }}

@@ -229,7 +229,8 @@ class RSourceCollector:
         parsed = feedparser.parse(response.content)
         if getattr(parsed, "bozo", False):
             logging.warning("feed parse warning source_id=%s url=%s error=%r", source_id, url, getattr(parsed, "bozo_exception", None))
-        feed_title = getattr(parsed.feed, "title", None)
+        feed = parsed.feed
+        feed_title = getattr(feed, "title", None)
         result: list[NormalizedItem] = []
         max_items = int(source.get("max_items", 200))
         for entry in parsed.entries[:max_items]:
@@ -263,15 +264,25 @@ class RSourceCollector:
                         "collector": "rss",
                         "feed_url": url,
                         "feed_title": feed_title,
+                        "feed_link": feed.get("link"),
+                        "feed_subtitle": html_to_text(feed.get("subtitle")),
+                        "feed_language": feed.get("language"),
+                        "feed_updated": feed.get("updated"),
+                        "feed_updated_parsed": struct_time_to_iso(feed.get("updated_parsed")) if feed.get("updated_parsed") else None,
                         "entry_id": native_id,
                         "link": link,
                         "published": entry.get("published"),
                         "updated": entry.get("updated"),
                         "author": entry.get("author"),
-                        "author_detail": entry.get("author_detail") or {},
+                        "author_detail": json_safe(entry.get("author_detail") or {}),
                         "tags": tags,
-                        "summary_detail": entry.get("summary_detail") or {},
-                        "content": entry.get("content") or [],
+                        "title_detail": json_safe(entry.get("title_detail") or {}),
+                        "summary_detail": json_safe(entry.get("summary_detail") or {}),
+                        "links": json_safe(entry.get("links") or []),
+                        "enclosures": json_safe(entry.get("enclosures") or []),
+                        "media_content": json_safe(entry.get("media_content") or []),
+                        "media_thumbnail": json_safe(entry.get("media_thumbnail") or []),
+                        "content": json_safe(entry.get("content") or []),
                     },
                 )
             )
@@ -288,6 +299,15 @@ class RSourceCollector:
         ]
         collected = 0
         last_error: Exception | None = None
+        if source.get("json_fallback", True):
+            try:
+                collected = self._collect_reddit_json(source, source_id, source_url, subreddit, limit)
+                if collected:
+                    return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logging.warning("reddit json failed subreddit=%s err=%s", subreddit, exc)
+
         for rss_url in rss_urls:
             try:
                 feed_items = self._parse_feed_url(rss_url, source=source, source_id=source_id, source_url=source_url)
@@ -303,20 +323,14 @@ class RSourceCollector:
                 last_error = exc
                 logging.warning("reddit rss failed subreddit=%s url=%s err=%s", subreddit, rss_url, exc)
 
-        if source.get("json_fallback", True):
-            try:
-                self._collect_reddit_json(source, source_id, source_url, subreddit, limit)
-                return
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                logging.warning("reddit json fallback failed subreddit=%s err=%s", subreddit, exc)
         if last_error:
             raise last_error
 
-    def _collect_reddit_json(self, source: dict[str, Any], source_id: str, source_url: str, subreddit: str, limit: int) -> None:
+    def _collect_reddit_json(self, source: dict[str, Any], source_id: str, source_url: str, subreddit: str, limit: int) -> int:
         url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={limit}"
         response = self.fetch(url, accept="application/json")
         data = response.json()
+        collected = 0
         for child in data.get("data", {}).get("children", []):
             post = child.get("data", {})
             permalink = post.get("permalink")
@@ -355,13 +369,24 @@ class RSourceCollector:
                     "stickied": post.get("stickied"),
                     "locked": post.get("locked"),
                     "link_flair_text": post.get("link_flair_text"),
+                    "link_flair_css_class": post.get("link_flair_css_class"),
+                    "author_flair_text": post.get("author_flair_text"),
                     "post_hint": post.get("post_hint"),
                     "thumbnail": post.get("thumbnail"),
                     "num_crossposts": post.get("num_crossposts"),
+                    "selftext_html": post.get("selftext_html"),
+                    "preview": post.get("preview") or {},
+                    "media": post.get("media") or {},
+                    "secure_media": post.get("secure_media") or {},
+                    "gallery_data": post.get("gallery_data") or {},
+                    "media_metadata": post.get("media_metadata") or {},
+                    "raw_post": post,
                 },
             )
             item.platform = "reddit"
             self.add_item(item)
+            collected += 1
+        return collected
 
     def collect_mastodon_tag(self, source: dict[str, Any]) -> None:
         tag = source["tag"].strip().lstrip("#")
@@ -377,6 +402,12 @@ class RSourceCollector:
             source_url = f"https://{instance}/tags/{tag}"
             rss_url = f"https://{instance}/tags/{tag}.rss"
             collected_before = len(self.items)
+            if source.get("public_api_fallback", True):
+                try:
+                    self._collect_mastodon_tag_api(per_source, source_id, source_url, instance, tag, limit)
+                except Exception as exc:  # noqa: BLE001
+                    # Some instances disable public preview and legitimately return 401.
+                    logging.info("mastodon no-auth tag api unavailable instance=%s tag=%s err=%s", instance, tag, exc)
             try:
                 for item in self._parse_feed_url(rss_url, source=per_source, source_id=source_id, source_url=source_url):
                     item.platform = "mastodon"
@@ -385,12 +416,8 @@ class RSourceCollector:
             except Exception as exc:  # noqa: BLE001
                 logging.info("mastodon tag rss unavailable instance=%s tag=%s err=%s", instance, tag, exc)
 
-            if len(self.items) == collected_before and source.get("public_api_fallback", True):
-                try:
-                    self._collect_mastodon_tag_api(per_source, source_id, source_url, instance, tag, limit)
-                except Exception as exc:  # noqa: BLE001
-                    # Some instances disable public preview and legitimately return 401.
-                    logging.info("mastodon no-auth tag api unavailable instance=%s tag=%s err=%s", instance, tag, exc)
+            if len(self.items) == collected_before:
+                logging.info("mastodon tag yielded no rows instance=%s tag=%s", instance, tag)
 
     def _collect_mastodon_tag_api(
         self,
@@ -417,10 +444,6 @@ class RSourceCollector:
             url = f"https://{instance}/@{username}.rss"
         source_id = source.get("id") or f"mastodon:account:{urlparse(url).netloc}:{Path(urlparse(url).path).stem}"
         source_url = source.get("source_url") or url.removesuffix(".rss")
-        for item in self._parse_feed_url(url, source=source, source_id=source_id, source_url=source_url):
-            item.platform = "mastodon"
-            item.tags.append("mastodon")
-            self.add_item(item)
         if source.get("public_api_fallback", True):
             try:
                 instance, username = mastodon_instance_username(source, source_url or url)
@@ -428,6 +451,10 @@ class RSourceCollector:
                     self._collect_mastodon_account_api(source, source_id, source_url, instance, username, int(source.get("limit", source.get("max_items", 40))))
             except Exception as exc:  # noqa: BLE001
                 logging.info("mastodon account no-auth api unavailable source=%s err=%s", source_id, exc)
+        for item in self._parse_feed_url(url, source=source, source_id=source_id, source_url=source_url):
+            item.platform = "mastodon"
+            item.tags.append("mastodon")
+            self.add_item(item)
 
     def _collect_mastodon_account_api(
         self,
@@ -521,6 +548,8 @@ class RSourceCollector:
         source_id = source.get("id") or f"dcinside:{gallery_id}"
         source_url = source.get("source_url") or f"https://m.dcinside.com/board/{gallery_id}"
         max_items = int(source.get("max_items", 200))
+        fetch_detail = env_bool("DCINSIDE_FETCH_DETAIL", bool(source.get("fetch_detail", True)))
+        detail_limit = int(source.get("detail_limit", os.environ.get("DCINSIDE_DETAIL_LIMIT", max_items)))
         emitted = 0
         for page in range(1, pages + 1):
             if emitted >= max_items:
@@ -543,23 +572,101 @@ class RSourceCollector:
                 if title in {"전체글", "개념글", "글쓰기", "본문 보기", "댓글닫기", "새로고침"}:
                     continue
                 canonical_url = urljoin("https://m.dcinside.com", f"/board/{gallery_id}/{post_id}")
+                detail: dict[str, Any] = {"detail_status": "not_requested"}
+                if fetch_detail and emitted < detail_limit:
+                    detail = self.fetch_dcinside_post_detail(canonical_url)
+                detail_title = compact_text(detail.get("detail_title") or "")
+                content_text = compact_text(detail.get("content_text") or "")
                 item = self.make_item(
                     source=source,
                     source_id=source_id,
                     source_url=source_url,
                     canonical_url=canonical_url,
                     native_id=f"{gallery_id}:{post_id}",
-                    title=title,
-                    summary=None,
-                    author=None,
-                    published_at=None,
+                    title=detail_title or title,
+                    summary=content_text or None,
+                    author=detail.get("author"),
+                    published_at=detail.get("published_at"),
                     language=source.get("language", "ko"),
                     tags=["dcinside", gallery_id],
-                    raw={"collector": "dcinside_mobile_html", "gallery_id": gallery_id, "post_id": post_id, "page": page},
+                    raw={
+                        "collector": "dcinside_mobile_html",
+                        "gallery_id": gallery_id,
+                        "post_id": post_id,
+                        "page": page,
+                        "list_title": title,
+                        "detail_url": canonical_url,
+                        **detail,
+                    },
                 )
                 item.platform = "dcinside"
                 self.add_item(item)
                 emitted += 1
+
+    def fetch_dcinside_post_detail(self, canonical_url: str) -> dict[str, Any]:
+        collected_at = dt.datetime.now(KST).isoformat(timespec="seconds")
+        try:
+            response = self.fetch(canonical_url, accept="text/html")
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "detail_status": "failed",
+                "detail_collected_at": collected_at,
+                "error_type": exc.__class__.__name__,
+                "error_message": str(exc),
+            }
+        soup = BeautifulSoup(response.text, "html.parser")
+        page = html_page_snapshot(soup, canonical_url)
+        text = compact_text(soup.get_text(" ", strip=True))
+        detail_title = first_text_by_selectors(
+            soup,
+            [
+                ".title_subject",
+                ".gallview_head .title",
+                ".view_subject",
+                "h1",
+                "h2",
+                "title",
+            ],
+        )
+        content_text = first_text_by_selectors(
+            soup,
+            [
+                "#writeContents",
+                ".write_div",
+                ".gallview_contents",
+                ".view_content_wrap",
+                ".thum-txt",
+                "article",
+            ],
+        )
+        author = first_text_by_selectors(
+            soup,
+            [
+                "[data-nick]",
+                ".nickname",
+                ".nick",
+                ".gall_writer",
+                ".writer",
+                ".user_info",
+            ],
+        )
+        published_at = parse_dcinside_datetime(text)
+        return {
+            "detail_status": "collected",
+            "detail_collected_at": collected_at,
+            "detail_title": detail_title or page.get("html_title"),
+            "author": author,
+            "published_at": published_at,
+            "content_text": truncate_text(content_text, 8000),
+            "comment_count": parse_count_near_label(text, "댓글"),
+            "view_count": parse_count_near_label(text, "조회"),
+            "recommend_count": parse_count_near_label(text, "추천"),
+            "page_title": page.get("html_title"),
+            "page_meta_description": page.get("meta_description"),
+            "page_og_title": page.get("og_title"),
+            "page_og_image": page.get("og_image"),
+            "page_text_excerpt": page.get("text_excerpt"),
+        }
 
     def collect_html_links(self, source: dict[str, Any]) -> None:
         url = format_url(source["url"], self.context)
@@ -568,6 +675,7 @@ class RSourceCollector:
         root_html = self.fetch(url, accept="text/html").text
         root_soup = BeautifulSoup(root_html, "html.parser")
         page_title = html_page_title(root_soup) or source.get("name") or source_id
+        page_meta = html_page_snapshot(root_soup, url)
 
         if source.get("emit_page_item", False):
             self.add_item(
@@ -580,7 +688,7 @@ class RSourceCollector:
                     title=page_title,
                     summary=html_to_text(root_soup.get_text(" ", strip=True))[:1000],
                     tags=source.get("tags", []),
-                    raw={"collector": "html_page"},
+                    raw={"collector": "html_page", **page_meta},
                 )
             )
 
@@ -590,7 +698,7 @@ class RSourceCollector:
             include_regex=source.get("include_regex"),
             exclude_regex=source.get("exclude_regex"),
         )
-        self._emit_html_links(source, source_id, source_url, url, root_links, page_title, source.get("max_items", 200))
+        self._emit_html_links(source, source_id, source_url, url, root_links, page_title, page_meta, source.get("max_items", 200))
 
         follow = source.get("follow") or {}
         if follow.get("enabled"):
@@ -608,6 +716,7 @@ class RSourceCollector:
                     follow_html = self.fetch(link["url"], accept="text/html").text
                     follow_soup = BeautifulSoup(follow_html, "html.parser")
                     follow_title = html_page_title(follow_soup) or link["title"]
+                    follow_meta = html_page_snapshot(follow_soup, link["url"])
                     links = extract_links(
                         follow_soup,
                         base_url=link["url"],
@@ -621,6 +730,7 @@ class RSourceCollector:
                         link["url"],
                         links,
                         follow_title,
+                        follow_meta,
                         follow.get("max_items_per_page", 200),
                     )
                     followed += 1
@@ -633,14 +743,54 @@ class RSourceCollector:
         source_id: str,
         source_url: str,
         page_url: str,
-        links: list[dict[str, str]],
+        links: list[dict[str, Any]],
         page_title: str,
+        page_meta: dict[str, Any],
         max_items: int | str,
     ) -> None:
         emitted = 0
+        fetch_target_meta = bool(source.get("fetch_target_meta", False))
+        target_meta_limit = int(source.get("target_meta_limit", os.environ.get("HTML_TARGET_META_LIMIT", 20)))
         for link in unique_by_url(links):
             if emitted >= int(max_items):
                 break
+            target_meta: dict[str, Any] = {}
+            if fetch_target_meta and emitted < target_meta_limit and same_scheme_http(link["url"]):
+                try:
+                    target_response = self.fetch(link["url"], accept="text/html")
+                    if "html" in target_response.headers.get("Content-Type", "").lower():
+                        target_soup = BeautifulSoup(target_response.text, "html.parser")
+                        target_snapshot = html_page_snapshot(target_soup, link["url"])
+                        target_meta = {
+                            "target_title": target_snapshot.get("html_title"),
+                            "target_meta_description": target_snapshot.get("meta_description"),
+                            "target_og_image": target_snapshot.get("og_image"),
+                            "target_content_type": target_response.headers.get("Content-Type", ""),
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    target_meta = {"target_fetch_error": str(exc)}
+            raw = {
+                "collector": "html_links",
+                "page_url": page_url,
+                "page_title": page_title,
+                "page_host": page_meta.get("page_host"),
+                "page_h1_title": page_meta.get("h1_title"),
+                "page_meta_description": page_meta.get("meta_description"),
+                "page_og_title": page_meta.get("og_title"),
+                "page_og_description": page_meta.get("og_description"),
+                "page_og_image": page_meta.get("og_image"),
+                "page_canonical_url": page_meta.get("canonical_url"),
+                "page_feed_urls": page_meta.get("feed_urls") or [],
+                "link_text": link.get("link_text") or link.get("title"),
+                "href_raw": link.get("href_raw"),
+                "link_rel": link.get("rel"),
+                "link_type": link.get("type"),
+                "link_title_attr": link.get("title_attr"),
+                "link_aria_label": link.get("aria_label"),
+                "link_context": link.get("context_text"),
+                "link_position": link.get("link_index"),
+                **target_meta,
+            }
             item = self.make_item(
                 source=source,
                 source_id=source_id,
@@ -650,10 +800,10 @@ class RSourceCollector:
                 title=link["title"] or link["url"],
                 summary=f"Discovered from {page_title}: {page_url}",
                 author=None,
-                published_at=parse_fuzzy_date_to_iso(link["title"]),
+                published_at=parse_fuzzy_date_to_iso(" ".join([link.get("title", ""), link.get("context_text", "")])),
                 language=source.get("language"),
                 tags=source.get("tags", []),
-                raw={"collector": "html_links", "page_url": page_url, "page_title": page_title},
+                raw=raw,
             )
             self.add_item(item)
             emitted += 1
@@ -666,6 +816,7 @@ class RSourceCollector:
         max_items = int(source.get("max_items", 20))
         response = self.fetch(url, accept="text/html")
         soup = BeautifulSoup(response.text, "html.parser")
+        page_meta = html_page_snapshot(soup, url)
         emitted = 0
         for heading in soup.find_all(re.compile(r"^h[1-6]$")):
             if emitted >= max_items:
@@ -674,6 +825,7 @@ class RSourceCollector:
             if not heading_regex.search(title):
                 continue
             summary_parts: list[str] = []
+            html_parts: list[str] = []
             heading_level = int(heading.name[1]) if heading.name and heading.name[1].isdigit() else 6
             for sibling in heading.find_next_siblings():
                 if sibling.name and re.match(r"^h[1-6]$", sibling.name):
@@ -683,9 +835,12 @@ class RSourceCollector:
                 text = compact_text(sibling.get_text(" ", strip=True)) if hasattr(sibling, "get_text") else compact_text(str(sibling))
                 if text:
                     summary_parts.append(text)
+                html_parts.append(str(sibling)[:3000])
                 if sum(len(part) for part in summary_parts) > int(source.get("summary_limit", 2500)):
                     break
             slug = slugify(title)
+            section_text = "\n".join(summary_parts)[: int(source.get("summary_limit", 2500))]
+            section_html = "\n".join(html_parts)[: int(source.get("html_limit", 12000))]
             item = self.make_item(
                 source=source,
                 source_id=source_id,
@@ -693,12 +848,27 @@ class RSourceCollector:
                 canonical_url=f"{url}#{slug}",
                 native_id=title,
                 title=title,
-                summary="\n".join(summary_parts)[: int(source.get("summary_limit", 2500))] or None,
+                summary=section_text or None,
                 author=source.get("author"),
                 published_at=parse_fuzzy_date_to_iso(title),
                 language=source.get("language"),
                 tags=source.get("tags", []),
-                raw={"collector": "html_release_notes", "page_url": url, "heading": title},
+                raw={
+                    "collector": "html_release_notes",
+                    "page_url": url,
+                    "heading": title,
+                    "heading_level": heading_level,
+                    "heading_id": heading.get("id") or slug,
+                    "section_index": emitted,
+                    "version_text": release_version_text(title),
+                    "section_text": section_text,
+                    "section_html": section_html,
+                    "section_word_count": len(section_text.split()),
+                    "page_title": page_meta.get("html_title"),
+                    "page_meta_description": page_meta.get("meta_description"),
+                    "page_og_title": page_meta.get("og_title"),
+                    "page_canonical_url": page_meta.get("canonical_url"),
+                },
             )
             self.add_item(item)
             emitted += 1
@@ -745,6 +915,13 @@ def compact_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def truncate_text(value: str | None, limit: int) -> str:
+    text = compact_text(value)
+    if limit <= 0:
+        return text
+    return text[:limit]
+
+
 def html_to_text(value: str | None) -> str:
     if not value:
         return ""
@@ -759,6 +936,63 @@ def html_page_title(soup: BeautifulSoup) -> str | None:
     if h1:
         return compact_text(h1.get_text(" ", strip=True))
     return None
+
+
+def html_page_snapshot(soup: BeautifulSoup, page_url: str) -> dict[str, Any]:
+    h1 = soup.find("h1")
+    canonical = rel_href(soup, "canonical", page_url)
+    og_image = meta_content(soup, property_name="og:image")
+    return {
+        "page_url": page_url,
+        "page_host": urlparse(page_url).netloc.lower(),
+        "html_title": html_page_title(soup) or "",
+        "h1_title": compact_text(h1.get_text(" ", strip=True)) if h1 else "",
+        "meta_description": meta_content(soup, name="description"),
+        "meta_keywords": meta_content(soup, name="keywords"),
+        "canonical_url": canonicalize_url(canonical or page_url),
+        "og_title": meta_content(soup, property_name="og:title"),
+        "og_description": meta_content(soup, property_name="og:description"),
+        "og_image": canonicalize_url(urljoin(page_url, og_image)) if og_image else "",
+        "twitter_title": meta_content(soup, name="twitter:title"),
+        "twitter_description": meta_content(soup, name="twitter:description"),
+        "feed_urls": extract_feed_urls(soup, page_url),
+        "link_count": len(soup.find_all("a", href=True)),
+        "text_excerpt": truncate_text(soup.get_text(" ", strip=True), 4000),
+    }
+
+
+def meta_content(soup: BeautifulSoup, *, name: str | None = None, property_name: str | None = None) -> str:
+    attrs: dict[str, str] = {}
+    if name:
+        attrs["name"] = name
+    if property_name:
+        attrs["property"] = property_name
+    tag = soup.find("meta", attrs=attrs)
+    if tag and tag.get("content"):
+        return compact_text(str(tag.get("content")))
+    return ""
+
+
+def rel_href(soup: BeautifulSoup, rel: str, base_url: str) -> str:
+    rel_lower = rel.lower()
+    for tag in soup.find_all("link", href=True):
+        rels = [str(value).lower() for value in (tag.get("rel") or [])]
+        if rel_lower in rels:
+            return urljoin(base_url, str(tag.get("href")))
+    return ""
+
+
+def extract_feed_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
+    feed_urls: list[str] = []
+    for tag in soup.find_all("link", href=True):
+        rels = " ".join(str(value).lower() for value in (tag.get("rel") or []))
+        type_value = str(tag.get("type") or "").lower()
+        if "alternate" not in rels and "feed" not in rels and "rss" not in type_value and "atom" not in type_value:
+            continue
+        href = str(tag.get("href") or "")
+        if href:
+            feed_urls.append(canonicalize_url(urljoin(base_url, href)))
+    return sorted({url for url in feed_urls if url})
 
 
 def canonicalize_url(url: str | None) -> str:
@@ -778,6 +1012,23 @@ def canonicalize_url(url: str | None) -> str:
 def make_external_id(source_id: str, native_id: str) -> str:
     digest = hashlib.sha256(f"{source_id}\n{native_id}".encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, time.struct_time):
+        return struct_time_to_iso(value)
+    return value
 
 
 def infer_platform(url: str) -> str:
@@ -837,6 +1088,62 @@ def struct_time_to_iso(value: time.struct_time) -> str:
     return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc).astimezone(KST).isoformat(timespec="seconds")
 
 
+def first_text_by_selectors(soup: BeautifulSoup, selectors: list[str]) -> str:
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+        if node.has_attr("data-nick"):
+            value = compact_text(str(node.get("data-nick")))
+            if value:
+                return value
+        text = compact_text(node.get_text(" ", strip=True))
+        if text:
+            return text
+    return ""
+
+
+def parse_dcinside_datetime(text: str) -> str | None:
+    patterns = [
+        r"(20\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)",
+        r"(\d{2}[./-]\d{1,2}[./-]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        raw = match.group(1).replace(".", "-").replace("/", "-")
+        if re.match(r"^\d{2}-", raw):
+            raw = "20" + raw
+        parsed = parse_datetime_to_iso(raw)
+        if parsed:
+            return parsed
+    return None
+
+
+def parse_count_near_label(text: str, label: str) -> int:
+    patterns = [
+        rf"{re.escape(label)}\s*[:：]?\s*([0-9,]+)",
+        rf"([0-9,]+)\s*{re.escape(label)}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return int(match.group(1).replace(",", ""))
+    return 0
+
+
+def same_scheme_http(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def release_version_text(title: str) -> str:
+    match = re.search(r"R\s+(?:version\s+)?([0-9]+(?:\.[0-9]+){1,3}(?:\s+\S+)?)", title, re.IGNORECASE)
+    if not match:
+        return ""
+    return compact_text(match.group(0))
+
+
 def parse_datetime(value: str | None) -> dt.datetime | None:
     if not value:
         return None
@@ -883,28 +1190,47 @@ def extract_links(
     base_url: str,
     include_regex: str | None = None,
     exclude_regex: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     include = re.compile(include_regex, re.IGNORECASE) if include_regex else None
     exclude = re.compile(exclude_regex, re.IGNORECASE) if exclude_regex else None
-    links: list[dict[str, str]] = []
-    for anchor in soup.find_all("a", href=True):
-        title = compact_text(anchor.get_text(" ", strip=True))
+    links: list[dict[str, Any]] = []
+    for index, anchor in enumerate(soup.find_all("a", href=True)):
+        link_text = compact_text(anchor.get_text(" ", strip=True))
         href = anchor.get("href") or ""
+        title = link_text or compact_text(str(anchor.get("title") or anchor.get("aria-label") or ""))
         url = canonicalize_url(urljoin(base_url, href))
         if not title or not url or url.startswith("mailto:") or url.startswith("javascript:"):
             continue
-        haystack = f"{title}\n{url}"
+        context_text = compact_text(anchor.parent.get_text(" ", strip=True)) if anchor.parent else title
+        haystack = f"{title}\n{url}\n{context_text}"
         if include and not include.search(haystack):
             continue
         if exclude and exclude.search(haystack):
             continue
-        links.append({"title": title, "url": url})
+        rel = anchor.get("rel") or []
+        class_attr = anchor.get("class") or []
+        links.append(
+            {
+                "title": title,
+                "url": url,
+                "href_raw": href,
+                "link_text": link_text,
+                "title_attr": compact_text(str(anchor.get("title") or "")),
+                "aria_label": compact_text(str(anchor.get("aria-label") or "")),
+                "rel": " ".join(str(value) for value in rel),
+                "type": compact_text(str(anchor.get("type") or "")),
+                "id": compact_text(str(anchor.get("id") or "")),
+                "class": " ".join(str(value) for value in class_attr),
+                "context_text": truncate_text(context_text, 600),
+                "link_index": index,
+            }
+        )
     return links
 
 
-def unique_by_url(links: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+def unique_by_url(links: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     for link in links:
         url = link.get("url", "")
         if not url or url in seen:

@@ -449,12 +449,14 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 
 func runYouTube(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("youtube", flag.ExitOnError)
-	job := fs.String("job", envString("R_YOUTUBE_JOB", "all"), "all, seeds, pages, search, links, videos, backfill-metadata")
+	job := fs.String("job", envString("R_YOUTUBE_JOB", "all"), "all, seeds, pages, search, links, videos, transcripts, comments, backfill-metadata")
 	topic := fs.String("topic", envString("R_YOUTUBE_KAFKA_TOPIC", defaultYouTubeTopic), "Kafka topic")
 	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "print events instead of Kafka")
 	seedLimit := fs.Int("seed-limit", envInt("R_YOUTUBE_SEED_LIMIT", 0), "seed limit")
 	pageLimit := fs.Int("page-limit", envInt("R_YOUTUBE_PAGE_LIMIT", 30), "HTML page fetch limit")
 	videoLimit := fs.Int("video-limit", envInt("R_YOUTUBE_VIDEO_LIMIT", 30), "YouTube video metadata enrichment limit")
+	transcriptLimit := fs.Int("transcript-limit", envInt("R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT", 10), "YouTube transcript enrichment video limit")
+	commentLimit := fs.Int("comment-limit", envInt("R_YOUTUBE_COMMENT_VIDEO_LIMIT", 10), "YouTube comment enrichment video limit")
 	backfillLimit := fs.Int("backfill-limit", envInt("R_YOUTUBE_BACKFILL_LIMIT", 30), "existing weak current video metadata backfill limit")
 	fs.Parse(args)
 
@@ -462,10 +464,10 @@ func runYouTube(ctx context.Context, args []string) error {
 	if err := pub.validate(ctx); err != nil {
 		return err
 	}
-	jobs := expandJobs(*job, []string{"seeds", "pages", "search", "links", "videos", "backfill-metadata"})
+	jobs := expandJobs(*job, []string{"seeds", "pages", "search", "links", "videos", "transcripts", "comments", "backfill-metadata"})
 	total := 0
 	for _, currentJob := range jobs {
-		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit)
+		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit, *transcriptLimit, *commentLimit)
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
@@ -1236,7 +1238,7 @@ func collectBibliometricMentions(records []cranRecord, limit int) ([]genericEven
 	return events, nil
 }
 
-func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLimit int) ([]genericEvent, error) {
+func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLimit, transcriptLimit, commentLimit int) ([]genericEvent, error) {
 	var seeds []map[string]any
 	var err error
 	if job != "backfill-metadata" {
@@ -1256,6 +1258,10 @@ func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLim
 		return youtubeLinkEvents(pageLimit), nil
 	case "videos":
 		return youtubeVideoEvents(seeds, videoLimit), nil
+	case "transcripts":
+		return youtubeTranscriptEvents(seeds, transcriptLimit), nil
+	case "comments":
+		return youtubeCommentEvents(seeds, commentLimit), nil
 	case "backfill-metadata":
 		return youtubeMetadataBackfillEvents(backfillLimit)
 	default:
@@ -1566,6 +1572,212 @@ func youtubeVideoEvents(seeds []map[string]any, limit int) []genericEvent {
 	return events
 }
 
+type youtubeCaptionTrack struct {
+	key      string
+	lang     string
+	name     string
+	ext      string
+	url      string
+	auto     bool
+	provider string
+}
+
+type youtubeTranscriptSegment struct {
+	index   int
+	startMS int64
+	endMS   int64
+	textRaw string
+}
+
+func youtubeTranscriptEvents(seeds []map[string]any, limit int) []genericEvent {
+	candidates := youtubeVideoCandidates(seeds, limit)
+	events := make([]genericEvent, 0)
+	for _, candidate := range candidates {
+		segmentEvents, err := fetchYouTubeTranscriptSegmentEvents(candidate.videoID, candidate.url)
+		if err != nil {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "yt_dlp_public_transcript_no_api", candidate.url, "R-YouTube", "", err))
+			continue
+		}
+		events = append(events, segmentEvents...)
+	}
+	return events
+}
+
+func fetchYouTubeTranscriptSegmentEvents(videoID, canonicalURL string) ([]genericEvent, error) {
+	decoded, err := fetchYTDLPJSON(canonicalURL)
+	if err != nil {
+		return nil, err
+	}
+	tracks := captionTracksFromYTDLP(decoded)
+	if len(tracks) == 0 {
+		return nil, errors.New("yt-dlp returned no public subtitle or automatic caption tracks")
+	}
+	maxTracks := maxInt(1, envInt("R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT", 2))
+	if len(tracks) > maxTracks {
+		tracks = tracks[:maxTracks]
+	}
+	videoID = firstNonEmpty(videoID, stringAny(decoded["id"]), parseYouTubeRef(canonicalURL)["parsed_video_id"])
+	if videoID == "" {
+		return nil, errors.New("youtube video id is required for transcript collection")
+	}
+	events := make([]genericEvent, 0)
+	for _, track := range tracks {
+		body, err := fetchBytes(track.url)
+		if err != nil {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "yt_dlp_caption_track_fetch", track.url, "R-YouTube", "", err))
+			continue
+		}
+		segments := parseCaptionSegments(body, track.ext)
+		if len(segments) == 0 {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "yt_dlp_caption_track_parse", track.url, "R-YouTube", "", errors.New("caption track produced zero VTT segments")))
+			continue
+		}
+		for _, segment := range segments {
+			textNormalized := stripTags(segment.textRaw)
+			if textNormalized == "" {
+				continue
+			}
+			payload := map[string]any{
+				"youtube_video_id":       videoID,
+				"caption_track_key":      firstNonEmpty(track.key, track.lang),
+				"language_code":          firstNonEmpty(track.lang, "und"),
+				"segment_index":          intString(segment.index),
+				"start_ms":               intString(segment.startMS),
+				"end_ms":                 intString(segment.endMS),
+				"duration_ms":            intString(maxInt64(0, segment.endMS-segment.startMS)),
+				"text_raw":               truncate(segment.textRaw, 4000),
+				"text_normalized":        truncate(textNormalized, 4000),
+				"is_auto_generated":      boolOrString(track.auto),
+				"source_method":          "yt_dlp_public_caption_track_no_api",
+				"collection_status":      "collected",
+				"retention_policy_code":  "retain_public_caption_best_effort",
+				"caption_track_name":     track.name,
+				"caption_track_provider": track.provider,
+				"caption_track_ext":      track.ext,
+			}
+			events = append(events, newGenericEvent("r.youtube.transcript.segment.v1", "yt_dlp_public_caption_track_no_api", canonicalURL, "R-YouTube", "", "", "", payload))
+			events = append(events, youtubeTextPackageMentionEvents(
+				videoID,
+				canonicalURL,
+				"transcript",
+				firstNonEmpty(track.lang, "und"),
+				textNormalized,
+				segment.startMS,
+				segment.endMS,
+				"",
+				"transcript_text_scan_no_api",
+				"rpkg-youtube-transcript-mention-v1",
+				"0.70",
+			)...)
+		}
+	}
+	if len(events) == 0 {
+		return nil, errors.New("no transcript events were produced")
+	}
+	return events, nil
+}
+
+func youtubeCommentEvents(seeds []map[string]any, limit int) []genericEvent {
+	apiKey := firstNonEmpty(os.Getenv("YOUTUBE_API_KEY"), os.Getenv("GOOGLE_YOUTUBE_API_KEY"))
+	if apiKey == "" || envBool("R_YOUTUBE_DISABLE_COMMENT_API", false) {
+		return []genericEvent{collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_data_api_v3_commentThreads_list", "https://www.googleapis.com/youtube/v3/commentThreads", "R-YouTube", "", errors.New("YouTube comments require YOUTUBE_API_KEY or GOOGLE_YOUTUBE_API_KEY"))}
+	}
+	candidates := youtubeVideoCandidates(seeds, limit)
+	events := make([]genericEvent, 0)
+	for _, candidate := range candidates {
+		commentEvents, err := fetchYouTubeCommentThreadEvents(candidate.videoID, candidate.url, apiKey)
+		if err != nil {
+			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_data_api_v3_commentThreads_list", candidate.url, "R-YouTube", "", err))
+			continue
+		}
+		events = append(events, commentEvents...)
+	}
+	return events
+}
+
+func fetchYouTubeCommentThreadEvents(videoID, canonicalURL, apiKey string) ([]genericEvent, error) {
+	videoID = firstNonEmpty(videoID, parseYouTubeRef(canonicalURL)["parsed_video_id"])
+	if videoID == "" {
+		return nil, errors.New("youtube video id is required for comment collection")
+	}
+	maxResults := maxInt(1, minInt(envInt("R_YOUTUBE_COMMENT_MAX_RESULTS", 50), 100))
+	pageLimit := maxInt(1, envInt("R_YOUTUBE_COMMENT_PAGE_LIMIT", 1))
+	events := make([]genericEvent, 0)
+	pageToken := ""
+	for page := 0; page < pageLimit; page++ {
+		q := url.Values{}
+		q.Set("part", "snippet,replies")
+		q.Set("videoId", videoID)
+		q.Set("maxResults", strconv.Itoa(maxResults))
+		q.Set("textFormat", "plainText")
+		q.Set("key", apiKey)
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		sourceURL := "https://www.googleapis.com/youtube/v3/commentThreads?" + q.Encode()
+		var decoded map[string]any
+		if err := fetchJSON(sourceURL, &decoded); err != nil {
+			return events, err
+		}
+		for _, item := range anySlice(decoded["items"]) {
+			thread := mapAny(item)
+			threadID := stringAny(thread["id"])
+			snippet := mapAny(thread["snippet"])
+			totalReplyCount := intAny(snippet["totalReplyCount"])
+			topComment := mapAny(snippet["topLevelComment"])
+			if len(topComment) > 0 {
+				payload := youtubeCommentPayload(videoID, threadID, "", topComment, totalReplyCount)
+				events = append(events, newGenericEvent("r.youtube.comment.thread.v1", "youtube_data_api_v3_commentThreads_list", canonicalURL, "R-YouTube", "", "", stringAny(payload["published_at"]), payload))
+				events = append(events, youtubeTextPackageMentionEvents(videoID, canonicalURL, "comment", "und", stringAny(payload["text_normalized"]), 0, 0, stringAny(payload["published_at"]), "comment_text_scan_api", "rpkg-youtube-comment-mention-v1", "0.55")...)
+			}
+			if envBool("R_YOUTUBE_INCLUDE_COMMENT_REPLIES", true) {
+				replies := mapAny(thread["replies"])
+				for _, reply := range anySlice(replies["comments"]) {
+					parentID := stringAny(mapAny(topComment)["id"])
+					payload := youtubeCommentPayload(videoID, threadID, parentID, mapAny(reply), 0)
+					events = append(events, newGenericEvent("r.youtube.comment.thread.v1", "youtube_data_api_v3_commentThreads_list", canonicalURL, "R-YouTube", "", "", stringAny(payload["published_at"]), payload))
+					events = append(events, youtubeTextPackageMentionEvents(videoID, canonicalURL, "comment", "und", stringAny(payload["text_normalized"]), 0, 0, stringAny(payload["published_at"]), "comment_text_scan_api", "rpkg-youtube-comment-mention-v1", "0.55")...)
+				}
+			}
+		}
+		events = append(events, youtubeQuotaUsageEventFor(canonicalURL, "commentThreads.list", 1))
+		pageToken = stringAny(decoded["nextPageToken"])
+		if pageToken == "" {
+			break
+		}
+	}
+	if len(events) == 0 {
+		return nil, errors.New("commentThreads.list returned no comment rows")
+	}
+	return events, nil
+}
+
+func youtubeCommentPayload(videoID, threadID, parentID string, comment map[string]any, totalReplyCount int64) map[string]any {
+	snippet := mapAny(comment["snippet"])
+	commentID := stringAny(comment["id"])
+	textOriginal := firstNonEmpty(stringAny(snippet["textOriginal"]), stripTags(stringAny(snippet["textDisplay"])))
+	authorChannel := mapAny(snippet["authorChannelId"])
+	salt := envString("YOUTUBE_COMMENT_HASH_SALT", "statground-r-youtube")
+	authorChannelID := stringAny(authorChannel["value"])
+	authorDisplayName := stringAny(snippet["authorDisplayName"])
+	return map[string]any{
+		"youtube_video_id":         videoID,
+		"comment_thread_id":        firstNonEmpty(threadID, commentID),
+		"comment_id":               commentID,
+		"parent_comment_id":        parentID,
+		"author_channel_id_hash":   hashMaybe(salt, authorChannelID),
+		"author_display_name_hash": hashMaybe(salt, authorDisplayName),
+		"text_original":            truncate(textOriginal, envInt("R_YOUTUBE_COMMENT_TEXT_LIMIT", 2000)),
+		"text_normalized":          truncate(stripTags(textOriginal), envInt("R_YOUTUBE_COMMENT_TEXT_LIMIT", 2000)),
+		"like_count":               intString(snippet["likeCount"]),
+		"published_at":             stringAny(snippet["publishedAt"]),
+		"updated_at":               stringAny(snippet["updatedAt"]),
+		"total_reply_count":        intString(totalReplyCount),
+		"source_method":            "youtube_data_api_v3_commentThreads_list",
+		"retention_policy_code":    "public_comment_aggregate_only",
+	}
+}
+
 func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 	rows, err := loadYouTubeMetadataBackfillRows(limit)
 	if err != nil {
@@ -1620,14 +1832,18 @@ func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 }
 
 func youtubeQuotaUsageEvent(sourceURL string) genericEvent {
+	return youtubeQuotaUsageEventFor(sourceURL, "videos.list", 1)
+}
+
+func youtubeQuotaUsageEventFor(sourceURL, methodName string, quotaCost int) genericEvent {
 	return newGenericEvent("r.youtube.quota.usage.v1", "youtube_data_api_v3", sourceURL, "R-YouTube", "", "", "", map[string]any{
 		"quota_date":        time.Now().UTC().Format("2006-01-02"),
 		"api_key_alias":     envString("YOUTUBE_API_KEY_ALIAS", "default"),
-		"method_name":       "videos.list",
-		"quota_cost":        "1",
+		"method_name":       methodName,
+		"quota_cost":        strconv.Itoa(quotaCost),
 		"request_count":     "1",
-		"quota_units_used":  "1",
-		"source_method":     "youtube_data_api_v3_videos_list",
+		"quota_units_used":  strconv.Itoa(quotaCost),
+		"source_method":     "youtube_data_api_v3_" + strings.ReplaceAll(methodName, ".", "_"),
 		"collection_status": "collected",
 	})
 }
@@ -1923,6 +2139,205 @@ func fetchYTDLPVideoPayload(canonicalURL string, seed map[string]any) (map[strin
 	}, nil
 }
 
+func fetchYTDLPJSON(canonicalURL string) (map[string]any, error) {
+	bin, err := youtubeDLBinary()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxInt(10, envInt("YOUTUBE_DL_TIMEOUT", 120)))*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--skip-download", "--no-playlist", "--no-warnings", "--ignore-no-formats-error", "-J", canonicalURL)
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, truncate(string(out), 800))
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func captionTracksFromYTDLP(decoded map[string]any) []youtubeCaptionTrack {
+	out := make([]youtubeCaptionTrack, 0)
+	seen := map[string]bool{}
+	addContainer := func(key string, auto bool) {
+		container := mapAny(decoded[key])
+		langs := prioritizedCaptionLanguages(container)
+		for _, lang := range langs {
+			for _, item := range anySlice(container[lang]) {
+				row := mapAny(item)
+				trackURL := stringAny(row["url"])
+				if trackURL == "" {
+					continue
+				}
+				ext := strings.ToLower(firstNonEmpty(stringAny(row["ext"]), stringAny(row["protocol"])))
+				trackKey := key + ":" + lang + ":" + ext
+				if seen[trackKey] {
+					continue
+				}
+				if !captionTrackSupported(ext, trackURL) {
+					continue
+				}
+				seen[trackKey] = true
+				out = append(out, youtubeCaptionTrack{
+					key:      trackKey,
+					lang:     lang,
+					name:     stringAny(row["name"]),
+					ext:      ext,
+					url:      trackURL,
+					auto:     auto,
+					provider: key,
+				})
+				break
+			}
+		}
+	}
+	addContainer("subtitles", false)
+	addContainer("automatic_captions", true)
+	return out
+}
+
+func prioritizedCaptionLanguages(container map[string]any) []string {
+	out := make([]string, 0)
+	seen := map[string]bool{}
+	for _, lang := range splitCSV(envString("R_YOUTUBE_TRANSCRIPT_LANGS", "ko,en,en-US")) {
+		if _, ok := container[lang]; ok && !seen[lang] {
+			out = append(out, lang)
+			seen[lang] = true
+		}
+	}
+	for lang := range container {
+		if !seen[lang] {
+			out = append(out, lang)
+			seen[lang] = true
+		}
+	}
+	return out
+}
+
+func captionTrackSupported(ext, trackURL string) bool {
+	ext = strings.ToLower(ext)
+	lowerURL := strings.ToLower(trackURL)
+	return ext == "vtt" || ext == "json3" || strings.Contains(lowerURL, "fmt=vtt") || strings.Contains(lowerURL, "fmt=json3")
+}
+
+func parseCaptionSegments(body []byte, ext string) []youtubeTranscriptSegment {
+	ext = strings.ToLower(ext)
+	if ext == "json3" || bytes.Contains(bytes.TrimSpace(body), []byte(`"events"`)) {
+		if rows := parseJSON3TranscriptSegments(body); len(rows) > 0 {
+			return rows
+		}
+	}
+	return parseVTTTranscriptSegments(body)
+}
+
+func parseJSON3TranscriptSegments(body []byte) []youtubeTranscriptSegment {
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return nil
+	}
+	events := anySlice(decoded["events"])
+	out := make([]youtubeTranscriptSegment, 0, len(events))
+	for _, item := range events {
+		row := mapAny(item)
+		start := intAny(row["tStartMs"])
+		duration := intAny(row["dDurationMs"])
+		textParts := make([]string, 0)
+		for _, seg := range anySlice(row["segs"]) {
+			if text := stringAny(mapAny(seg)["utf8"]); text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+		text := stripTags(strings.Join(textParts, ""))
+		if text == "" {
+			continue
+		}
+		out = append(out, youtubeTranscriptSegment{
+			index:   len(out),
+			startMS: start,
+			endMS:   start + duration,
+			textRaw: text,
+		})
+	}
+	return out
+}
+
+func parseVTTTranscriptSegments(body []byte) []youtubeTranscriptSegment {
+	text := strings.ReplaceAll(string(bytes.TrimPrefix(body, []byte{0xef, 0xbb, 0xbf})), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	blocks := strings.Split(text, "\n\n")
+	out := make([]youtubeTranscriptSegment, 0, len(blocks))
+	for _, block := range blocks {
+		lines := strings.Split(strings.TrimSpace(block), "\n")
+		if len(lines) == 0 {
+			continue
+		}
+		timeLine := -1
+		for idx, line := range lines {
+			if strings.Contains(line, "-->") {
+				timeLine = idx
+				break
+			}
+		}
+		if timeLine < 0 || timeLine+1 >= len(lines) {
+			continue
+		}
+		parts := strings.Split(lines[timeLine], "-->")
+		if len(parts) != 2 {
+			continue
+		}
+		startFields := strings.Fields(strings.TrimSpace(parts[0]))
+		if len(startFields) == 0 {
+			continue
+		}
+		start := parseVTTTimeMS(startFields[0])
+		endFields := strings.Fields(strings.TrimSpace(parts[1]))
+		if len(endFields) == 0 {
+			continue
+		}
+		end := parseVTTTimeMS(endFields[0])
+		if end <= start {
+			continue
+		}
+		cueText := stripTags(strings.Join(lines[timeLine+1:], " "))
+		if cueText == "" || strings.EqualFold(cueText, "WEBVTT") {
+			continue
+		}
+		out = append(out, youtubeTranscriptSegment{
+			index:   len(out),
+			startMS: start,
+			endMS:   end,
+			textRaw: cueText,
+		})
+	}
+	return out
+}
+
+func parseVTTTimeMS(value string) int64 {
+	value = strings.ReplaceAll(strings.TrimSpace(value), ",", ".")
+	parts := strings.Split(value, ":")
+	var hours, minutes int64
+	secondsPart := "0"
+	switch len(parts) {
+	case 3:
+		hours, _ = strconv.ParseInt(parts[0], 10, 64)
+		minutes, _ = strconv.ParseInt(parts[1], 10, 64)
+		secondsPart = parts[2]
+	case 2:
+		minutes, _ = strconv.ParseInt(parts[0], 10, 64)
+		secondsPart = parts[1]
+	default:
+		secondsPart = value
+	}
+	seconds, _ := strconv.ParseFloat(secondsPart, 64)
+	return hours*3600000 + minutes*60000 + int64(seconds*1000)
+}
+
 func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {
 	sourceURL := "https://www.youtube.com/oembed?format=json&url=" + url.QueryEscape(canonicalURL)
 	var decoded map[string]any
@@ -2107,6 +2522,25 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 	host := hostFromURL(instance)
 	events := make([]webREvent, 0, len(feed.Channel.Items)*2+2)
 	started := nowKST()
+	apiStatuses, apiErr := fetchMastodonAccountStatusesMap(instance, acct, limit)
+	sourceMethod := "mastodon_public_rss_no_api"
+	if apiErr == nil && len(apiStatuses) > 0 {
+		sourceMethod = "mastodon_public_api_noauth+mastodon_public_rss_no_api"
+	} else if apiErr != nil {
+		events = append(events, newWebREvent("webr.mastodon.log.v1", sourceURL, map[string]any{
+			"uuid":          uuid7(),
+			"created_at":    formatKST(started),
+			"language_code": "en",
+			"created_log": map[string]any{
+				"type":          "mastodon_pipeline",
+				"stage":         "api_enrichment_unavailable",
+				"instance":      instance,
+				"acct":          acct,
+				"error":         apiErr.Error(),
+				"source_method": "mastodon_public_api_noauth",
+			},
+		}, started))
+	}
 	events = append(events, newWebREvent("webr.mastodon.log.v1", sourceURL, map[string]any{
 		"uuid":          uuid7(),
 		"created_at":    formatKST(started),
@@ -2116,7 +2550,7 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 			"stage":         "rss_started",
 			"instance":      instance,
 			"acct":          acct,
-			"source_method": "mastodon_public_rss_no_api",
+			"source_method": sourceMethod,
 		},
 	}, started))
 	count := 0
@@ -2136,6 +2570,7 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 		createdAt := parseRSSDate(item.PubDate, time.Now())
 		contentHTML := strings.TrimSpace(item.Description)
 		contentText := stripTags(contentHTML)
+		itemSourceMethod := "mastodon_public_rss_no_api"
 		rawPayload := map[string]any{
 			"uuid":                   rowUUID,
 			"instance_host":          host,
@@ -2173,7 +2608,15 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 			"image_base64_count":     0,
 			"has_image_base64":       0,
 			"fetched_at":             formatKST(time.Now()),
-			"source_method":          "mastodon_public_rss_no_api",
+			"source_method":          itemSourceMethod,
+		}
+		if apiStatus := mastodonMatchStatus(apiStatuses, statusURL, statusID); len(apiStatus) > 0 {
+			itemSourceMethod = "mastodon_public_api_noauth+mastodon_public_rss_no_api"
+			createdAt = mastodonStatusCreatedAt(apiStatus, createdAt)
+			rawPayload = mastodonRawPayloadFromAPI(rowUUID, host, acct, statusURL, statusID, item, apiStatus, createdAt, itemSourceMethod)
+			statusID = firstNonEmpty(stringAny(rawPayload["status_id"]), statusID)
+			contentHTML = stringAny(rawPayload["content_html"])
+			contentText = stringAny(rawPayload["content_text"])
 		}
 		if !dedup.raw[rowUUID] && dedup.rawByURL[statusURL] == "" {
 			events = append(events, newWebREvent("webr.mastodon.raw.v1", statusURL, rawPayload, createdAt))
@@ -2201,7 +2644,7 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 						"status_id":     statusID,
 						"status_url":    statusURL,
 						"error":         err.Error(),
-						"source_method": "mastodon_public_rss_no_api",
+						"source_method": itemSourceMethod,
 					},
 				}, nowKST()))
 				count++
@@ -2210,7 +2653,7 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 			boardTitle = translatedTitle
 			boardContent = translatedContent
 		}
-		boardPayload := mastodonBoardPayload(rowUUID, statusURL, statusID, createdAt, time.Time{}, boardTitle, boardContent)
+		boardPayload := mastodonBoardPayloadWithSourceMethod(rowUUID, statusURL, statusID, createdAt, time.Time{}, boardTitle, boardContent, itemSourceMethod)
 		events = append(events, newWebREvent("webr.mastodon.board.v1", statusURL, boardPayload, createdAt))
 		dedup.translated[rowUUID] = true
 		dedup.translatedURL[statusURL] = true
@@ -2227,10 +2670,140 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 			"instance":      instance,
 			"acct":          acct,
 			"published":     count,
-			"source_method": "mastodon_public_rss_no_api",
+			"source_method": sourceMethod,
 		},
 	}, done))
 	return events, nil
+}
+
+func fetchMastodonAccountStatusesMap(instance, acct string, limit int) (map[string]map[string]any, error) {
+	out := map[string]map[string]any{}
+	instance = strings.TrimRight(instance, "/")
+	acct = strings.TrimPrefix(acct, "@")
+	lookupURL := instance + "/api/v1/accounts/lookup?acct=" + url.QueryEscape(acct)
+	var account map[string]any
+	if err := fetchJSON(lookupURL, &account); err != nil {
+		return out, err
+	}
+	accountID := stringAny(account["id"])
+	if accountID == "" {
+		return out, errors.New("Mastodon account lookup returned no id")
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(maxInt(1, limit)))
+	q.Set("exclude_replies", "false")
+	q.Set("exclude_reblogs", "false")
+	statusesURL := instance + "/api/v1/accounts/" + url.PathEscape(accountID) + "/statuses?" + q.Encode()
+	var statuses []map[string]any
+	if err := fetchJSON(statusesURL, &statuses); err != nil {
+		return out, err
+	}
+	for _, status := range statuses {
+		for _, key := range mastodonStatusKeys(status) {
+			out[key] = status
+		}
+	}
+	return out, nil
+}
+
+func mastodonStatusKeys(status map[string]any) []string {
+	keys := make([]string, 0)
+	status = effectiveMastodonStatus(status)
+	for _, key := range []string{"url", "uri", "id"} {
+		value := stringAny(status[key])
+		if value != "" {
+			keys = append(keys, value)
+			keys = append(keys, stableID(value))
+		}
+	}
+	return uniqueStrings(keys)
+}
+
+func mastodonMatchStatus(statuses map[string]map[string]any, statusURL, statusID string) map[string]any {
+	for _, key := range []string{statusURL, statusID, stableID(statusURL)} {
+		if status := statuses[key]; len(status) > 0 {
+			return status
+		}
+	}
+	return nil
+}
+
+func mastodonStatusCreatedAt(status map[string]any, fallback time.Time) time.Time {
+	status = effectiveMastodonStatus(status)
+	if parsed := parseRSSDate(stringAny(status["created_at"]), time.Time{}); !parsed.IsZero() {
+		return parsed
+	}
+	return fallback
+}
+
+func effectiveMastodonStatus(status map[string]any) map[string]any {
+	if reblog := mapAny(status["reblog"]); len(reblog) > 0 {
+		return reblog
+	}
+	return status
+}
+
+func mastodonRawPayloadFromAPI(rowUUID, host, acct, fallbackStatusURL, fallbackStatusID string, rssItem rssItem, status map[string]any, createdAt time.Time, sourceMethod string) map[string]any {
+	originalStatus := status
+	status = effectiveMastodonStatus(status)
+	account := mapAny(status["account"])
+	statusURL := firstNonEmpty(stringAny(status["url"]), stringAny(status["uri"]), fallbackStatusURL)
+	statusID := firstNonEmpty(stringAny(status["id"]), fallbackStatusID, stableID(statusURL))
+	contentHTML := firstNonEmpty(stringAny(status["content"]), strings.TrimSpace(rssItem.Description))
+	contentText := stripTags(contentHTML)
+	media := anySlice(status["media_attachments"])
+	return map[string]any{
+		"uuid":                   rowUUID,
+		"instance_host":          host,
+		"account_acct":           firstNonEmpty(stringAny(account["acct"]), stringAny(account["username"]), acct),
+		"account_id":             firstNonEmpty(stringAny(account["id"]), "rss:"+acct),
+		"status_id":              statusID,
+		"status_uri":             firstNonEmpty(stringAny(status["uri"]), statusURL),
+		"status_url":             statusURL,
+		"status_created_at":      formatKST(createdAt),
+		"status_edited_at":       stringAny(status["edited_at"]),
+		"visibility":             firstNonEmpty(stringAny(status["visibility"]), "public"),
+		"language":               firstNonEmpty(stringAny(status["language"]), "en"),
+		"language_code":          firstNonEmpty(stringAny(status["language"]), "en"),
+		"sensitive":              boolString(status["sensitive"]),
+		"spoiler_text":           stringAny(status["spoiler_text"]),
+		"content_html":           contentHTML,
+		"content_text":           contentText,
+		"in_reply_to_id":         stringAny(status["in_reply_to_id"]),
+		"in_reply_to_account_id": stringAny(status["in_reply_to_account_id"]),
+		"is_reblog":              boolOrString(len(mapAny(originalStatus["reblog"])) > 0),
+		"reblog_status_id":       stringAny(mapAny(originalStatus["reblog"])["id"]),
+		"replies_count":          intString(status["replies_count"]),
+		"reblogs_count":          intString(status["reblogs_count"]),
+		"favourites_count":       intString(status["favourites_count"]),
+		"active":                 1,
+		"tags":                   anySlice(status["tags"]),
+		"mentions":               anySlice(status["mentions"]),
+		"emojis":                 anySlice(status["emojis"]),
+		"media_attachments":      media,
+		"card":                   mapAny(status["card"]),
+		"poll":                   mapAny(status["poll"]),
+		"account":                account,
+		"raw_status_json":        status,
+		"original_status_json":   originalStatus,
+		"payload_hash":           stableUInt64(mustJSON(status)),
+		"image_count":            mastodonImageCount(media),
+		"image_base64_count":     0,
+		"has_image_base64":       0,
+		"fetched_at":             formatKST(time.Now()),
+		"source_method":          sourceMethod,
+	}
+}
+
+func mastodonImageCount(media []any) int {
+	count := 0
+	for _, item := range media {
+		row := mapAny(item)
+		if strings.EqualFold(stringAny(row["type"]), "image") || stringAny(row["preview_url"]) != "" || stringAny(row["url"]) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func emptyMastodonDedupState() mastodonDedupState {
@@ -2429,6 +3002,14 @@ func mastodonBoardPayload(rowUUID, statusURL, statusID string, createdAt, update
 		},
 		"updated_log": nil,
 	}
+}
+
+func mastodonBoardPayloadWithSourceMethod(rowUUID, statusURL, statusID string, createdAt, updatedAt time.Time, title, content, sourceMethod string) map[string]any {
+	payload := mastodonBoardPayload(rowUUID, statusURL, statusID, createdAt, updatedAt, title, content)
+	createdLog := mapAny(payload["created_log"])
+	createdLog["source_method"] = firstNonEmpty(sourceMethod, stringAny(createdLog["source_method"]))
+	payload["created_log"] = createdLog
+	return payload
 }
 
 func translateMastodonStatus(ai *aiClient, model, title, text string) (string, string, error) {
@@ -3455,6 +4036,36 @@ func youtubeMetadataPackageMentionEvents(videoID string, payload map[string]any)
 	return events
 }
 
+func youtubeTextPackageMentionEvents(videoID, canonicalURL, sourceName, languageCode, text string, startMS, endMS int64, observedAt, sourceMethod, extractorVersion, confidenceScore string) []genericEvent {
+	packages := splitCSV(envString("R_YOUTUBE_MENTION_PACKAGES", "ggplot2,dplyr,shiny,tidymodels,quarto,data.table,tidyverse,knitr,rmarkdown,caret,randomForest,xgboost,survival"))
+	if len(packages) == 0 || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	events := make([]genericEvent, 0)
+	lowerText := strings.ToLower(text)
+	for _, packageName := range packages {
+		packageName = strings.TrimSpace(packageName)
+		if packageName == "" || !strings.Contains(lowerText, strings.ToLower(packageName)) {
+			continue
+		}
+		events = append(events, newGenericEvent("r.youtube.package.mention.v1", sourceMethod, canonicalURL, "CRAN", packageName, "", observedAt, map[string]any{
+			"youtube_video_id":  videoID,
+			"package":           packageName,
+			"mention_source":    sourceName,
+			"language_code":     firstNonEmpty(languageCode, "und"),
+			"segment_start_ms":  intString(startMS),
+			"segment_end_ms":    intString(endMS),
+			"match_text":        mentionContext(text, packageName, 240),
+			"confidence":        "medium",
+			"confidence_score":  firstNonEmpty(confidenceScore, "0.60"),
+			"extractor_version": firstNonEmpty(extractorVersion, "rpkg-youtube-text-mention-v1"),
+			"source_method":     sourceMethod,
+			"collection_status": "collected",
+		}))
+	}
+	return events
+}
+
 func mentionContext(text, needle string, limit int) string {
 	runes := []rune(text)
 	lowerRunes := []rune(strings.ToLower(text))
@@ -3963,6 +4574,18 @@ func mapStringAny(in map[string]string) map[string]any {
 }
 
 func anyStringSlice(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		return v
+	case []map[string]string:
+		out := []string{}
+		for _, row := range v {
+			if text := firstNonEmpty(row["url"], row["href"], row["value"]); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	}
 	out := []string{}
 	for _, item := range anySlice(value) {
 		if text := stringAny(item); text != "" {
@@ -3975,6 +4598,13 @@ func anyStringSlice(value any) []string {
 func anySlice(value any) []any {
 	if items, ok := value.([]any); ok {
 		return items
+	}
+	if items, ok := value.([]string); ok {
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
 	}
 	return nil
 }
@@ -4199,6 +4829,13 @@ func formatUUID(b [16]byte) string {
 func shaHex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+func hashMaybe(salt, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return shaHex(salt + ":" + value)
 }
 
 func stableUInt64(value string) uint64 {
@@ -4537,6 +5174,20 @@ func isLoopbackHost(host string) bool {
 }
 
 func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
 	}
