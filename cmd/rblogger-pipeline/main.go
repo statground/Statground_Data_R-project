@@ -499,7 +499,7 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		Port:     maxInt(1, envInt("CH_PORT", envInt("CLICKHOUSE_PORT", 8123))),
 		User:     firstNonEmpty(os.Getenv("CH_USER"), os.Getenv("CLICKHOUSE_USER")),
 		Password: firstNonEmpty(os.Getenv("CH_PASSWORD"), os.Getenv("CLICKHOUSE_PASSWORD")),
-		Database: envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Blogger_Raw")),
+		Database: envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Raw")),
 		Secure:   envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
 		Timeout:  time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
 	}
@@ -717,7 +717,7 @@ raw_latest AS
             active,
             language_code,
             row_number() OVER (PARTITION BY uuid, language_code ORDER BY coalesce(updated_at, created_at, now64(3, 'Asia/Seoul')) DESC) AS rn
-        FROM Data_R_Blogger_Raw.raw
+        FROM Data_R_Community_Raw.r_blogger_article_raw
         WHERE language_code = 'en' AND coalesce(active, 0) = 1
     )
     WHERE rn = 1
@@ -734,7 +734,7 @@ board_latest AS
             active,
             language_code,
             row_number() OVER (PARTITION BY uuid, language_code ORDER BY coalesce(updated_at, created_at, now64(3, 'Asia/Seoul')) DESC) AS rn
-        FROM Data_R_Blogger_Service.board
+        FROM Data_R_Community_Service.r_blogger_board
         WHERE language_code = 'ko'
     )
     WHERE rn = 1
@@ -798,7 +798,7 @@ FROM
         active,
         language_code,
         row_number() OVER (PARTITION BY uuid, language_code ORDER BY coalesce(updated_at, created_at, now64(3, 'Asia/Seoul')) DESC) AS rn
-    FROM Data_R_Blogger_Raw.raw
+    FROM Data_R_Community_Raw.r_blogger_article_raw
     WHERE language_code = 'en' AND coalesce(active, 0) = 1
 )
 WHERE rn = 1
@@ -843,7 +843,7 @@ func (r *ClickHouseReader) KnownURLHashes(ctx context.Context, hashes []string) 
 	}
 	query := fmt.Sprintf(`
 SELECT DISTINCT url_hash
-FROM Data_R_Blogger_Raw.raw
+FROM Data_R_Community_Raw.r_blogger_article_raw
 WHERE language_code = 'en'
   AND coalesce(active, 0) = 1
   AND url_hash IN (%s)`, strings.Join(quoted, ", "))
@@ -877,7 +877,7 @@ func (r *ClickHouseReader) DeactivateBoardRows(ctx context.Context, rows []Stale
 			continue
 		}
 		query := fmt.Sprintf(`
-ALTER TABLE Data_R_Blogger_Service.board_local
+ALTER TABLE Data_R_Community_Service.r_blogger_board_local
 ON CLUSTER statground_cluster
 UPDATE
     active = 0,
@@ -893,7 +893,7 @@ SETTINGS mutations_sync = 2`, strings.Join(conditions, ", "), strings.Join(uuidL
 		return nil
 	}
 	return r.exec(ctx, `
-ALTER TABLE Data_R_Blogger_Service.board_local
+ALTER TABLE Data_R_Community_Service.r_blogger_board_local
 ON CLUSTER statground_cluster
 UPDATE active = 0
 WHERE language_code = 'ko'
@@ -904,7 +904,7 @@ SETTINGS mutations_sync = 2`)
 func (r *ClickHouseReader) InsertBoardPayloads(ctx context.Context, payloads []map[string]any, batchSize int) error {
 	for _, batch := range chunkPayloads(payloads, batchSize) {
 		var body strings.Builder
-		body.WriteString("INSERT INTO Data_R_Blogger_Service.board (uuid, title, content, active, created_at, updated_at, created_log, updated_log, language_code) FORMAT JSONEachRow\n")
+		body.WriteString("INSERT INTO Data_R_Community_Service.r_blogger_board (uuid, title, content, active, created_at, updated_at, created_log, updated_log, language_code) FORMAT JSONEachRow\n")
 		for _, payload := range batch {
 			line, err := json.Marshal(payload)
 			if err != nil {
@@ -1027,10 +1027,11 @@ func (r *ClickHouseReader) endpoint() (string, error) {
 }
 
 func rawPayload(rowUUID string, article Article, urlHash string, createdAt time.Time) map[string]any {
+	articleLog := compactArticleLog(article, urlHash)
 	return map[string]any{
 		"uuid":          rowUUID,
 		"created_at":    formatClickHouseTime(createdAt),
-		"created_log":   map[string]any{"type": "rblogger_crawl", "source": "Statground_Data_R-project", "article": compactArticleLog(article, urlHash)},
+		"created_log":   map[string]any{"type": "rblogger_crawl", "source": "Statground_Data_R-project", "article": articleLog},
 		"updated_at":    nil,
 		"updated_log":   nil,
 		"active":        1,
@@ -1040,6 +1041,28 @@ func rawPayload(rowUUID string, article Article, urlHash string, createdAt time.
 		"url":           firstNonEmpty(article.CanonicalURL, article.URL),
 		"url_hash":      urlHash,
 		"language_code": "en",
+		"canonical_url":       article.CanonicalURL,
+		"html_title":          article.HTMLTitle,
+		"h1_title":            article.H1Title,
+		"meta_description":    article.MetaDescription,
+		"meta_keywords":       article.MetaKeywords,
+		"og_title":            article.OGTitle,
+		"og_description":      article.OGDescription,
+		"og_image":            article.OGImage,
+		"twitter_title":       article.TwitterTitle,
+		"twitter_description": article.TwitterDescription,
+		"article_headline":    article.ArticleHeadline,
+		"article_section":     article.ArticleSection,
+		"article_tags":        article.ArticleTags,
+		"article_author":      article.ArticleAuthor,
+		"article_published":   article.ArticlePublished,
+		"article_modified":    article.ArticleModified,
+		"word_count":          article.WordCount,
+		"reading_time_min":    article.ReadingTimeMin,
+		"internal_links":      firstNMaps(article.InternalLinks, 30),
+		"external_links":      firstNMaps(article.ExternalLinks, 30),
+		"images":              firstNMaps(article.Images, 30),
+		"main_text_excerpt":   truncateRunes(article.MainText, 3000),
 	}
 }
 

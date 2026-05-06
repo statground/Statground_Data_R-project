@@ -264,6 +264,14 @@ class RSourceCollector:
                         "feed_url": url,
                         "feed_title": feed_title,
                         "entry_id": native_id,
+                        "link": link,
+                        "published": entry.get("published"),
+                        "updated": entry.get("updated"),
+                        "author": entry.get("author"),
+                        "author_detail": entry.get("author_detail") or {},
+                        "tags": tags,
+                        "summary_detail": entry.get("summary_detail") or {},
+                        "content": entry.get("content") or [],
                     },
                 )
             )
@@ -331,9 +339,25 @@ class RSourceCollector:
                 raw={
                     "collector": "reddit_json_noauth",
                     "subreddit": subreddit,
+                    "reddit_id": post.get("id"),
+                    "name": post.get("name"),
+                    "permalink": permalink,
+                    "url": post.get("url"),
+                    "domain": post.get("domain"),
+                    "created_utc": post.get("created_utc"),
                     "score": post.get("score"),
+                    "ups": post.get("ups"),
+                    "downs": post.get("downs"),
+                    "upvote_ratio": post.get("upvote_ratio"),
                     "num_comments": post.get("num_comments"),
                     "over_18": post.get("over_18"),
+                    "is_self": post.get("is_self"),
+                    "stickied": post.get("stickied"),
+                    "locked": post.get("locked"),
+                    "link_flair_text": post.get("link_flair_text"),
+                    "post_hint": post.get("post_hint"),
+                    "thumbnail": post.get("thumbnail"),
+                    "num_crossposts": post.get("num_crossposts"),
                 },
             )
             item.platform = "reddit"
@@ -383,35 +407,7 @@ class RSourceCollector:
         if not isinstance(data, list):
             raise CollectorError(f"unexpected Mastodon response: {type(data)!r}")
         for status in data:
-            status = status.get("reblog") or status
-            account = status.get("account") or {}
-            content_text = html_to_text(status.get("content") or "")
-            title = content_text[:140] or f"Mastodon #{tag} status {status.get('id')}"
-            status_tags = [t.get("name") for t in status.get("tags", []) if t.get("name")]
-            item = self.make_item(
-                source=source,
-                source_id=source_id,
-                source_url=source_url,
-                canonical_url=status.get("url") or status.get("uri") or source_url,
-                native_id=status.get("id") or status.get("uri") or status.get("url"),
-                title=title,
-                summary=content_text,
-                author=account.get("acct") or account.get("username"),
-                published_at=parse_datetime_to_iso(status.get("created_at")),
-                language=status.get("language") or source.get("language"),
-                tags=[tag, "mastodon", *status_tags],
-                raw={
-                    "collector": "mastodon_tag_api_noauth",
-                    "instance": instance,
-                    "status_id": str(status.get("id")) if status.get("id") is not None else None,
-                    "visibility": status.get("visibility"),
-                    "favourites_count": status.get("favourites_count"),
-                    "reblogs_count": status.get("reblogs_count"),
-                    "replies_count": status.get("replies_count"),
-                },
-            )
-            item.platform = "mastodon"
-            self.add_item(item)
+            self.add_item(self._mastodon_status_item(source, source_id, source_url, instance, status, extra_tags=[tag], collector="mastodon_tag_api_noauth"))
 
     def collect_mastodon_account(self, source: dict[str, Any]) -> None:
         url = source.get("url")
@@ -425,6 +421,99 @@ class RSourceCollector:
             item.platform = "mastodon"
             item.tags.append("mastodon")
             self.add_item(item)
+        if source.get("public_api_fallback", True):
+            try:
+                instance, username = mastodon_instance_username(source, source_url or url)
+                if instance and username:
+                    self._collect_mastodon_account_api(source, source_id, source_url, instance, username, int(source.get("limit", source.get("max_items", 40))))
+            except Exception as exc:  # noqa: BLE001
+                logging.info("mastodon account no-auth api unavailable source=%s err=%s", source_id, exc)
+
+    def _collect_mastodon_account_api(
+        self,
+        source: dict[str, Any],
+        source_id: str,
+        source_url: str,
+        instance: str,
+        username: str,
+        limit: int,
+    ) -> None:
+        lookup_url = f"https://{instance}/api/v1/accounts/lookup?acct={username}"
+        lookup_response = self.fetch(lookup_url, accept="application/json")
+        account = lookup_response.json()
+        account_id = str(account.get("id") or "")
+        if not account_id:
+            raise CollectorError(f"mastodon account lookup returned no id: {lookup_url}")
+        statuses_url = f"https://{instance}/api/v1/accounts/{account_id}/statuses?limit={limit}&exclude_replies=false&exclude_reblogs=false"
+        statuses_response = self.fetch(statuses_url, accept="application/json")
+        statuses = statuses_response.json()
+        if not isinstance(statuses, list):
+            raise CollectorError(f"unexpected Mastodon account statuses response: {type(statuses)!r}")
+        for status in statuses:
+            self.add_item(self._mastodon_status_item(source, source_id, source_url, instance, status, extra_tags=["mastodon"], collector="mastodon_account_api_noauth"))
+
+    def _mastodon_status_item(
+        self,
+        source: dict[str, Any],
+        source_id: str,
+        source_url: str,
+        instance: str,
+        status: dict[str, Any],
+        *,
+        extra_tags: list[str],
+        collector: str,
+    ) -> NormalizedItem:
+        original_status = status
+        status = status.get("reblog") or status
+        account = status.get("account") or {}
+        content_html = status.get("content") or ""
+        content_text = html_to_text(content_html)
+        title = content_text[:140] or f"Mastodon status {status.get('id')}"
+        status_tags = [tag.get("name") for tag in status.get("tags", []) if tag.get("name")]
+        status_url = status.get("url") or status.get("uri") or source_url
+        item = self.make_item(
+            source=source,
+            source_id=source_id,
+            source_url=source_url,
+            canonical_url=status_url,
+            native_id=status_url,
+            title=title,
+            summary=content_text,
+            author=account.get("acct") or account.get("username"),
+            published_at=parse_datetime_to_iso(status.get("created_at")),
+            language=status.get("language") or source.get("language"),
+            tags=[*extra_tags, "mastodon", *status_tags],
+            raw={
+                "collector": collector,
+                "instance": instance,
+                "instance_host": instance,
+                "account_acct": account.get("acct") or account.get("username"),
+                "account_id": str(account.get("id")) if account.get("id") is not None else None,
+                "account": account,
+                "status_id": str(status.get("id")) if status.get("id") is not None else None,
+                "status_uri": status.get("uri"),
+                "status_url": status_url,
+                "url": status.get("url"),
+                "visibility": status.get("visibility"),
+                "language": status.get("language"),
+                "sensitive": status.get("sensitive"),
+                "spoiler_text": status.get("spoiler_text"),
+                "content_html": content_html,
+                "content_text": content_text,
+                "favourites_count": status.get("favourites_count"),
+                "reblogs_count": status.get("reblogs_count"),
+                "replies_count": status.get("replies_count"),
+                "tags": status.get("tags") or [],
+                "mentions": status.get("mentions") or [],
+                "media_attachments": status.get("media_attachments") or [],
+                "card": status.get("card") or {},
+                "poll": status.get("poll") or {},
+                "status": status,
+                "original_status": original_status,
+            },
+        )
+        item.platform = "mastodon"
+        return item
 
     def collect_dcinside_gallery(self, source: dict[str, Any]) -> None:
         gallery_id = source["gallery_id"]
@@ -702,6 +791,23 @@ def infer_platform(url: str) -> str:
     if "r-project.org" in host or "cran.r-project.org" in host:
         return "r-project"
     return host or "web"
+
+
+def mastodon_instance_username(source: dict[str, Any], fallback_url: str) -> tuple[str | None, str | None]:
+    instance = str(source.get("instance") or "").strip().removeprefix("https://").removeprefix("http://").strip("/")
+    username = str(source.get("username") or "").strip().lstrip("@")
+    if instance and username:
+        return instance, username
+    parsed = urlparse(fallback_url)
+    host = parsed.netloc
+    path = parsed.path.strip("/")
+    if path.endswith(".rss"):
+        path = path[:-4]
+    if path.startswith("@"):
+        path = path[1:]
+    if "@" in path:
+        path = path.split("@", 1)[0]
+    return host or None, path or None
 
 
 def entry_summary(entry: Any) -> str | None:

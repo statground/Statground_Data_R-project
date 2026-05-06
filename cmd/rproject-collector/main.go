@@ -1302,7 +1302,7 @@ func loadYouTubeSeedsFromClickHouse(limit int) ([]map[string]any, error) {
     parsed_handle,
     notes,
     'clickhouse_source_seed_current' AS source_method
-FROM Data_R_Youtube_Service.r_youtube_source_seed_current
+FROM Data_R_Community_Service.r_youtube_source_seed_current
 WHERE active = 1
 ORDER BY priority, source_code
 LIMIT %d
@@ -1323,7 +1323,7 @@ FORMAT JSONEachRow`, queryLimit),
     '' AS parsed_handle,
     'Migrated from Web-R official YouTube records' AS notes,
     'clickhouse_webr_official_youtube' AS source_method
-FROM Data_R_Youtube_Service.v_webr_official_youtube
+FROM Data_R_Community_Service.v_webr_official_youtube
 WHERE active = 1
 ORDER BY updated_at DESC
 LIMIT %d
@@ -1456,7 +1456,7 @@ FROM
                 language_code,
                 payload_json,
                 collected_at
-            FROM Data_R_Youtube_Service.r_youtube_video_current FINAL
+            FROM Data_R_Community_Service.r_youtube_video_current FINAL
             WHERE active = 1
               AND notEmpty(youtube_video_id)
         )
@@ -2256,7 +2256,7 @@ FROM
             PARTITION BY status_url
             ORDER BY fetched_at DESC, ingested_at DESC
         ) AS rn
-    FROM Data_R_Project_Mastodon_Raw.raw
+    FROM Data_R_Community_Raw.mastodon_status_raw
     WHERE active != 0
       AND notEmpty(status_url)
 )
@@ -2276,7 +2276,7 @@ FORMAT JSONEachRow`)
 	boardRows, err := cfg.queryJSONEachRow(`SELECT
     toString(uuid) AS uuid,
     toString(status_url) AS status_url
-FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+FROM Data_R_Community_Service.v_r_foundation_board
 WHERE language_code = 'ko'
   AND active != 0
   AND position(toString(created_log), 'mastodon_board_translation') > 0
@@ -2307,13 +2307,13 @@ func collectMastodonBoardBackfill(ctx context.Context, cfg clickHouseQueryConfig
     toString(r.status_created_at) AS status_created_at,
     toString(r.content_text) AS content_text,
     toString(r.content_html) AS content_html
-FROM Data_R_Project_Mastodon_Raw.raw AS r
+FROM Data_R_Community_Raw.mastodon_status_raw AS r
 LEFT JOIN
 (
     SELECT
         uuid,
         toString(created_log) AS board_log
-    FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+    FROM Data_R_Community_Service.v_r_foundation_board
     WHERE active != 0
       AND language_code = 'ko'
 ) AS b ON b.uuid = r.uuid
@@ -2321,7 +2321,7 @@ WHERE r.active != 0
   AND r.status_url NOT IN
   (
       SELECT status_url
-      FROM Data_R_Project_Mastodon_Service.v_r_foundation_board
+      FROM Data_R_Community_Service.v_r_foundation_board
       WHERE active != 0
         AND language_code = 'ko'
         AND notEmpty(status_url)
@@ -2342,7 +2342,7 @@ FORMAT JSONEachRow`, queryLimit)
 	}
 	events := make([]webREvent, 0, len(rows)+2)
 	started := nowKST()
-	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Project_Mastodon_Raw.raw", map[string]any{
+	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Community_Raw.mastodon_status_raw", map[string]any{
 		"uuid":          uuid7(),
 		"created_at":    formatKST(started),
 		"language_code": "en",
@@ -2382,7 +2382,7 @@ FORMAT JSONEachRow`, queryLimit)
 		published++
 	}
 	done := nowKST()
-	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Project_Mastodon_Raw.raw", map[string]any{
+	events = append(events, newWebREvent("webr.mastodon.log.v1", "clickhouse://Data_R_Community_Raw.mastodon_status_raw", map[string]any{
 		"uuid":          uuid7(),
 		"created_at":    formatKST(done),
 		"language_code": "en",
@@ -3828,7 +3828,7 @@ func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 		Port:     maxInt(1, envInt("CH_PORT", envInt("CLICKHOUSE_PORT", 8123))),
 		User:     firstNonEmpty(os.Getenv("CH_USER"), os.Getenv("CLICKHOUSE_USER")),
 		Password: firstNonEmpty(os.Getenv("CH_PASSWORD"), os.Getenv("CLICKHOUSE_PASSWORD")),
-		Database: envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Youtube_Service")),
+		Database: envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Service")),
 		Secure:   envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
 		Timeout:  time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
 	}

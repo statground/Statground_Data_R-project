@@ -25,14 +25,6 @@ on:
         description: "Only keep R Community items newer than N days when published_at exists. Use -1 for no date filtering."
         required: false
         default: "14"
-      r_community_commit_output:
-        description: "Commit collected R Community JSONL output under data/collected/r. False uploads artifacts only."
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: write
@@ -65,14 +57,12 @@ jobs:
             echo "rblogger_rebuild_board=${{ inputs.rblogger_rebuild_board }}" >> "$GITHUB_OUTPUT"
             echo "mastodon_backfill_board=${{ inputs.mastodon_backfill_board }}" >> "$GITHUB_OUTPUT"
             echo "r_community_since_days=${{ inputs.r_community_since_days }}" >> "$GITHUB_OUTPUT"
-            echo "r_community_commit_output=${{ inputs.r_community_commit_output }}" >> "$GITHUB_OUTPUT"
           else
             echo "r_package_job=${{ vars.RPKG_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
             echo "r_youtube_job=${{ vars.R_YOUTUBE_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
             echo "rblogger_rebuild_board=false" >> "$GITHUB_OUTPUT"
             echo "mastodon_backfill_board=false" >> "$GITHUB_OUTPUT"
             echo "r_community_since_days=${{ vars.R_COMMUNITY_SINCE_DAYS || '14' }}" >> "$GITHUB_OUTPUT"
-            echo "r_community_commit_output=false" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/setup-go@v5
@@ -162,7 +152,7 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
-          CH_DATABASE: Data_R_Youtube_Service
+          CH_DATABASE: Data_R_Community_Service
           R_YOUTUBE_KAFKA_TOPIC: ${{ vars.R_YOUTUBE_KAFKA_TOPIC || 'r.youtube.events' }}
           R_YOUTUBE_JOB: ${{ steps.opts.outputs.r_youtube_job }}
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '0' }}
@@ -231,7 +221,7 @@ jobs:
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
-          CH_DATABASE: Data_R_Project_Mastodon_Service
+          CH_DATABASE: Data_R_Community_Service
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
@@ -297,16 +287,3 @@ jobs:
             data/collected/r/r_sources_report_*.json
           if-no-files-found: error
           retention-days: 14
-
-      - name: Commit R Community output when requested
-        if: ${{ steps.opts.outputs.r_community_commit_output == 'true' }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f data/collected/r
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore(data): collect R Community sources"
-            git push
-          fi
