@@ -44,7 +44,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +62,7 @@ jobs:
             echo "r_youtube_job=${{ vars.R_YOUTUBE_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
             echo "rblogger_rebuild_board=false" >> "$GITHUB_OUTPUT"
             echo "mastodon_backfill_board=false" >> "$GITHUB_OUTPUT"
-            echo "r_community_since_days=${{ vars.R_COMMUNITY_SINCE_DAYS || '14' }}" >> "$GITHUB_OUTPUT"
+            echo "r_community_since_days=${{ vars.R_COMMUNITY_SINCE_DAYS || '7' }}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/setup-go@v5
@@ -120,37 +120,37 @@ jobs:
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
           KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
           KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
-          KAFKA_WRITE_CHUNK_SIZE: ${{ vars.RPKG_KAFKA_WRITE_CHUNK_SIZE || '1' }}
+          KAFKA_WRITE_CHUNK_SIZE: ${{ vars.RPKG_KAFKA_WRITE_CHUNK_SIZE || '100' }}
           RPKG_KAFKA_TOPIC: ${{ vars.RPKG_KAFKA_TOPIC || 'rpkg.events' }}
           RPKG_JOB: ${{ steps.opts.outputs.r_package_job }}
           RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}
-          RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '100' }}
+          RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '50' }}
           RPKG_REVERSE_DEPENDENCY_LIMIT: ${{ vars.RPKG_REVERSE_DEPENDENCY_LIMIT || '0' }}
           RPKG_CRAN_CHECK_LIMIT: ${{ vars.RPKG_CRAN_CHECK_LIMIT || '0' }}
           RPKG_CRAN_ARCHIVE_LIMIT: ${{ vars.RPKG_CRAN_ARCHIVE_LIMIT || '0' }}
           RPKG_CRAN_TASK_VIEW_LIMIT: ${{ vars.RPKG_CRAN_TASK_VIEW_LIMIT || '0' }}
-          RPKG_PACKAGE_NEWS_LIMIT: ${{ vars.RPKG_PACKAGE_NEWS_LIMIT || '50' }}
+          RPKG_PACKAGE_NEWS_LIMIT: ${{ vars.RPKG_PACKAGE_NEWS_LIMIT || '30' }}
           RPKG_PACKAGE_PAGE_CURSOR_MODE: ${{ vars.RPKG_PACKAGE_PAGE_CURSOR_MODE || 'clickhouse' }}
-          RPKG_CRAN_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_CRAN_PACKAGE_PAGE_LIMIT || '0' }}
+          RPKG_CRAN_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_CRAN_PACKAGE_PAGE_LIMIT || '250' }}
           RPKG_CRAN_PACKAGE_PAGE_PACKAGES: ${{ vars.RPKG_CRAN_PACKAGE_PAGE_PACKAGES || '' }}
           RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT: ${{ vars.RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT || '-1' }}
           RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT: ${{ vars.RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT || '-1' }}
-          RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT || '0' }}
+          RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT || '100' }}
           RPKG_BIOCONDUCTOR_PACKAGE_PAGE_PACKAGES: ${{ vars.RPKG_BIOCONDUCTOR_PACKAGE_PAGE_PACKAGES || '' }}
           RPKG_BIOCONDUCTOR_PACKAGE_ARTIFACT_LIMIT: ${{ vars.RPKG_BIOCONDUCTOR_PACKAGE_ARTIFACT_LIMIT || '-1' }}
           RPKG_BIOCONDUCTOR_PACKAGE_MANUAL_TOPIC_LIMIT: ${{ vars.RPKG_BIOCONDUCTOR_PACKAGE_MANUAL_TOPIC_LIMIT || '-1' }}
-          RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT || '0' }}
+          RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT: ${{ vars.RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT || '80' }}
           RPKG_RUNIVERSE_PACKAGE_PAGE_PACKAGES: ${{ vars.RPKG_RUNIVERSE_PACKAGE_PAGE_PACKAGES || '' }}
           RPKG_RUNIVERSE_PACKAGE_ARTIFACT_LIMIT: ${{ vars.RPKG_RUNIVERSE_PACKAGE_ARTIFACT_LIMIT || '-1' }}
           RPKG_RUNIVERSE_PACKAGE_MANUAL_TOPIC_LIMIT: ${{ vars.RPKG_RUNIVERSE_PACKAGE_MANUAL_TOPIC_LIMIT || '-1' }}
-          RPKG_R_WEBSITE_LIMIT: ${{ vars.RPKG_R_WEBSITE_LIMIT || '0' }}
-          RPKG_R_WEBSITE_CANDIDATE_LIMIT: ${{ vars.RPKG_R_WEBSITE_CANDIDATE_LIMIT || '120' }}
-          RPKG_R_WEBSITE_FEED_LIMIT: ${{ vars.RPKG_R_WEBSITE_FEED_LIMIT || '40' }}
-          RPKG_R_WEBSITE_LINK_LIMIT: ${{ vars.RPKG_R_WEBSITE_LINK_LIMIT || '120' }}
-          RPKG_R_WEBSITE_SITEMAP_LIMIT: ${{ vars.RPKG_R_WEBSITE_SITEMAP_LIMIT || '40' }}
-          RPKG_GITHUB_LIMIT: ${{ vars.RPKG_GITHUB_LIMIT || '60' }}
-          RPKG_OSV_LIMIT: ${{ vars.RPKG_OSV_LIMIT || '100' }}
-          RPKG_BIBLIOMETRIC_LIMIT: ${{ vars.RPKG_BIBLIOMETRIC_LIMIT || '40' }}
+          RPKG_R_WEBSITE_LIMIT: ${{ vars.RPKG_R_WEBSITE_LIMIT || '8' }}
+          RPKG_R_WEBSITE_CANDIDATE_LIMIT: ${{ vars.RPKG_R_WEBSITE_CANDIDATE_LIMIT || '80' }}
+          RPKG_R_WEBSITE_FEED_LIMIT: ${{ vars.RPKG_R_WEBSITE_FEED_LIMIT || '20' }}
+          RPKG_R_WEBSITE_LINK_LIMIT: ${{ vars.RPKG_R_WEBSITE_LINK_LIMIT || '80' }}
+          RPKG_R_WEBSITE_SITEMAP_LIMIT: ${{ vars.RPKG_R_WEBSITE_SITEMAP_LIMIT || '20' }}
+          RPKG_GITHUB_LIMIT: ${{ vars.RPKG_GITHUB_LIMIT || '40' }}
+          RPKG_OSV_LIMIT: ${{ vars.RPKG_OSV_LIMIT || '60' }}
+          RPKG_BIBLIOMETRIC_LIMIT: ${{ vars.RPKG_BIBLIOMETRIC_LIMIT || '25' }}
           RPKG_RUNIVERSE_UNIVERSES: ${{ vars.RPKG_RUNIVERSE_UNIVERSES || 'ropensci,tidyverse' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: go run ./cmd/rproject-collector package --job "$RPKG_JOB"
@@ -173,21 +173,21 @@ jobs:
           CH_DATABASE: Data_R_Community_Service
           R_YOUTUBE_KAFKA_TOPIC: ${{ vars.R_YOUTUBE_KAFKA_TOPIC || 'r.youtube.events' }}
           R_YOUTUBE_JOB: ${{ steps.opts.outputs.r_youtube_job }}
-          R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '0' }}
-          R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '30' }}
-          R_YOUTUBE_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_VIDEO_LIMIT || '30' }}
-          R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT || '10' }}
-          R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT || '2' }}
+          R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '200' }}
+          R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '20' }}
+          R_YOUTUBE_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_VIDEO_LIMIT || '20' }}
+          R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT || '3' }}
+          R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT: ${{ vars.R_YOUTUBE_TRANSCRIPT_TRACK_LIMIT || '1' }}
           R_YOUTUBE_TRANSCRIPT_LANGS: ${{ vars.R_YOUTUBE_TRANSCRIPT_LANGS || 'ko,en,en-US' }}
-          R_YOUTUBE_COMMENT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_COMMENT_VIDEO_LIMIT || '10' }}
-          R_YOUTUBE_COMMENT_MAX_RESULTS: ${{ vars.R_YOUTUBE_COMMENT_MAX_RESULTS || '50' }}
+          R_YOUTUBE_COMMENT_VIDEO_LIMIT: ${{ vars.R_YOUTUBE_COMMENT_VIDEO_LIMIT || '3' }}
+          R_YOUTUBE_COMMENT_MAX_RESULTS: ${{ vars.R_YOUTUBE_COMMENT_MAX_RESULTS || '25' }}
           R_YOUTUBE_COMMENT_PAGE_LIMIT: ${{ vars.R_YOUTUBE_COMMENT_PAGE_LIMIT || '1' }}
-          R_YOUTUBE_INCLUDE_COMMENT_REPLIES: ${{ vars.R_YOUTUBE_INCLUDE_COMMENT_REPLIES || 'true' }}
-          R_YOUTUBE_BACKFILL_LIMIT: ${{ vars.R_YOUTUBE_BACKFILL_LIMIT || '100' }}
-          R_YOUTUBE_SEARCH_EVENT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_EVENT_LIMIT || '0' }}
-          R_YOUTUBE_SEARCH_QUERY_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_QUERY_LIMIT || '40' }}
-          R_YOUTUBE_SEARCH_RESULT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_RESULT_LIMIT || '80' }}
-          R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT || '10' }}
+          R_YOUTUBE_INCLUDE_COMMENT_REPLIES: ${{ vars.R_YOUTUBE_INCLUDE_COMMENT_REPLIES || 'false' }}
+          R_YOUTUBE_BACKFILL_LIMIT: ${{ vars.R_YOUTUBE_BACKFILL_LIMIT || '30' }}
+          R_YOUTUBE_SEARCH_EVENT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_EVENT_LIMIT || '50' }}
+          R_YOUTUBE_SEARCH_QUERY_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_QUERY_LIMIT || '20' }}
+          R_YOUTUBE_SEARCH_RESULT_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_RESULT_LIMIT || '50' }}
+          R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT: ${{ vars.R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT || '5' }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY || secrets.GOOGLE_YOUTUBE_API_KEY }}
           YOUTUBE_API_KEY_ALIAS: ${{ vars.YOUTUBE_API_KEY_ALIAS || 'default' }}
           YOUTUBE_DL_BIN: yt-dlp
@@ -205,9 +205,9 @@ jobs:
           PRODUCER_IP: "::"
           TRANSLATE_ENABLED: ${{ vars.RBLOGGER_TRANSLATE_ENABLED || 'true' }}
           MAX_PAGES_FROM_HOME: ${{ vars.RBLOGGER_MAX_PAGES_FROM_HOME || '1' }}
-          MAX_URLS: ${{ vars.RBLOGGER_MAX_URLS || '0' }}
-          STALE_TRANSLATION_LIMIT: ${{ vars.RBLOGGER_STALE_TRANSLATION_LIMIT || '20' }}
-          SLEEP_SEC: ${{ vars.RBLOGGER_SLEEP_SEC || '1.0' }}
+          MAX_URLS: ${{ vars.RBLOGGER_MAX_URLS || '10' }}
+          STALE_TRANSLATION_LIMIT: ${{ vars.RBLOGGER_STALE_TRANSLATION_LIMIT || '5' }}
+          SLEEP_SEC: ${{ vars.RBLOGGER_SLEEP_SEC || '0.5' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -238,9 +238,9 @@ jobs:
           PRODUCER_IP: "::"
           MASTODON_INSTANCE: ${{ vars.MASTODON_INSTANCE || 'https://fosstodon.org' }}
           MASTODON_ACCT: ${{ vars.MASTODON_ACCT || 'R_Foundation' }}
-          MASTODON_LIMIT: ${{ vars.MASTODON_LIMIT || '40' }}
+          MASTODON_LIMIT: ${{ vars.MASTODON_LIMIT || '20' }}
           MASTODON_TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
-          MASTODON_STALE_TRANSLATION_LIMIT: ${{ vars.MASTODON_STALE_TRANSLATION_LIMIT || '20' }}
+          MASTODON_STALE_TRANSLATION_LIMIT: ${{ vars.MASTODON_STALE_TRANSLATION_LIMIT || '5' }}
           MASTODON_TRANSLATION_MODEL: ${{ vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.0-flash-exp:free' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -261,7 +261,7 @@ jobs:
       - name: Collect R community sources
         env:
           STATGROUND_USER_AGENT: ${{ vars.STATGROUND_USER_AGENT || 'StatgroundRCollector/1.0 (+https://www.statground.net)' }}
-          R_COMMUNITY_REQUEST_DELAY: ${{ vars.R_COMMUNITY_REQUEST_DELAY || '0.8' }}
+          R_COMMUNITY_REQUEST_DELAY: ${{ vars.R_COMMUNITY_REQUEST_DELAY || '0.5' }}
         run: |
           python scripts/collect_r_sources.py \
             --config config/r_sources.yaml \
@@ -294,7 +294,7 @@ jobs:
           KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
           KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
-          R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '0' }}
+          R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
         run: |
           go run ./cmd/rproject-collector community \
             --jsonl data/collected/r/latest.jsonl \

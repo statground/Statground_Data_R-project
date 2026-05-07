@@ -3250,7 +3250,11 @@ func fetchYouTubeCommentThreadEvents(videoID, canonicalURL, apiKey string) ([]ge
 	pageToken := ""
 	for page := 0; page < pageLimit; page++ {
 		q := url.Values{}
-		q.Set("part", "snippet,replies")
+		if envBool("R_YOUTUBE_INCLUDE_COMMENT_REPLIES", true) {
+			q.Set("part", "snippet,replies")
+		} else {
+			q.Set("part", "snippet")
+		}
 		q.Set("videoId", videoID)
 		q.Set("maxResults", strconv.Itoa(maxResults))
 		q.Set("textFormat", "plainText")
