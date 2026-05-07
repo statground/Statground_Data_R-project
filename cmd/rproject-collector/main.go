@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -65,6 +66,7 @@ var (
 	boardAnchorRE   = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
 	boardAnchorOnlyRE = regexp.MustCompile(`(?is)^<a\b[^>]*>(.*?)</a>$`)
 	sitemapLocRE    = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
+	rdCommandRE     = regexp.MustCompile(`\\[A-Za-z]+`)
 	statusOrder     = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
 	newsCandidates  = []string{"news/news.html", "news.html"}
 	defaultWebsites = []string{
@@ -227,6 +229,8 @@ func runPackage(ctx context.Context, args []string) error {
 	taskViewLimit := fs.Int("task-view-limit", envInt("RPKG_CRAN_TASK_VIEW_LIMIT", 0), "CRAN Task View page limit")
 	newsLimit := fs.Int("package-news-limit", envInt("RPKG_PACKAGE_NEWS_LIMIT", 50), "package NEWS page limit")
 	packagePageLimit := fs.Int("package-page-limit", envInt("RPKG_CRAN_PACKAGE_PAGE_LIMIT", 120), "CRAN package index.html page limit")
+	packageArtifactLimit := fs.Int("package-artifact-limit", envInt("RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT", 8), "CRAN package linked artifact fetch limit per package; 0 means all")
+	packageManualTopicLimit := fs.Int("package-manual-topic-limit", envInt("RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "CRAN package Rd manual topic limit per package; 0 means all")
 	websiteLimit := fs.Int("website-limit", envInt("RPKG_R_WEBSITE_LIMIT", 0), "website seed limit")
 	websiteCandidateLimit := fs.Int("website-candidate-limit", envInt("RPKG_R_WEBSITE_CANDIDATE_LIMIT", 120), "CRAN DESCRIPTION website candidate limit")
 	websiteFeedLimit := fs.Int("website-feed-limit", envInt("RPKG_R_WEBSITE_FEED_LIMIT", 40), "website feed item limit")
@@ -275,24 +279,26 @@ func runPackage(ctx context.Context, args []string) error {
 
 	total := 0
 	for _, currentJob := range jobs {
-			events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
-				metadataLimit:       *metadataLimit,
-				downloadTop:         *downloadTop,
-				reverseLimit:        *reverseLimit,
-				checkLimit:          *checkLimit,
-				archiveLimit:        *archiveLimit,
-				taskViewLimit:       *taskViewLimit,
-				newsLimit:           *newsLimit,
-				packagePageLimit:    *packagePageLimit,
-				websiteLimit:        *websiteLimit,
-				websiteCandidateLimit: *websiteCandidateLimit,
-				websiteFeedLimit:    *websiteFeedLimit,
-				websiteLinkLimit:    *websiteLinkLimit,
-				websiteSitemapLimit: *websiteSitemapLimit,
-				githubLimit:         *githubLimit,
-				osvLimit:            *osvLimit,
-				bibliometricLimit:   *bibliometricLimit,
-			})
+		events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
+			metadataLimit:         *metadataLimit,
+			downloadTop:           *downloadTop,
+			reverseLimit:          *reverseLimit,
+			checkLimit:            *checkLimit,
+			archiveLimit:          *archiveLimit,
+			taskViewLimit:         *taskViewLimit,
+			newsLimit:               *newsLimit,
+			packagePageLimit:        *packagePageLimit,
+			packageArtifactLimit:    *packageArtifactLimit,
+			packageManualTopicLimit: *packageManualTopicLimit,
+			websiteLimit:            *websiteLimit,
+			websiteCandidateLimit:   *websiteCandidateLimit,
+			websiteFeedLimit:        *websiteFeedLimit,
+			websiteLinkLimit:        *websiteLinkLimit,
+			websiteSitemapLimit:     *websiteSitemapLimit,
+			githubLimit:             *githubLimit,
+			osvLimit:                *osvLimit,
+			bibliometricLimit:       *bibliometricLimit,
+		})
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
@@ -377,7 +383,9 @@ type packageJobLimits struct {
 	archiveLimit          int
 	taskViewLimit         int
 	newsLimit             int
-	packagePageLimit      int
+	packagePageLimit        int
+	packageArtifactLimit    int
+	packageManualTopicLimit int
 	websiteLimit          int
 	websiteCandidateLimit int
 	websiteFeedLimit      int
@@ -423,7 +431,7 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		if err != nil {
 			return nil, err
 		}
-		return collectCRANPackagePages(rows, limits.packagePageLimit)
+		return collectCRANPackagePages(rows, limits.packagePageLimit, limits.packageArtifactLimit, limits.packageManualTopicLimit)
 	case "bioconductor":
 		return collectBioconductor()
 	case "runiverse":
@@ -855,11 +863,13 @@ func collectPackageNEWS(records []cranRecord, limit int) ([]genericEvent, error)
 }
 
 type cranPageLink struct {
-	Label string `json:"label"`
-	URL   string `json:"url"`
+	Label   string `json:"label"`
+	URL     string `json:"url"`
+	Section string `json:"section,omitempty"`
+	Type    string `json:"type,omitempty"`
 }
 
-func collectCRANPackagePages(records []cranRecord, limit int) ([]genericEvent, error) {
+func collectCRANPackagePages(records []cranRecord, limit, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
@@ -881,6 +891,8 @@ func collectCRANPackagePages(records []cranRecord, limit int) ([]genericEvent, e
 		payload["content_length"] = len(body)
 		payload["html_sha256"] = shaHex(htmlText)
 		events = append(events, newGenericEvent("rpkg.cran.package_page_snapshot.v1", "cran_package_index_html", sourceURL, "CRAN", packageName, record["Version"], "", payload))
+		events = append(events, collectCRANPackageArtifacts(record, sourceURL, cranPackageArtifactLinks(payload), artifactLimit)...)
+		events = append(events, collectCRANPackageManualTopics(record, sourceURL, stringAny(payload["package_source_url"]), manualTopicLimit)...)
 	}
 	return events, nil
 }
@@ -900,6 +912,7 @@ func selectPackagePageRecords(records []cranRecord, limit int) []cranRecord {
 
 func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[string]any {
 	fields := cranPackagePageFields(htmlText)
+	fieldRows := cranPackagePageFieldRows(pageURL, htmlText)
 	title := firstHeading(htmlText)
 	description := firstParagraph(htmlText)
 	materials := cranLinksForLabel(pageURL, htmlText, "Materials")
@@ -908,14 +921,17 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	doiLinks := cranLinksForLabel(pageURL, htmlText, "DOI")
 	urlLinks := cranLinksForLabel(pageURL, htmlText, "URL")
 	bugLinks := cranLinksForLabel(pageURL, htmlText, "BugReports")
-	referenceLinks := cranLinksForLabel(pageURL, htmlText, "Reference manual")
+	citationLinks := cranLinksForLabel(pageURL, htmlText, "Citation")
+	referenceLinks := append(cranLinksForLabel(pageURL, htmlText, "Reference manual"), cranLinksAfterTextLabel(pageURL, htmlText, "Reference manual:", []string{"Vignettes:", "Downloads:", "Reverse dependencies:", "Linking:"})...)
 	documentationLinks := cranLinksInSection(pageURL, htmlText, "Documentation:")
+	vignetteLinks := cranLinksAfterTextLabel(pageURL, htmlText, "Vignettes:", []string{"Downloads:", "Reverse dependencies:", "Linking:"})
 	downloadLinks := cranLinksInSection(pageURL, htmlText, "Downloads:")
-	reverseDepends := cranLinksForLabel(pageURL, htmlText, "Reverse depends")
-	reverseImports := cranLinksForLabel(pageURL, htmlText, "Reverse imports")
-	reverseSuggests := cranLinksForLabel(pageURL, htmlText, "Reverse suggests")
-	reverseLinkingTo := cranLinksForLabel(pageURL, htmlText, "Reverse LinkingTo")
-	reverseEnhances := cranLinksForLabel(pageURL, htmlText, "Reverse enhances")
+	reverseDepends := append(cranLinksForLabel(pageURL, htmlText, "Reverse depends"), cranLinksAfterTextLabel(pageURL, htmlText, "Reverse depends:", []string{"Reverse imports:", "Reverse suggests:", "Reverse LinkingTo:", "Reverse enhances:", "Linking:"})...)
+	reverseImports := append(cranLinksForLabel(pageURL, htmlText, "Reverse imports"), cranLinksAfterTextLabel(pageURL, htmlText, "Reverse imports:", []string{"Reverse suggests:", "Reverse LinkingTo:", "Reverse enhances:", "Linking:"})...)
+	reverseSuggests := append(cranLinksForLabel(pageURL, htmlText, "Reverse suggests"), cranLinksAfterTextLabel(pageURL, htmlText, "Reverse suggests:", []string{"Reverse LinkingTo:", "Reverse enhances:", "Linking:"})...)
+	reverseLinkingTo := append(cranLinksForLabel(pageURL, htmlText, "Reverse LinkingTo"), cranLinksAfterTextLabel(pageURL, htmlText, "Reverse LinkingTo:", []string{"Reverse enhances:", "Linking:"})...)
+	reverseEnhances := append(cranLinksForLabel(pageURL, htmlText, "Reverse enhances"), cranLinksAfterTextLabel(pageURL, htmlText, "Reverse enhances:", []string{"Linking:"})...)
+	allLinks := cranAllPageLinks(pageURL, htmlText, fieldRows)
 
 	referenceHTML := firstLinkWithSuffix(referenceLinks, ".html")
 	referencePDF := firstLinkWithSuffix(referenceLinks, ".pdf")
@@ -923,8 +939,15 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	archiveURL := firstLinkContaining(downloadLinks, "Archive/")
 	doiURL := firstLinkContaining(doiLinks, "doi.org")
 	checksURL := firstLinkURL(checks)
+	citationURL := firstLinkURL(citationLinks)
+	readmeURL := firstLinkLabelContaining(materials, "readme")
+	newsURL := firstLinkLabelContaining(materials, "news")
 
 	payload := recordPayload(record)
+	payload["fields_json"] = mustJSON(fields)
+	payload["field_rows_json"] = mustJSON(fieldRows)
+	payload["links_json"] = mustJSON(cranLinksToMaps(allLinks))
+	payload["sections_json"] = mustJSON(cranPackagePageSections(pageURL, htmlText))
 	payload["package"] = firstNonEmpty(record["Package"], fields["Package"])
 	payload["version"] = firstNonEmpty(fields["Version"], record["Version"])
 	payload["title"] = firstNonEmpty(title, record["Title"])
@@ -937,6 +960,7 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	payload["published"] = firstNonEmpty(fields["Published"], record["Date/Publication"])
 	payload["doi"] = fields["DOI"]
 	payload["doi_url"] = doiURL
+	payload["citation_url"] = citationURL
 	payload["author"] = firstNonEmpty(fields["Author"], record["Author"])
 	payload["maintainer"] = firstNonEmpty(fields["Maintainer"], record["Maintainer"])
 	payload["bug_reports"] = firstNonEmpty(fields["BugReports"], record["BugReports"])
@@ -946,12 +970,15 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	payload["urls_json"] = mustJSON(cranLinksToMaps(urlLinks))
 	payload["needs_compilation"] = firstNonEmpty(fields["NeedsCompilation"], record["NeedsCompilation"])
 	payload["materials_json"] = mustJSON(cranLinksToMaps(materials))
+	payload["readme_url"] = readmeURL
+	payload["news_url"] = newsURL
 	payload["in_views"] = cranLinkLabels(inViews)
 	payload["in_views_json"] = mustJSON(cranLinkLabels(inViews))
 	payload["cran_checks_url"] = checksURL
 	payload["reference_manual_html_url"] = referenceHTML
 	payload["reference_manual_pdf_url"] = referencePDF
 	payload["documentation_json"] = mustJSON(cranLinksToMaps(documentationLinks))
+	payload["vignettes_json"] = mustJSON(cranLinksToMaps(vignetteLinks))
 	payload["downloads_json"] = mustJSON(cranLinksToMaps(downloadLinks))
 	payload["package_source_url"] = sourcePackage
 	payload["archive_url"] = archiveURL
@@ -965,6 +992,7 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	payload["reverse_suggests_json"] = mustJSON(cranLinksToMaps(reverseSuggests))
 	payload["reverse_linking_to_json"] = mustJSON(cranLinksToMaps(reverseLinkingTo))
 	payload["reverse_enhances_json"] = mustJSON(cranLinksToMaps(reverseEnhances))
+	payload["all_links_count"] = len(allLinks)
 	payload["page_url"] = pageURL
 	payload["source_method"] = "cran_package_index_html"
 	payload["parser_version"] = 1
@@ -991,6 +1019,29 @@ func cranPackagePageFields(htmlText string) map[string]string {
 	return out
 }
 
+func cranPackagePageFieldRows(baseURL, htmlText string) []map[string]any {
+	out := make([]map[string]any, 0)
+	for _, match := range trRE.FindAllStringSubmatch(htmlText, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		cells := htmlCells(match[1])
+		if len(cells) < 2 {
+			continue
+		}
+		key := normalizeCRANLabel(cells[0])
+		if key == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"key":   key,
+			"value": strings.TrimSpace(cells[1]),
+			"links": cranLinksToMaps(withLinkSection(cranLinksInHTML(baseURL, match[1]), key, "field")),
+		})
+	}
+	return out
+}
+
 func cranLinksForLabel(baseURL, htmlText string, labels ...string) []cranPageLink {
 	wanted := map[string]bool{}
 	for _, label := range labels {
@@ -1005,7 +1056,7 @@ func cranLinksForLabel(baseURL, htmlText string, labels ...string) []cranPageLin
 		if len(cells) == 0 || !wanted[normalizeCRANLabel(cells[0])] {
 			continue
 		}
-		out = append(out, cranLinksInHTML(baseURL, match[1])...)
+		out = append(out, withLinkSection(cranLinksInHTML(baseURL, match[1]), normalizeCRANLabel(cells[0]), "field")...)
 	}
 	return uniqueCRANLinks(out)
 }
@@ -1015,10 +1066,37 @@ func cranLinksInSection(baseURL, htmlText, heading string) []cranPageLink {
 	if section == "" {
 		return nil
 	}
-	return uniqueCRANLinks(cranLinksInHTML(baseURL, section))
+	return uniqueCRANLinks(withLinkSection(cranLinksInHTML(baseURL, section), strings.TrimSuffix(heading, ":"), "section"))
+}
+
+func cranLinksAfterTextLabel(baseURL, htmlText, label string, stopLabels []string) []cranPageLink {
+	normalizedHTML := normalizeCRANHTMLText(htmlText)
+	lower := strings.ToLower(normalizedHTML)
+	lowerLabel := strings.ToLower(label)
+	idx := strings.Index(lower, lowerLabel)
+	if idx < 0 {
+		return nil
+	}
+	start := idx + len(label)
+	end := len(normalizedHTML)
+	for _, stop := range stopLabels {
+		next := strings.Index(lower[start:], strings.ToLower(stop))
+		if next >= 0 && start+next < end {
+			end = start + next
+		}
+	}
+	for _, marker := range []string{"<h4", "<h3", "<h2"} {
+		next := strings.Index(lower[start:], marker)
+		if next >= 0 && start+next < end {
+			end = start + next
+		}
+	}
+	section := strings.TrimSuffix(label, ":")
+	return uniqueCRANLinks(withLinkSection(cranLinksInHTML(baseURL, normalizedHTML[start:end]), section, "section"))
 }
 
 func htmlSectionAfter(htmlText, heading string) string {
+	htmlText = normalizeCRANHTMLText(htmlText)
 	lower := strings.ToLower(htmlText)
 	idx := strings.Index(lower, strings.ToLower(heading))
 	if idx < 0 {
@@ -1035,6 +1113,13 @@ func htmlSectionAfter(htmlText, heading string) string {
 	return htmlText[start:end]
 }
 
+func normalizeCRANHTMLText(value string) string {
+	value = strings.ReplaceAll(value, "&nbsp;", " ")
+	value = strings.ReplaceAll(value, "&#160;", " ")
+	value = strings.ReplaceAll(value, "\u00a0", " ")
+	return value
+}
+
 func cranLinksInHTML(baseURL, htmlText string) []cranPageLink {
 	out := make([]cranPageLink, 0)
 	for _, match := range linkRE.FindAllStringSubmatch(htmlText, -1) {
@@ -1047,6 +1132,64 @@ func cranLinksInHTML(baseURL, htmlText string) []cranPageLink {
 			continue
 		}
 		out = append(out, cranPageLink{Label: label, URL: absoluteURL(baseURL, href)})
+	}
+	return out
+}
+
+func withLinkSection(rows []cranPageLink, section, linkType string) []cranPageLink {
+	section = normalizeCRANLabel(section)
+	for i := range rows {
+		rows[i].Section = section
+		rows[i].Type = linkType
+	}
+	return rows
+}
+
+func cranAllPageLinks(baseURL, htmlText string, fieldRows []map[string]any) []cranPageLink {
+	out := make([]cranPageLink, 0)
+	for _, row := range fieldRows {
+		section := fmt.Sprint(row["key"])
+		for _, link := range linksFromJSONValue(row["links"]) {
+			link.Section = section
+			link.Type = firstNonEmpty(link.Type, "field")
+			out = append(out, link)
+		}
+	}
+	for _, section := range []string{"Documentation:", "Downloads:", "Reverse dependencies:", "Linking:"} {
+		out = append(out, cranLinksInSection(baseURL, htmlText, section)...)
+	}
+	return uniqueCRANLinks(out)
+}
+
+func cranPackagePageSections(baseURL, htmlText string) []map[string]any {
+	out := make([]map[string]any, 0)
+	for _, heading := range []string{"Documentation:", "Downloads:", "Reverse dependencies:", "Linking:"} {
+		sectionHTML := htmlSectionAfter(htmlText, heading)
+		if sectionHTML == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"heading": strings.TrimSuffix(heading, ":"),
+			"text":    truncate(stripTags(sectionHTML), 4000),
+			"links":   cranLinksToMaps(cranLinksInHTML(baseURL, sectionHTML)),
+		})
+	}
+	return out
+}
+
+func linksFromJSONValue(value any) []cranPageLink {
+	rows, ok := value.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]cranPageLink, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, cranPageLink{
+			Label:   row["label"],
+			URL:     row["url"],
+			Section: row["section"],
+			Type:    row["type"],
+		})
 	}
 	return out
 }
@@ -1071,7 +1214,7 @@ func uniqueCRANLinks(rows []cranPageLink) []cranPageLink {
 func cranLinksToMaps(rows []cranPageLink) []map[string]string {
 	out := make([]map[string]string, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, map[string]string{"label": row.Label, "url": row.URL})
+		out = append(out, map[string]string{"label": row.Label, "url": row.URL, "section": row.Section, "type": row.Type})
 	}
 	return out
 }
@@ -1146,6 +1289,385 @@ func firstLinkMatching(rows []cranPageLink, needle string) string {
 		}
 	}
 	return ""
+}
+
+func firstLinkLabelContaining(rows []cranPageLink, needle string) string {
+	needle = strings.ToLower(needle)
+	for _, row := range rows {
+		if strings.Contains(strings.ToLower(row.Label), needle) && strings.TrimSpace(row.URL) != "" {
+			return row.URL
+		}
+	}
+	return ""
+}
+
+func cranPackageArtifactLinks(payload map[string]any) []cranPageLink {
+	out := make([]cranPageLink, 0)
+	for _, raw := range []string{
+		stringAny(payload["materials_json"]),
+		stringAny(payload["documentation_json"]),
+	} {
+		var rows []map[string]string
+		if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+			continue
+		}
+		for _, row := range rows {
+			link := cranPageLink{
+				Label:   row["label"],
+				URL:     row["url"],
+				Section: row["section"],
+				Type:    row["type"],
+			}
+			if isCRANPackageArtifact(link) {
+				link.Type = firstNonEmpty(link.Type, cranArtifactType(link))
+				out = append(out, link)
+			}
+		}
+	}
+	for _, item := range []cranPageLink{
+		{Label: "Citation", URL: stringAny(payload["citation_url"]), Section: "Citation", Type: "citation"},
+		{Label: "Reference manual PDF", URL: stringAny(payload["reference_manual_pdf_url"]), Section: "Documentation", Type: "reference_manual_pdf"},
+		{Label: "Reference manual HTML", URL: stringAny(payload["reference_manual_html_url"]), Section: "Documentation", Type: "reference_manual_html"},
+	} {
+		if strings.TrimSpace(item.URL) != "" {
+			out = append(out, item)
+		}
+	}
+	return uniqueCRANLinks(out)
+}
+
+func isCRANPackageArtifact(link cranPageLink) bool {
+	label := strings.ToLower(link.Label)
+	rawURL := strings.ToLower(link.URL)
+	return strings.Contains(label, "readme") ||
+		strings.Contains(label, "news") ||
+		strings.Contains(label, "citation") ||
+		strings.Contains(label, "vignette") ||
+		strings.Contains(rawURL, "/doc/") ||
+		strings.Contains(rawURL, "/readme/") ||
+		strings.Contains(rawURL, "/news/") ||
+		strings.HasSuffix(rawURL, ".pdf")
+}
+
+func cranArtifactType(link cranPageLink) string {
+	label := strings.ToLower(link.Label)
+	rawURL := strings.ToLower(link.URL)
+	switch {
+	case strings.Contains(label, "readme") || strings.Contains(rawURL, "/readme/"):
+		return "readme"
+	case strings.Contains(label, "news") || strings.Contains(rawURL, "/news/"):
+		return "news"
+	case strings.Contains(label, "citation"):
+		return "citation"
+	case strings.Contains(label, "reference") && strings.HasSuffix(rawURL, ".pdf"):
+		return "reference_manual_pdf"
+	case strings.Contains(label, "reference"):
+		return "reference_manual"
+	case strings.Contains(rawURL, "/doc/"):
+		return "vignette"
+	case strings.HasSuffix(rawURL, ".pdf"):
+		return "pdf"
+	}
+	return "artifact"
+}
+
+func collectCRANPackageArtifacts(record cranRecord, pageURL string, links []cranPageLink, limit int) []genericEvent {
+	if len(links) == 0 || limit < 0 {
+		return nil
+	}
+	if limit > 0 && limit < len(links) {
+		links = links[:limit]
+	}
+	packageName := strings.TrimSpace(record["Package"])
+	events := make([]genericEvent, 0, len(links))
+	for _, link := range links {
+		if strings.TrimSpace(link.URL) == "" {
+			continue
+		}
+		body, contentType, err := fetchBytesWithContentType(link.URL)
+		if err != nil {
+			events = append(events, collectionFailureEvent("rpkg.cran.package_artifact.failure.v1", "cran_package_artifact", link.URL, "CRAN", packageName, err))
+			continue
+		}
+		textContent, htmlContent := artifactContent(body, contentType, link.URL)
+		payload := map[string]any{
+			"package":           packageName,
+			"version":           record["Version"],
+			"page_url":          pageURL,
+			"artifact_label":    link.Label,
+			"artifact_url":      link.URL,
+			"artifact_section":  link.Section,
+			"artifact_type":     firstNonEmpty(link.Type, cranArtifactType(link)),
+			"content_type":      contentType,
+			"content_length":    len(body),
+			"content_sha256":    shaHex(string(body)),
+			"title":             firstNonEmpty(firstTitle(string(body)), link.Label),
+			"text_content":      truncate(textContent, envInt("RPKG_CRAN_ARTIFACT_TEXT_LIMIT", 30000)),
+			"html_content":      truncate(htmlContent, envInt("RPKG_CRAN_ARTIFACT_HTML_LIMIT", 50000)),
+			"source_method":     "cran_package_artifact",
+			"parser_version":    1,
+			"collection_status": "collected",
+		}
+		events = append(events, newGenericEvent("rpkg.cran.package_artifact_snapshot.v1", "cran_package_artifact", link.URL, "CRAN", packageName, record["Version"], "", payload))
+	}
+	return events
+}
+
+func artifactContent(body []byte, contentType, artifactURL string) (string, string) {
+	lowerType := strings.ToLower(contentType)
+	lowerURL := strings.ToLower(artifactURL)
+	if strings.Contains(lowerType, "pdf") || strings.HasSuffix(lowerURL, ".pdf") {
+		return "", ""
+	}
+	raw := string(body)
+	if strings.Contains(lowerType, "html") || strings.Contains(raw, "<html") {
+		return stripTags(raw), raw
+	}
+	return raw, ""
+}
+
+func collectCRANPackageManualTopics(record cranRecord, pageURL, sourcePackageURL string, limit int) []genericEvent {
+	sourcePackageURL = strings.TrimSpace(sourcePackageURL)
+	packageName := strings.TrimSpace(record["Package"])
+	if sourcePackageURL == "" || packageName == "" {
+		return nil
+	}
+	body, err := fetchBytes(sourcePackageURL)
+	if err != nil {
+		return []genericEvent{collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err)}
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return []genericEvent{collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err)}
+	}
+	defer reader.Close()
+
+	tarReader := tar.NewReader(reader)
+	events := make([]genericEvent, 0)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			events = append(events, collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err))
+			break
+		}
+		if header == nil || header.FileInfo().IsDir() || !strings.HasSuffix(header.Name, ".Rd") || !strings.Contains(header.Name, "/man/") {
+			continue
+		}
+		if limit > 0 && len(events) >= limit {
+			break
+		}
+		rdBody, err := io.ReadAll(io.LimitReader(tarReader, int64(envInt("RPKG_CRAN_RD_MAX_BYTES", 2*1024*1024))))
+		if err != nil {
+			events = append(events, collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err))
+			continue
+		}
+		payload := cranManualTopicPayload(record, pageURL, sourcePackageURL, header.Name, string(rdBody))
+		events = append(events, newGenericEvent("rpkg.cran.package_manual_topic_snapshot.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, record["Version"], "", payload))
+	}
+	return events
+}
+
+func cranManualTopicPayload(record cranRecord, pageURL, sourcePackageURL, rdPath, rdText string) map[string]any {
+	aliases := rdSectionValues(rdText, "alias")
+	keywords := rdSectionValues(rdText, "keyword")
+	concepts := rdSectionValues(rdText, "concept")
+	topicName := firstNonEmpty(rdFirstSection(rdText, "name"), firstString(aliases), rdBaseName(rdPath))
+	payload := map[string]any{
+		"package":            record["Package"],
+		"version":            record["Version"],
+		"page_url":           pageURL,
+		"source_package_url": sourcePackageURL,
+		"rd_path":            rdPath,
+		"topic_name":         rdPlainText(topicName),
+		"title":              rdPlainText(rdFirstSection(rdText, "title")),
+		"description":        rdPlainText(rdFirstSection(rdText, "description")),
+		"usage":              rdPlainText(rdFirstSection(rdText, "usage")),
+		"arguments_json":     mustJSON(rdArguments(rdFirstSection(rdText, "arguments"))),
+		"details":            rdPlainText(rdFirstSection(rdText, "details")),
+		"value":              rdPlainText(rdFirstSection(rdText, "value")),
+		"format_text":        rdPlainText(rdFirstSection(rdText, "format")),
+		"source_text":        rdPlainText(rdFirstSection(rdText, "source")),
+		"examples":           rdPlainText(rdFirstSection(rdText, "examples")),
+		"seealso":            rdPlainText(rdFirstSection(rdText, "seealso")),
+		"keywords_json":      mustJSON(rdPlainTextList(keywords)),
+		"aliases_json":       mustJSON(rdPlainTextList(aliases)),
+		"concepts_json":      mustJSON(rdPlainTextList(concepts)),
+		"doc_type":           rdPlainText(rdFirstSection(rdText, "docType")),
+		"encoding":           rdPlainText(rdFirstSection(rdText, "encoding")),
+		"custom_sections_json": mustJSON(rdCustomSections(rdText)),
+		"note":               rdPlainText(rdFirstSection(rdText, "note")),
+		"author":             rdPlainText(rdFirstSection(rdText, "author")),
+		"references_text":    rdPlainText(rdFirstSection(rdText, "references")),
+		"raw_rd":             truncate(rdText, envInt("RPKG_CRAN_RD_RAW_LIMIT", 50000)),
+		"source_method":      "cran_source_rd_manual",
+		"parser_version":     1,
+		"collection_status":  "collected",
+	}
+	return payload
+}
+
+func rdBaseName(rdPath string) string {
+	base := rdPath
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	return strings.TrimSuffix(base, ".Rd")
+}
+
+func rdFirstSection(rdText, name string) string {
+	values := rdSectionValues(rdText, name)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func rdSectionValues(rdText, name string) []string {
+	marker := `\` + name
+	values := []string{}
+	offset := 0
+	for {
+		idx := strings.Index(rdText[offset:], marker)
+		if idx < 0 {
+			break
+		}
+		start := offset + idx + len(marker)
+		for start < len(rdText) && (rdText[start] == ' ' || rdText[start] == '\n' || rdText[start] == '\r' || rdText[start] == '\t') {
+			start++
+		}
+		if start >= len(rdText) || rdText[start] != '{' {
+			offset = start
+			continue
+		}
+		body, end := rdBraceBody(rdText, start)
+		if end <= start {
+			offset = start + 1
+			continue
+		}
+		values = append(values, body)
+		offset = end
+	}
+	return values
+}
+
+func rdBraceBody(value string, open int) (string, int) {
+	if open < 0 || open >= len(value) || value[open] != '{' {
+		return "", open
+	}
+	depth := 0
+	start := open + 1
+	for i := open; i < len(value); i++ {
+		if value[i] == '\\' {
+			i++
+			continue
+		}
+		switch value[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return value[start:i], i + 1
+			}
+		}
+	}
+	return "", open
+}
+
+func rdCustomSections(rdText string) []map[string]string {
+	out := []map[string]string{}
+	offset := 0
+	for {
+		idx := strings.Index(rdText[offset:], `\section`)
+		if idx < 0 {
+			break
+		}
+		start := offset + idx + len(`\section`)
+		for start < len(rdText) && isSpaceByte(rdText[start]) {
+			start++
+		}
+		if start >= len(rdText) || rdText[start] != '{' {
+			offset = start
+			continue
+		}
+		title, end := rdBraceBody(rdText, start)
+		for end < len(rdText) && isSpaceByte(rdText[end]) {
+			end++
+		}
+		if end >= len(rdText) || rdText[end] != '{' {
+			offset = end
+			continue
+		}
+		body, next := rdBraceBody(rdText, end)
+		out = append(out, map[string]string{"title": rdPlainText(title), "text": rdPlainText(body)})
+		offset = next
+	}
+	return out
+}
+
+func rdArguments(value string) []map[string]string {
+	out := []map[string]string{}
+	offset := 0
+	for {
+		idx := strings.Index(value[offset:], `\item`)
+		if idx < 0 {
+			break
+		}
+		start := offset + idx + len(`\item`)
+		for start < len(value) && isSpaceByte(value[start]) {
+			start++
+		}
+		if start >= len(value) || value[start] != '{' {
+			offset = start
+			continue
+		}
+		name, end := rdBraceBody(value, start)
+		for end < len(value) && isSpaceByte(value[end]) {
+			end++
+		}
+		if end >= len(value) || value[end] != '{' {
+			offset = end
+			continue
+		}
+		desc, next := rdBraceBody(value, end)
+		out = append(out, map[string]string{"name": rdPlainText(name), "description": rdPlainText(desc)})
+		offset = next
+	}
+	return out
+}
+
+func rdPlainTextList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text := rdPlainText(value); text != "" {
+			out = append(out, text)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func rdPlainText(value string) string {
+	value = strings.ReplaceAll(value, "\\%", "%")
+	value = strings.ReplaceAll(value, "\\_", "_")
+	value = strings.ReplaceAll(value, "\\&", "&")
+	value = rdCommandRE.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "{", "")
+	value = strings.ReplaceAll(value, "}", "")
+	return strings.TrimSpace(spaceRE.ReplaceAllString(value, " "))
+}
+
+func isSpaceByte(value byte) bool {
+	return value == ' ' || value == '\n' || value == '\r' || value == '\t'
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func collectBioconductor() ([]genericEvent, error) {
@@ -4665,26 +5187,35 @@ func collectionFailureEvent(eventType, source, sourceURL, repository, packageNam
 }
 
 func fetchBytes(targetURL string) ([]byte, error) {
+	body, _, err := fetchBytesWithContentType(targetURL)
+	return body, err
+}
+
+func fetchBytesWithContentType(targetURL string) ([]byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
 	client := &http.Client{Timeout: time.Duration(envInt("HTTP_TIMEOUT", 90)) * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(envInt("HTTP_MAX_BYTES", 20*1024*1024))))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 400))
+		return nil, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 400))
 	}
-	return body, nil
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" && len(body) > 0 {
+		contentType = http.DetectContentType(body)
+	}
+	return body, contentType, nil
 }
 
 func fetchJSON(targetURL string, out any) error {
