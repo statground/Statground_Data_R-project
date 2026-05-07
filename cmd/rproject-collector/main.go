@@ -15,13 +15,13 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -228,15 +228,15 @@ func runPackage(ctx context.Context, args []string) error {
 	archiveLimit := fs.Int("archive-limit", envInt("RPKG_CRAN_ARCHIVE_LIMIT", 0), "CRAN archive row limit")
 	taskViewLimit := fs.Int("task-view-limit", envInt("RPKG_CRAN_TASK_VIEW_LIMIT", 0), "CRAN Task View page limit")
 	newsLimit := fs.Int("package-news-limit", envInt("RPKG_PACKAGE_NEWS_LIMIT", 50), "package NEWS page limit")
-	packagePageLimit := fs.Int("package-page-limit", envInt("RPKG_CRAN_PACKAGE_PAGE_LIMIT", 120), "CRAN package index.html page limit")
+	packagePageLimit := fs.Int("package-page-limit", envInt("RPKG_CRAN_PACKAGE_PAGE_LIMIT", 100), "CRAN package index.html page limit")
 	packagePagePackages := fs.String("package-page-packages", envString("RPKG_CRAN_PACKAGE_PAGE_PACKAGES", ""), "comma-separated CRAN package names to always include in package page/manual collection")
 	packageArtifactLimit := fs.Int("package-artifact-limit", envInt("RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT", 8), "CRAN package linked artifact fetch limit per package; 0 means all")
 	packageManualTopicLimit := fs.Int("package-manual-topic-limit", envInt("RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "CRAN package Rd manual topic limit per package; 0 means all")
-	bioconductorPackagePageLimit := fs.Int("bioconductor-package-page-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT", 60), "Bioconductor package HTML/manual collection limit")
+	bioconductorPackagePageLimit := fs.Int("bioconductor-package-page-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT", 100), "Bioconductor package HTML/manual collection limit")
 	bioconductorPackagePagePackages := fs.String("bioconductor-package-page-packages", envString("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_PACKAGES", ""), "comma-separated Bioconductor package names to always include in package page/manual collection")
 	bioconductorPackageArtifactLimit := fs.Int("bioconductor-package-artifact-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_ARTIFACT_LIMIT", 8), "Bioconductor package linked artifact fetch limit per package; 0 means all")
 	bioconductorPackageManualTopicLimit := fs.Int("bioconductor-package-manual-topic-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "Bioconductor package Rd manual topic limit per package; 0 means all")
-	runiversePackagePageLimit := fs.Int("runiverse-package-page-limit", envInt("RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT", 60), "R-universe package HTML/API/manual collection limit")
+	runiversePackagePageLimit := fs.Int("runiverse-package-page-limit", envInt("RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT", 100), "R-universe package HTML/API/manual collection limit")
 	runiversePackagePagePackages := fs.String("runiverse-package-page-packages", envString("RPKG_RUNIVERSE_PACKAGE_PAGE_PACKAGES", ""), "comma-separated R-universe package names to always include in package page/manual collection")
 	runiversePackageArtifactLimit := fs.Int("runiverse-package-artifact-limit", envInt("RPKG_RUNIVERSE_PACKAGE_ARTIFACT_LIMIT", 8), "R-universe package linked artifact fetch limit per package; 0 means all")
 	runiversePackageManualTopicLimit := fs.Int("runiverse-package-manual-topic-limit", envInt("RPKG_RUNIVERSE_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "R-universe package Rd manual topic limit per package; 0 means all")
@@ -902,11 +902,24 @@ type cranPageLink struct {
 	Type    string `json:"type,omitempty"`
 }
 
+type packagePageBatch struct {
+	SourceKey        string
+	CursorKey        string
+	NextCursorKey    string
+	Limit            int
+	TotalCandidates  int
+	ForcedCount      int
+	SelectedCount    int
+	SelectedPackages []string
+	SelectedItemKeys []string
+}
+
 func collectCRANPackagePages(records []cranRecord, limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
-	selected := selectPackagePageRecords(records, limit, packageNames)
+	sourceKey := "cran-package-pages|repository=CRAN"
+	selected, batch := selectPackagePageRecords(records, limit, packageNames, sourceKey)
 	events := make([]genericEvent, 0, len(selected))
 	for _, record := range selected {
 		packageName := strings.TrimSpace(record["Package"])
@@ -927,55 +940,256 @@ func collectCRANPackagePages(records []cranRecord, limit int, packageNames []str
 		events = append(events, collectCRANPackageArtifacts(record, sourceURL, cranPackageArtifactLinks(payload), artifactLimit)...)
 		events = append(events, collectCRANPackageManualTopics(record, sourceURL, stringAny(payload["package_source_url"]), manualTopicLimit)...)
 	}
+	if batch.SelectedCount > 0 {
+		events = append(events, newPackagePageBatchCursorEvent("CRAN", "cran_package_page_batch_cursor", batch))
+	}
 	return events, nil
 }
 
-func selectPackagePageRecords(records []cranRecord, limit int, packageNames []string) []cranRecord {
+func selectPackagePageRecords(records []cranRecord, limit int, packageNames []string, sourceKey string) ([]cranRecord, packagePageBatch) {
+	batch := packagePageBatch{SourceKey: sourceKey, Limit: limit}
 	if len(records) == 0 {
-		return nil
+		return nil, batch
 	}
+	include := packageNameIncludeSet(packageNames)
+	selected := make([]cranRecord, 0)
+	selectedKeys := map[string]bool{}
+	for _, record := range records {
+		key := cranPackageRecordBatchKey(record)
+		if key == "" || !include[key] || selectedKeys[key] {
+			continue
+		}
+		selected = append(selected, record)
+		selectedKeys[key] = true
+		batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record["Package"]))
+		batch.SelectedItemKeys = append(batch.SelectedItemKeys, key)
+	}
+	batch.ForcedCount = len(selected)
+	if limit > 0 && len(selected) >= limit {
+		batch.SelectedCount = len(selected)
+		batch.TotalCandidates = countUniqueCRANPackageRecords(records)
+		batch.CursorKey = latestPackagePageBatchCursor(sourceKey)
+		batch.NextCursorKey = batch.CursorKey
+		logPackagePageBatch(batch)
+		return selected, batch
+	}
+	type cranBatchCandidate struct {
+		key    string
+		record cranRecord
+	}
+	out := make([]cranBatchCandidate, 0, len(records))
+	outSeen := map[string]bool{}
+	for _, record := range records {
+		key := cranPackageRecordBatchKey(record)
+		if key == "" || selectedKeys[key] || outSeen[key] {
+			continue
+		}
+		out = append(out, cranBatchCandidate{key: key, record: record})
+		outSeen[key] = true
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].key < out[j].key
+	})
+	batch.TotalCandidates = len(selected) + len(out)
+	outKeys := make([]string, 0, len(out))
+	for _, candidate := range out {
+		outKeys = append(outKeys, candidate.key)
+	}
+	batch.CursorKey = latestPackagePageBatchCursor(sourceKey)
+	if limit <= 0 {
+		for _, candidate := range out {
+			record := candidate.record
+			selected = append(selected, record)
+			batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record["Package"]))
+			batch.SelectedItemKeys = append(batch.SelectedItemKeys, candidate.key)
+			batch.NextCursorKey = candidate.key
+		}
+		batch.SelectedCount = len(selected)
+		logPackagePageBatch(batch)
+		return selected, batch
+	}
+	remaining := limit - len(selected)
+	if remaining <= 0 || len(out) == 0 {
+		batch.SelectedCount = len(selected)
+		batch.NextCursorKey = batch.CursorKey
+		logPackagePageBatch(batch)
+		return selected, batch
+	}
+	for _, idx := range packagePageBatchIndexes(outKeys, batch.CursorKey, remaining) {
+		record := out[idx].record
+		selected = append(selected, record)
+		batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record["Package"]))
+		batch.SelectedItemKeys = append(batch.SelectedItemKeys, out[idx].key)
+		batch.NextCursorKey = out[idx].key
+	}
+	batch.SelectedCount = len(selected)
+	logPackagePageBatch(batch)
+	return selected, batch
+}
+
+func cranPackageRecordBatchKey(record cranRecord) string {
+	return strings.ToLower(strings.TrimSpace(record["Package"]))
+}
+
+func countUniqueCRANPackageRecords(records []cranRecord) int {
+	seen := map[string]bool{}
+	for _, record := range records {
+		key := cranPackageRecordBatchKey(record)
+		if key != "" {
+			seen[key] = true
+		}
+	}
+	return len(seen)
+}
+
+func packageNameIncludeSet(packageNames []string) map[string]bool {
 	include := map[string]bool{}
 	for _, name := range packageNames {
 		if key := strings.ToLower(strings.TrimSpace(name)); key != "" {
 			include[key] = true
 		}
 	}
-	selected := make([]cranRecord, 0)
-	selectedKeys := map[string]bool{}
-	for _, record := range records {
-		key := strings.ToLower(strings.TrimSpace(record["Package"]))
-		if key == "" || !include[key] || selectedKeys[key] {
-			continue
+	return include
+}
+
+func packagePageBatchIndexes(keys []string, cursorKey string, limit int) []int {
+	if len(keys) == 0 || limit == 0 {
+		return nil
+	}
+	if limit < 0 || limit > len(keys) {
+		limit = len(keys)
+	}
+	start := 0
+	if cursorKey != "" {
+		start = sort.Search(len(keys), func(i int) bool {
+			return keys[i] > cursorKey
+		})
+		if start >= len(keys) {
+			start = 0
 		}
-		selected = append(selected, record)
-		selectedKeys[key] = true
 	}
-	if limit > 0 && len(selected) >= limit {
-		return selected
+	out := make([]int, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, (start+i)%len(keys))
 	}
-	out := make([]cranRecord, 0, len(records))
-	for _, record := range records {
-		key := strings.ToLower(strings.TrimSpace(record["Package"]))
-		if key == "" || selectedKeys[key] {
-			continue
+	return out
+}
+
+func packagePageCursorMode() string {
+	return strings.ToLower(strings.TrimSpace(envString("RPKG_PACKAGE_PAGE_CURSOR_MODE", "clickhouse")))
+}
+
+func packagePageCursorEnabled() bool {
+	switch packagePageCursorMode() {
+	case "", "off", "none", "disabled", "false", "0":
+		return false
+	default:
+		return true
+	}
+}
+
+func latestPackagePageBatchCursor(sourceKey string) string {
+	if sourceKey == "" || !packagePageCursorEnabled() {
+		return ""
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		fmt.Printf("[package-page-batch] cursor_unavailable source_key=%q err=%v\n", sourceKey, err)
+		return ""
+	}
+	query := fmt.Sprintf(`
+SELECT JSONExtractString(payload, 'next_cursor_key') AS cursor_key
+FROM Data_R_Package_Raw.r_package_event_raw
+WHERE event_type = 'rpkg.package_page_batch_cursor.v1'
+  AND JSONExtractString(payload, 'batch_source_key') = %s
+ORDER BY collected_at DESC
+LIMIT 1
+FORMAT JSONEachRow`, clickHouseQuoteString(sourceKey))
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		fmt.Printf("[package-page-batch] cursor_unavailable source_key=%q err=%v\n", sourceKey, err)
+		return ""
+	}
+	if len(rows) > 0 {
+		if cursor := stringAny(rows[0]["cursor_key"]); cursor != "" {
+			return cursor
 		}
-		out = append(out, record)
 	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	r.Shuffle(len(out), func(i, j int) {
-		out[i], out[j] = out[j], out[i]
-	})
-	if limit <= 0 {
-		return append(selected, out...)
+	return latestPackagePageSnapshotCursor(cfg, sourceKey)
+}
+
+func latestPackagePageSnapshotCursor(cfg clickHouseQueryConfig, sourceKey string) string {
+	eventType := packagePageCursorFallbackEventType(sourceKey)
+	if eventType == "" {
+		return ""
 	}
-	remaining := limit - len(selected)
-	if remaining <= 0 {
-		return selected
+	query := fmt.Sprintf(`
+SELECT lower(package_name) AS cursor_key
+FROM Data_R_Package_Raw.r_package_event_raw
+WHERE event_type = %s
+  AND package_name != ''
+ORDER BY collected_at DESC
+LIMIT 1
+FORMAT JSONEachRow`, clickHouseQuoteString(eventType))
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		fmt.Printf("[package-page-batch] cursor_bootstrap_unavailable source_key=%q err=%v\n", sourceKey, err)
+		return ""
 	}
-	if remaining > len(out) {
-		remaining = len(out)
+	if len(rows) == 0 {
+		return ""
 	}
-	return append(selected, out[:remaining]...)
+	cursor := stringAny(rows[0]["cursor_key"])
+	if cursor != "" {
+		fmt.Printf("[package-page-batch] cursor_bootstrap source_key=%q cursor=%q\n", sourceKey, cursor)
+	}
+	return cursor
+}
+
+func packagePageCursorFallbackEventType(sourceKey string) string {
+	switch {
+	case strings.HasPrefix(sourceKey, "cran-package-pages|"):
+		return "rpkg.cran.package_page_snapshot.v1"
+	case strings.HasPrefix(sourceKey, "bioconductor-package-pages|"):
+		return "rpkg.bioconductor.package_page_snapshot.v1"
+	case strings.HasPrefix(sourceKey, "runiverse-package-pages|"):
+		return "rpkg.runiverse.package_page_snapshot.v1"
+	default:
+		return ""
+	}
+}
+
+func clickHouseQuoteString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func logPackagePageBatch(batch packagePageBatch) {
+	fmt.Printf("[package-page-batch] source_key=%q cursor=%q next_cursor=%q limit=%d selected=%d forced=%d total_candidates=%d\n",
+		batch.SourceKey,
+		batch.CursorKey,
+		batch.NextCursorKey,
+		batch.Limit,
+		batch.SelectedCount,
+		batch.ForcedCount,
+		batch.TotalCandidates,
+	)
+}
+
+func newPackagePageBatchCursorEvent(repository, sourceMethod string, batch packagePageBatch) genericEvent {
+	payload := map[string]any{
+		"payload_schema":      "r_package_page_batch_cursor_v1",
+		"batch_source_key":    batch.SourceKey,
+		"cursor_mode":         packagePageCursorMode(),
+		"previous_cursor_key": batch.CursorKey,
+		"next_cursor_key":     batch.NextCursorKey,
+		"limit":               batch.Limit,
+		"total_candidates":    batch.TotalCandidates,
+		"forced_count":        batch.ForcedCount,
+		"selected_count":      batch.SelectedCount,
+		"selected_packages":   batch.SelectedPackages,
+		"selected_item_keys":  batch.SelectedItemKeys,
+	}
+	return newGenericEvent("rpkg.package_page_batch_cursor.v1", sourceMethod, "clickhouse://Data_R_Package_Raw/r_package_event_raw", repository, "", "", "", payload)
 }
 
 func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[string]any {
@@ -1898,7 +2112,8 @@ func collectBioconductorPackagePages(limit int, packageNames []string, artifactL
 			}
 		}
 	}
-	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit)
+	sourceKey := fmt.Sprintf("bioconductor-package-pages|branches=%s|repos=%s", strings.Join(branches, ","), strings.Join(repos, ","))
+	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit, sourceKey, "bioconductor_package_page_batch_cursor")
 }
 
 func collectRUniversePackagePages(limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
@@ -1943,10 +2158,11 @@ func collectRUniversePackagePages(limit int, packageNames []string, artifactLimi
 			})
 		}
 	}
-	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit)
+	sourceKey := fmt.Sprintf("runiverse-package-pages|universes=%s", strings.Join(universes, ","))
+	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit, sourceKey, "runiverse_package_page_batch_cursor")
 }
 
-func collectRepositoryPackagePages(candidates []repositoryPackageRecord, limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
+func collectRepositoryPackagePages(candidates []repositoryPackageRecord, limit int, packageNames []string, artifactLimit, manualTopicLimit int, sourceKey, cursorMethod string) ([]genericEvent, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -1956,7 +2172,8 @@ func collectRepositoryPackagePages(candidates []repositoryPackageRecord, limit i
 			events = append(events, collectionFailureEvent(candidate.failurePrefix+".failure.v1", candidate.pageMethod, candidate.sourceURL, candidate.repository, "", errors.New(candidate.extra["fetch_error"])))
 		}
 	}
-	selected := selectRepositoryPackageRecords(candidates, limit, packageNames)
+	selected, batch := selectRepositoryPackageRecords(candidates, limit, packageNames, sourceKey)
+	repository := firstRepositoryPackageRecordRepository(candidates)
 	for _, candidate := range selected {
 		packageName := strings.TrimSpace(candidate.record["Package"])
 		if packageName == "" {
@@ -1975,52 +2192,112 @@ func collectRepositoryPackagePages(candidates []repositoryPackageRecord, limit i
 		events = append(events, collectPackageArtifacts(candidate.record, candidate.repository, candidate.artifactMethod, candidate.artifactEventType, candidate.failurePrefix+".artifact_failure.v1", candidate.pageURL, packageDocumentArtifactLinks(payload), artifactLimit)...)
 		events = append(events, collectPackageManualTopics(candidate.record, candidate.repository, candidate.manualMethod, candidate.manualEventType, candidate.failurePrefix+".manual_failure.v1", candidate.pageURL, stringAny(payload["package_source_url"]), manualTopicLimit)...)
 	}
+	if batch.SelectedCount > 0 {
+		events = append(events, newPackagePageBatchCursorEvent(repository, cursorMethod, batch))
+	}
 	return events, nil
 }
 
-func selectRepositoryPackageRecords(records []repositoryPackageRecord, limit int, packageNames []string) []repositoryPackageRecord {
-	include := map[string]bool{}
-	for _, name := range packageNames {
-		if key := strings.ToLower(strings.TrimSpace(name)); key != "" {
-			include[key] = true
-		}
-	}
+func selectRepositoryPackageRecords(records []repositoryPackageRecord, limit int, packageNames []string, sourceKey string) ([]repositoryPackageRecord, packagePageBatch) {
+	batch := packagePageBatch{SourceKey: sourceKey, Limit: limit}
+	include := packageNameIncludeSet(packageNames)
 	selected := make([]repositoryPackageRecord, 0)
 	selectedKeys := map[string]bool{}
 	for _, record := range records {
-		key := strings.ToLower(strings.TrimSpace(record.record["Package"]))
-		if key == "" || !include[key] || selectedKeys[record.repository+"\x00"+key] {
+		key := repositoryPackageRecordBatchKey(record)
+		if key == "" || !include[key] || selectedKeys[key] {
 			continue
 		}
 		selected = append(selected, record)
-		selectedKeys[record.repository+"\x00"+key] = true
+		selectedKeys[key] = true
+		batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record.record["Package"]))
+		batch.SelectedItemKeys = append(batch.SelectedItemKeys, key)
 	}
+	batch.ForcedCount = len(selected)
 	if limit > 0 && len(selected) >= limit {
-		return selected
+		batch.SelectedCount = len(selected)
+		batch.TotalCandidates = countUniqueRepositoryPackageRecords(records)
+		batch.CursorKey = latestPackagePageBatchCursor(sourceKey)
+		batch.NextCursorKey = batch.CursorKey
+		logPackagePageBatch(batch)
+		return selected, batch
 	}
-	out := make([]repositoryPackageRecord, 0, len(records))
+	type repositoryBatchCandidate struct {
+		key    string
+		record repositoryPackageRecord
+	}
+	out := make([]repositoryBatchCandidate, 0, len(records))
+	outSeen := map[string]bool{}
 	for _, record := range records {
-		key := strings.ToLower(strings.TrimSpace(record.record["Package"]))
-		if key == "" || selectedKeys[record.repository+"\x00"+key] {
+		key := repositoryPackageRecordBatchKey(record)
+		if key == "" || selectedKeys[key] || outSeen[key] {
 			continue
 		}
-		out = append(out, record)
+		out = append(out, repositoryBatchCandidate{key: key, record: record})
+		outSeen[key] = true
 	}
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	r.Shuffle(len(out), func(i, j int) {
-		out[i], out[j] = out[j], out[i]
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].key < out[j].key
 	})
+	batch.TotalCandidates = len(selected) + len(out)
+	outKeys := make([]string, 0, len(out))
+	for _, candidate := range out {
+		outKeys = append(outKeys, candidate.key)
+	}
+	batch.CursorKey = latestPackagePageBatchCursor(sourceKey)
 	if limit <= 0 {
-		return append(selected, out...)
+		for _, candidate := range out {
+			record := candidate.record
+			selected = append(selected, record)
+			batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record.record["Package"]))
+			batch.SelectedItemKeys = append(batch.SelectedItemKeys, candidate.key)
+			batch.NextCursorKey = candidate.key
+		}
+		batch.SelectedCount = len(selected)
+		logPackagePageBatch(batch)
+		return selected, batch
 	}
 	remaining := limit - len(selected)
-	if remaining <= 0 {
-		return selected
+	if remaining <= 0 || len(out) == 0 {
+		batch.SelectedCount = len(selected)
+		batch.NextCursorKey = batch.CursorKey
+		logPackagePageBatch(batch)
+		return selected, batch
 	}
-	if remaining > len(out) {
-		remaining = len(out)
+	for _, idx := range packagePageBatchIndexes(outKeys, batch.CursorKey, remaining) {
+		record := out[idx].record
+		selected = append(selected, record)
+		batch.SelectedPackages = append(batch.SelectedPackages, strings.TrimSpace(record.record["Package"]))
+		batch.SelectedItemKeys = append(batch.SelectedItemKeys, out[idx].key)
+		batch.NextCursorKey = out[idx].key
 	}
-	return append(selected, out[:remaining]...)
+	batch.SelectedCount = len(selected)
+	logPackagePageBatch(batch)
+	return selected, batch
+}
+
+func repositoryPackageRecordBatchKey(record repositoryPackageRecord) string {
+	return strings.ToLower(strings.TrimSpace(record.record["Package"]))
+}
+
+func countUniqueRepositoryPackageRecords(records []repositoryPackageRecord) int {
+	seen := map[string]bool{}
+	for _, record := range records {
+		key := repositoryPackageRecordBatchKey(record)
+		if key != "" {
+			seen[key] = true
+		}
+	}
+	return len(seen)
+}
+
+func firstRepositoryPackageRecordRepository(records []repositoryPackageRecord) string {
+	for _, record := range records {
+		if record.repository != "" {
+			return record.repository
+		}
+	}
+	return ""
 }
 
 func repositoryPackagePagePayload(candidate repositoryPackageRecord, htmlText string) map[string]any {
