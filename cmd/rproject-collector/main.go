@@ -232,6 +232,14 @@ func runPackage(ctx context.Context, args []string) error {
 	packagePagePackages := fs.String("package-page-packages", envString("RPKG_CRAN_PACKAGE_PAGE_PACKAGES", ""), "comma-separated CRAN package names to always include in package page/manual collection")
 	packageArtifactLimit := fs.Int("package-artifact-limit", envInt("RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT", 8), "CRAN package linked artifact fetch limit per package; 0 means all")
 	packageManualTopicLimit := fs.Int("package-manual-topic-limit", envInt("RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "CRAN package Rd manual topic limit per package; 0 means all")
+	bioconductorPackagePageLimit := fs.Int("bioconductor-package-page-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_LIMIT", 60), "Bioconductor package HTML/manual collection limit")
+	bioconductorPackagePagePackages := fs.String("bioconductor-package-page-packages", envString("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_PACKAGES", ""), "comma-separated Bioconductor package names to always include in package page/manual collection")
+	bioconductorPackageArtifactLimit := fs.Int("bioconductor-package-artifact-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_ARTIFACT_LIMIT", 8), "Bioconductor package linked artifact fetch limit per package; 0 means all")
+	bioconductorPackageManualTopicLimit := fs.Int("bioconductor-package-manual-topic-limit", envInt("RPKG_BIOCONDUCTOR_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "Bioconductor package Rd manual topic limit per package; 0 means all")
+	runiversePackagePageLimit := fs.Int("runiverse-package-page-limit", envInt("RPKG_RUNIVERSE_PACKAGE_PAGE_LIMIT", 60), "R-universe package HTML/API/manual collection limit")
+	runiversePackagePagePackages := fs.String("runiverse-package-page-packages", envString("RPKG_RUNIVERSE_PACKAGE_PAGE_PACKAGES", ""), "comma-separated R-universe package names to always include in package page/manual collection")
+	runiversePackageArtifactLimit := fs.Int("runiverse-package-artifact-limit", envInt("RPKG_RUNIVERSE_PACKAGE_ARTIFACT_LIMIT", 8), "R-universe package linked artifact fetch limit per package; 0 means all")
+	runiversePackageManualTopicLimit := fs.Int("runiverse-package-manual-topic-limit", envInt("RPKG_RUNIVERSE_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "R-universe package Rd manual topic limit per package; 0 means all")
 	websiteLimit := fs.Int("website-limit", envInt("RPKG_R_WEBSITE_LIMIT", 0), "website seed limit")
 	websiteCandidateLimit := fs.Int("website-candidate-limit", envInt("RPKG_R_WEBSITE_CANDIDATE_LIMIT", 120), "CRAN DESCRIPTION website candidate limit")
 	websiteFeedLimit := fs.Int("website-feed-limit", envInt("RPKG_R_WEBSITE_FEED_LIMIT", 40), "website feed item limit")
@@ -258,7 +266,9 @@ func runPackage(ctx context.Context, args []string) error {
 		"package-news",
 		"cran-package-pages",
 		"bioconductor",
+		"bioconductor-package-pages",
 		"runiverse",
+		"runiverse-package-pages",
 		"cran-website-discovery",
 		"r-websites",
 		"github-repos",
@@ -281,25 +291,33 @@ func runPackage(ctx context.Context, args []string) error {
 	total := 0
 	for _, currentJob := range jobs {
 		events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
-			metadataLimit:           *metadataLimit,
-			downloadTop:             *downloadTop,
-			reverseLimit:            *reverseLimit,
-			checkLimit:              *checkLimit,
-			archiveLimit:            *archiveLimit,
-			taskViewLimit:           *taskViewLimit,
-			newsLimit:               *newsLimit,
-			packagePageLimit:        *packagePageLimit,
-			packagePagePackages:     splitCSV(*packagePagePackages),
-			packageArtifactLimit:    *packageArtifactLimit,
-			packageManualTopicLimit: *packageManualTopicLimit,
-			websiteLimit:            *websiteLimit,
-			websiteCandidateLimit:   *websiteCandidateLimit,
-			websiteFeedLimit:        *websiteFeedLimit,
-			websiteLinkLimit:        *websiteLinkLimit,
-			websiteSitemapLimit:     *websiteSitemapLimit,
-			githubLimit:             *githubLimit,
-			osvLimit:                *osvLimit,
-			bibliometricLimit:       *bibliometricLimit,
+			metadataLimit:                       *metadataLimit,
+			downloadTop:                         *downloadTop,
+			reverseLimit:                        *reverseLimit,
+			checkLimit:                          *checkLimit,
+			archiveLimit:                        *archiveLimit,
+			taskViewLimit:                       *taskViewLimit,
+			newsLimit:                           *newsLimit,
+			packagePageLimit:                    *packagePageLimit,
+			packagePagePackages:                 splitCSV(*packagePagePackages),
+			packageArtifactLimit:                *packageArtifactLimit,
+			packageManualTopicLimit:             *packageManualTopicLimit,
+			bioconductorPackagePageLimit:        *bioconductorPackagePageLimit,
+			bioconductorPackagePagePackages:     splitCSV(*bioconductorPackagePagePackages),
+			bioconductorPackageArtifactLimit:    *bioconductorPackageArtifactLimit,
+			bioconductorPackageManualTopicLimit: *bioconductorPackageManualTopicLimit,
+			runiversePackagePageLimit:           *runiversePackagePageLimit,
+			runiversePackagePagePackages:        splitCSV(*runiversePackagePagePackages),
+			runiversePackageArtifactLimit:       *runiversePackageArtifactLimit,
+			runiversePackageManualTopicLimit:    *runiversePackageManualTopicLimit,
+			websiteLimit:                        *websiteLimit,
+			websiteCandidateLimit:               *websiteCandidateLimit,
+			websiteFeedLimit:                    *websiteFeedLimit,
+			websiteLinkLimit:                    *websiteLinkLimit,
+			websiteSitemapLimit:                 *websiteSitemapLimit,
+			githubLimit:                         *githubLimit,
+			osvLimit:                            *osvLimit,
+			bibliometricLimit:                   *bibliometricLimit,
 		})
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
@@ -378,25 +396,33 @@ func communityRowEvent(row map[string]any) genericEvent {
 }
 
 type packageJobLimits struct {
-	metadataLimit           int
-	downloadTop             int
-	reverseLimit            int
-	checkLimit              int
-	archiveLimit            int
-	taskViewLimit           int
-	newsLimit               int
-	packagePageLimit        int
-	packagePagePackages     []string
-	packageArtifactLimit    int
-	packageManualTopicLimit int
-	websiteLimit            int
-	websiteCandidateLimit   int
-	websiteFeedLimit        int
-	websiteLinkLimit        int
-	websiteSitemapLimit     int
-	githubLimit             int
-	osvLimit                int
-	bibliometricLimit       int
+	metadataLimit                       int
+	downloadTop                         int
+	reverseLimit                        int
+	checkLimit                          int
+	archiveLimit                        int
+	taskViewLimit                       int
+	newsLimit                           int
+	packagePageLimit                    int
+	packagePagePackages                 []string
+	packageArtifactLimit                int
+	packageManualTopicLimit             int
+	bioconductorPackagePageLimit        int
+	bioconductorPackagePagePackages     []string
+	bioconductorPackageArtifactLimit    int
+	bioconductorPackageManualTopicLimit int
+	runiversePackagePageLimit           int
+	runiversePackagePagePackages        []string
+	runiversePackageArtifactLimit       int
+	runiversePackageManualTopicLimit    int
+	websiteLimit                        int
+	websiteCandidateLimit               int
+	websiteFeedLimit                    int
+	websiteLinkLimit                    int
+	websiteSitemapLimit                 int
+	githubLimit                         int
+	osvLimit                            int
+	bibliometricLimit                   int
 }
 
 func collectPackageJob(job string, records func() ([]cranRecord, error), limits packageJobLimits) ([]genericEvent, error) {
@@ -437,8 +463,12 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		return collectCRANPackagePages(rows, limits.packagePageLimit, limits.packagePagePackages, limits.packageArtifactLimit, limits.packageManualTopicLimit)
 	case "bioconductor":
 		return collectBioconductor()
+	case "bioconductor-package-pages":
+		return collectBioconductorPackagePages(limits.bioconductorPackagePageLimit, limits.bioconductorPackagePagePackages, limits.bioconductorPackageArtifactLimit, limits.bioconductorPackageManualTopicLimit)
 	case "runiverse":
 		return collectRUniverse()
+	case "runiverse-package-pages":
+		return collectRUniversePackagePages(limits.runiversePackagePageLimit, limits.runiversePackagePagePackages, limits.runiversePackageArtifactLimit, limits.runiversePackageManualTopicLimit)
 	case "cran-website-discovery":
 		rows, err := records()
 		if err != nil {
@@ -1427,6 +1457,10 @@ func cranArtifactType(link cranPageLink) string {
 }
 
 func collectCRANPackageArtifacts(record cranRecord, pageURL string, links []cranPageLink, limit int) []genericEvent {
+	return collectPackageArtifacts(record, "CRAN", "cran_package_artifact", "rpkg.cran.package_artifact_snapshot.v1", "rpkg.cran.package_artifact.failure.v1", pageURL, links, limit)
+}
+
+func collectPackageArtifacts(record cranRecord, repository, sourceMethod, eventType, failureEventType, pageURL string, links []cranPageLink, limit int) []genericEvent {
 	if len(links) == 0 || limit < 0 {
 		return nil
 	}
@@ -1441,7 +1475,7 @@ func collectCRANPackageArtifacts(record cranRecord, pageURL string, links []cran
 		}
 		body, contentType, err := fetchBytesWithContentType(link.URL)
 		if err != nil {
-			events = append(events, collectionFailureEvent("rpkg.cran.package_artifact.failure.v1", "cran_package_artifact", link.URL, "CRAN", packageName, err))
+			events = append(events, collectionFailureEvent(failureEventType, sourceMethod, link.URL, repository, packageName, err))
 			continue
 		}
 		textContent, htmlContent := artifactContent(body, contentType, link.URL)
@@ -1459,11 +1493,11 @@ func collectCRANPackageArtifacts(record cranRecord, pageURL string, links []cran
 			"title":             firstNonEmpty(firstTitle(string(body)), link.Label),
 			"text_content":      truncate(textContent, envInt("RPKG_CRAN_ARTIFACT_TEXT_LIMIT", 8000)),
 			"html_content":      truncate(htmlContent, envInt("RPKG_CRAN_ARTIFACT_HTML_LIMIT", 8000)),
-			"source_method":     "cran_package_artifact",
+			"source_method":     sourceMethod,
 			"parser_version":    1,
 			"collection_status": "collected",
 		}
-		events = append(events, newGenericEvent("rpkg.cran.package_artifact_snapshot.v1", "cran_package_artifact", link.URL, "CRAN", packageName, record["Version"], "", payload))
+		events = append(events, newGenericEvent(eventType, sourceMethod, link.URL, repository, packageName, record["Version"], "", payload))
 	}
 	return events
 }
@@ -1482,6 +1516,10 @@ func artifactContent(body []byte, contentType, artifactURL string) (string, stri
 }
 
 func collectCRANPackageManualTopics(record cranRecord, pageURL, sourcePackageURL string, limit int) []genericEvent {
+	return collectPackageManualTopics(record, "CRAN", "cran_source_rd_manual", "rpkg.cran.package_manual_topic_snapshot.v1", "rpkg.cran.package_manual.failure.v1", pageURL, sourcePackageURL, limit)
+}
+
+func collectPackageManualTopics(record cranRecord, repository, sourceMethod, eventType, failureEventType, pageURL, sourcePackageURL string, limit int) []genericEvent {
 	sourcePackageURL = strings.TrimSpace(sourcePackageURL)
 	packageName := strings.TrimSpace(record["Package"])
 	if sourcePackageURL == "" || packageName == "" {
@@ -1489,11 +1527,11 @@ func collectCRANPackageManualTopics(record cranRecord, pageURL, sourcePackageURL
 	}
 	body, err := fetchBytes(sourcePackageURL)
 	if err != nil {
-		return []genericEvent{collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err)}
+		return []genericEvent{collectionFailureEvent(failureEventType, sourceMethod, sourcePackageURL, repository, packageName, err)}
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
-		return []genericEvent{collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err)}
+		return []genericEvent{collectionFailureEvent(failureEventType, sourceMethod, sourcePackageURL, repository, packageName, err)}
 	}
 	defer reader.Close()
 
@@ -1505,7 +1543,7 @@ func collectCRANPackageManualTopics(record cranRecord, pageURL, sourcePackageURL
 			break
 		}
 		if err != nil {
-			events = append(events, collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err))
+			events = append(events, collectionFailureEvent(failureEventType, sourceMethod, sourcePackageURL, repository, packageName, err))
 			break
 		}
 		if header == nil || header.FileInfo().IsDir() || !strings.HasSuffix(header.Name, ".Rd") || !strings.Contains(header.Name, "/man/") {
@@ -1516,11 +1554,12 @@ func collectCRANPackageManualTopics(record cranRecord, pageURL, sourcePackageURL
 		}
 		rdBody, err := io.ReadAll(io.LimitReader(tarReader, int64(envInt("RPKG_CRAN_RD_MAX_BYTES", 2*1024*1024))))
 		if err != nil {
-			events = append(events, collectionFailureEvent("rpkg.cran.package_manual.failure.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, err))
+			events = append(events, collectionFailureEvent(failureEventType, sourceMethod, sourcePackageURL, repository, packageName, err))
 			continue
 		}
 		payload := cranManualTopicPayload(record, pageURL, sourcePackageURL, header.Name, string(rdBody))
-		events = append(events, newGenericEvent("rpkg.cran.package_manual_topic_snapshot.v1", "cran_source_rd_manual", sourcePackageURL, "CRAN", packageName, record["Version"], "", payload))
+		payload["source_method"] = sourceMethod
+		events = append(events, newGenericEvent(eventType, sourceMethod, sourcePackageURL, repository, packageName, record["Version"], "", payload))
 	}
 	return events
 }
@@ -1774,7 +1813,7 @@ func collectBioconductor() ([]genericEvent, error) {
 }
 
 func collectRUniverse() ([]genericEvent, error) {
-	universes := splitCSV(envString("RPKG_RUNIVERSE_UNIVERSES", "r-universe,ropensci,tidyverse"))
+	universes := splitCSV(envString("RPKG_RUNIVERSE_UNIVERSES", "ropensci,tidyverse"))
 	events := make([]genericEvent, 0)
 	for _, universe := range universes {
 		sourceURL := fmt.Sprintf("https://%s.r-universe.dev/src/contrib/PACKAGES", universe)
@@ -1796,6 +1835,332 @@ func collectRUniverse() ([]genericEvent, error) {
 		}
 	}
 	return events, nil
+}
+
+type repositoryPackageRecord struct {
+	record            cranRecord
+	repository        string
+	sourceURL         string
+	pageURL           string
+	sourcePackageURL  string
+	artifactLinks     []cranPageLink
+	pageMethod        string
+	artifactMethod    string
+	manualMethod      string
+	pageEventType     string
+	artifactEventType string
+	manualEventType   string
+	failurePrefix     string
+	extra             map[string]string
+}
+
+func collectBioconductorPackagePages(limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
+	branches := splitCSV(envString("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_BRANCHES", envString("RPKG_BIOCONDUCTOR_BRANCHES", "release")))
+	repos := splitCSV(envString("RPKG_BIOCONDUCTOR_PACKAGE_PAGE_REPOS", envString("RPKG_BIOCONDUCTOR_REPOS", "bioc,data/annotation,data/experiment,workflows")))
+	candidates := make([]repositoryPackageRecord, 0)
+	for _, branch := range branches {
+		for _, repo := range repos {
+			sourceURL := fmt.Sprintf("https://bioconductor.org/packages/%s/%s/src/contrib/PACKAGES.gz", branch, repo)
+			records, err := fetchDCF(sourceURL)
+			if err != nil {
+				candidates = append(candidates, repositoryPackageRecord{
+					repository:    "Bioconductor",
+					sourceURL:     sourceURL,
+					pageMethod:    "bioconductor_package_html",
+					failurePrefix: "rpkg.bioconductor.package_page",
+					extra:         map[string]string{"branch": branch, "bioc_repository": repo, "fetch_error": err.Error()},
+				})
+				continue
+			}
+			for _, record := range records {
+				packageName := strings.TrimSpace(record["Package"])
+				version := strings.TrimSpace(record["Version"])
+				if packageName == "" || version == "" {
+					continue
+				}
+				pageURL := fmt.Sprintf("https://bioconductor.org/packages/%s/%s/html/%s.html", branch, repo, url.PathEscape(packageName))
+				sourcePackageURL := fmt.Sprintf("https://bioconductor.org/packages/%s/%s/src/contrib/%s_%s.tar.gz", branch, repo, url.PathEscape(packageName), url.PathEscape(version))
+				candidates = append(candidates, repositoryPackageRecord{
+					record:            record,
+					repository:        "Bioconductor",
+					sourceURL:         sourceURL,
+					pageURL:           pageURL,
+					sourcePackageURL:  sourcePackageURL,
+					pageMethod:        "bioconductor_package_html",
+					artifactMethod:    "bioconductor_package_artifact",
+					manualMethod:      "bioconductor_source_rd_manual",
+					pageEventType:     "rpkg.bioconductor.package_page_snapshot.v1",
+					artifactEventType: "rpkg.bioconductor.package_artifact_snapshot.v1",
+					manualEventType:   "rpkg.bioconductor.package_manual_topic_snapshot.v1",
+					failurePrefix:     "rpkg.bioconductor.package_page",
+					extra:             map[string]string{"branch": branch, "bioc_repository": repo},
+				})
+			}
+		}
+	}
+	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit)
+}
+
+func collectRUniversePackagePages(limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
+	universes := splitCSV(envString("RPKG_RUNIVERSE_UNIVERSES", "ropensci,tidyverse"))
+	candidates := make([]repositoryPackageRecord, 0)
+	for _, universe := range universes {
+		sourceURL := fmt.Sprintf("https://%s.r-universe.dev/src/contrib/PACKAGES", universe)
+		records, err := fetchDCF(sourceURL)
+		if err != nil {
+			candidates = append(candidates, repositoryPackageRecord{
+				repository:    "R-universe",
+				sourceURL:     sourceURL,
+				pageMethod:    "runiverse_package_html",
+				failurePrefix: "rpkg.runiverse.package_page",
+				extra:         map[string]string{"universe": universe, "fetch_error": err.Error()},
+			})
+			continue
+		}
+		for _, record := range records {
+			packageName := strings.TrimSpace(record["Package"])
+			version := strings.TrimSpace(record["Version"])
+			if packageName == "" || version == "" {
+				continue
+			}
+			baseURL := fmt.Sprintf("https://%s.r-universe.dev", universe)
+			pageURL := fmt.Sprintf("%s/%s", baseURL, url.PathEscape(packageName))
+			sourcePackageURL := fmt.Sprintf("%s/src/contrib/%s_%s.tar.gz", baseURL, url.PathEscape(packageName), url.PathEscape(version))
+			candidates = append(candidates, repositoryPackageRecord{
+				record:            record,
+				repository:        "R-universe",
+				sourceURL:         sourceURL,
+				pageURL:           pageURL,
+				sourcePackageURL:  sourcePackageURL,
+				pageMethod:        "runiverse_package_html",
+				artifactMethod:    "runiverse_package_artifact",
+				manualMethod:      "runiverse_source_rd_manual",
+				pageEventType:     "rpkg.runiverse.package_page_snapshot.v1",
+				artifactEventType: "rpkg.runiverse.package_artifact_snapshot.v1",
+				manualEventType:   "rpkg.runiverse.package_manual_topic_snapshot.v1",
+				failurePrefix:     "rpkg.runiverse.package_page",
+				extra:             map[string]string{"universe": universe, "api_url": fmt.Sprintf("%s/api/packages/%s", baseURL, url.PathEscape(packageName))},
+			})
+		}
+	}
+	return collectRepositoryPackagePages(candidates, limit, packageNames, artifactLimit, manualTopicLimit)
+}
+
+func collectRepositoryPackagePages(candidates []repositoryPackageRecord, limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	events := make([]genericEvent, 0)
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.record["Package"]) == "" && stringAny(candidate.extra["fetch_error"]) != "" {
+			events = append(events, collectionFailureEvent(candidate.failurePrefix+".failure.v1", candidate.pageMethod, candidate.sourceURL, candidate.repository, "", errors.New(candidate.extra["fetch_error"])))
+		}
+	}
+	selected := selectRepositoryPackageRecords(candidates, limit, packageNames)
+	for _, candidate := range selected {
+		packageName := strings.TrimSpace(candidate.record["Package"])
+		if packageName == "" {
+			continue
+		}
+		body, err := fetchBytes(candidate.pageURL)
+		if err != nil {
+			events = append(events, collectionFailureEvent(candidate.failurePrefix+".failure.v1", candidate.pageMethod, candidate.pageURL, candidate.repository, packageName, err))
+			continue
+		}
+		htmlText := string(body)
+		payload := repositoryPackagePagePayload(candidate, htmlText)
+		payload["content_length"] = len(body)
+		payload["html_sha256"] = shaHex(htmlText)
+		events = append(events, newGenericEvent(candidate.pageEventType, candidate.pageMethod, candidate.pageURL, candidate.repository, packageName, candidate.record["Version"], "", payload))
+		events = append(events, collectPackageArtifacts(candidate.record, candidate.repository, candidate.artifactMethod, candidate.artifactEventType, candidate.failurePrefix+".artifact_failure.v1", candidate.pageURL, packageDocumentArtifactLinks(payload), artifactLimit)...)
+		events = append(events, collectPackageManualTopics(candidate.record, candidate.repository, candidate.manualMethod, candidate.manualEventType, candidate.failurePrefix+".manual_failure.v1", candidate.pageURL, stringAny(payload["package_source_url"]), manualTopicLimit)...)
+	}
+	return events, nil
+}
+
+func selectRepositoryPackageRecords(records []repositoryPackageRecord, limit int, packageNames []string) []repositoryPackageRecord {
+	include := map[string]bool{}
+	for _, name := range packageNames {
+		if key := strings.ToLower(strings.TrimSpace(name)); key != "" {
+			include[key] = true
+		}
+	}
+	selected := make([]repositoryPackageRecord, 0)
+	selectedKeys := map[string]bool{}
+	for _, record := range records {
+		key := strings.ToLower(strings.TrimSpace(record.record["Package"]))
+		if key == "" || !include[key] || selectedKeys[record.repository+"\x00"+key] {
+			continue
+		}
+		selected = append(selected, record)
+		selectedKeys[record.repository+"\x00"+key] = true
+	}
+	if limit > 0 && len(selected) >= limit {
+		return selected
+	}
+	out := make([]repositoryPackageRecord, 0, len(records))
+	for _, record := range records {
+		key := strings.ToLower(strings.TrimSpace(record.record["Package"]))
+		if key == "" || selectedKeys[record.repository+"\x00"+key] {
+			continue
+		}
+		out = append(out, record)
+	}
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	r.Shuffle(len(out), func(i, j int) {
+		out[i], out[j] = out[j], out[i]
+	})
+	if limit <= 0 {
+		return append(selected, out...)
+	}
+	remaining := limit - len(selected)
+	if remaining <= 0 {
+		return selected
+	}
+	if remaining > len(out) {
+		remaining = len(out)
+	}
+	return append(selected, out[:remaining]...)
+}
+
+func repositoryPackagePagePayload(candidate repositoryPackageRecord, htmlText string) map[string]any {
+	record := candidate.record
+	fields := cranPackagePageFields(htmlText)
+	fieldRows := cranPackagePageFieldRows(candidate.pageURL, htmlText)
+	meta := metaValues(htmlText)
+	allLinks := cranAllPageLinks(candidate.pageURL, htmlText, fieldRows)
+	allLinks = append(allLinks, cranLinksInHTML(candidate.pageURL, htmlText)...)
+	allLinks = uniqueCRANLinks(allLinks)
+	documentationLinks := uniqueCRANLinks(append(cranLinksInSection(candidate.pageURL, htmlText, "Documentation"), cranLinksInSection(candidate.pageURL, htmlText, "Readme and manuals")...))
+	downloadLinks := uniqueCRANLinks(append(cranLinksInSection(candidate.pageURL, htmlText, "Package Archives"), cranLinksInSection(candidate.pageURL, htmlText, "Downloads")...))
+	vignetteLinks := uniqueCRANLinks(append(cranLinksInSection(candidate.pageURL, htmlText, "Vignettes"), linksContaining(allLinks, "/vignettes/", "/articles/", "/doc/")...))
+	materialLinks := linksContaining(allLinks, "README", "NEWS", "citation", "manual", "card.")
+	referenceHTML := firstNonEmpty(firstLinkContaining(allLinks, "/doc/manual.html"), firstLinkContaining(allLinks, "manual.html"))
+	referencePDF := firstNonEmpty(firstLinkContaining(allLinks, "/manuals/"), firstLinkContaining(allLinks, "/"+strings.TrimSpace(record["Package"])+".pdf"), firstLinkWithSuffix(allLinks, ".pdf"))
+	sourcePackageURL := firstNonEmpty(candidate.sourcePackageURL, firstLinkMatching(downloadLinks, ".tar.gz"), firstLinkMatching(allLinks, ".tar.gz"))
+	archiveURL := firstLinkContaining(allLinks, "Archive/")
+	doiLinks := cranLinksForLabel(candidate.pageURL, htmlText, "DOI")
+	urlLinks := cranLinksForLabel(candidate.pageURL, htmlText, "URL")
+	bugLinks := cranLinksForLabel(candidate.pageURL, htmlText, "BugReports")
+	readmeURL := firstNonEmpty(firstLinkLabelContaining(materialLinks, "readme"), firstLinkContaining(allLinks, "/readme"), firstLinkContaining(allLinks, "#readme"))
+	newsURL := firstNonEmpty(firstLinkLabelContaining(materialLinks, "news"), firstLinkContaining(allLinks, "/NEWS"))
+	payload := recordPayload(record)
+	for key, value := range candidate.extra {
+		payload[key] = value
+	}
+	payload["fields_json"] = mustJSON(fields)
+	payload["field_rows_json"] = mustJSON(fieldRows)
+	payload["links_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(allLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
+	payload["sections_json"] = mustJSON(genericPackagePageSections(candidate.pageURL, htmlText, []string{"Documentation", "Readme and manuals", "Details", "Package Archives", "Downloads"}))
+	payload["package"] = firstNonEmpty(record["Package"], fields["Package"])
+	payload["version"] = firstNonEmpty(fields["Version"], record["Version"])
+	payload["title"] = firstNonEmpty(meta["og:title"], firstHeading(htmlText), record["Title"])
+	payload["description"] = firstNonEmpty(meta["og:description"], meta["description"], firstParagraph(htmlText), record["Description"])
+	payload["depends"] = firstNonEmpty(fields["Depends"], record["Depends"])
+	payload["imports"] = firstNonEmpty(fields["Imports"], record["Imports"])
+	payload["suggests"] = firstNonEmpty(fields["Suggests"], record["Suggests"])
+	payload["linking_to"] = firstNonEmpty(fields["LinkingTo"], record["LinkingTo"])
+	payload["enhances"] = firstNonEmpty(fields["Enhances"], record["Enhances"])
+	payload["published"] = firstNonEmpty(fields["Published"], record["Date/Publication"], stringAny(record["Packaged"]))
+	payload["doi"] = fields["DOI"]
+	payload["doi_url"] = firstLinkContaining(doiLinks, "doi.org")
+	payload["citation_url"] = firstNonEmpty(firstLinkContaining(allLinks, "citation"), firstLinkContaining(allLinks, "CITATION"))
+	payload["author"] = firstNonEmpty(fields["Author"], record["Author"])
+	payload["maintainer"] = firstNonEmpty(fields["Maintainer"], record["Maintainer"])
+	payload["bug_reports"] = firstNonEmpty(fields["BugReports"], record["BugReports"])
+	payload["bug_reports_url"] = firstNonEmpty(firstLinkURL(bugLinks), record["BugReports"])
+	payload["license"] = firstNonEmpty(fields["License"], record["License"])
+	payload["url"] = firstNonEmpty(fields["URL"], record["URL"], record["RemoteUrl"])
+	payload["urls_json"] = mustJSON(cranLinksToMaps(urlLinks))
+	payload["needs_compilation"] = firstNonEmpty(fields["NeedsCompilation"], record["NeedsCompilation"])
+	payload["materials_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(materialLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
+	payload["readme_url"] = readmeURL
+	payload["news_url"] = newsURL
+	payload["in_views"] = firstNonEmpty(fields["biocViews"], record["biocViews"])
+	payload["in_views_json"] = mustJSON(splitCSV(firstNonEmpty(fields["biocViews"], record["biocViews"])))
+	payload["cran_checks_url"] = ""
+	payload["reference_manual_html_url"] = referenceHTML
+	payload["reference_manual_pdf_url"] = referencePDF
+	payload["documentation_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(documentationLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
+	payload["vignettes_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(vignetteLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
+	payload["downloads_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(downloadLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
+	payload["package_source_url"] = sourcePackageURL
+	payload["archive_url"] = archiveURL
+	payload["reverse_depends_count"] = 0
+	payload["reverse_imports_count"] = 0
+	payload["reverse_suggests_count"] = 0
+	payload["reverse_linking_to_count"] = 0
+	payload["reverse_enhances_count"] = 0
+	payload["reverse_depends_json"] = "[]"
+	payload["reverse_imports_json"] = "[]"
+	payload["reverse_suggests_json"] = "[]"
+	payload["reverse_linking_to_json"] = "[]"
+	payload["reverse_enhances_json"] = "[]"
+	payload["all_links_count"] = len(allLinks)
+	payload["page_url"] = candidate.pageURL
+	payload["source_method"] = candidate.pageMethod
+	payload["parser_version"] = 1
+	payload["collection_status"] = "collected"
+	return payload
+}
+
+func genericPackagePageSections(baseURL, htmlText string, headings []string) []map[string]any {
+	out := make([]map[string]any, 0)
+	textLimit := envInt("RPKG_CRAN_PAGE_SECTION_TEXT_LIMIT", 2000)
+	linkLimit := envInt("RPKG_CRAN_PAGE_SECTION_LINK_LIMIT", 20)
+	for _, heading := range headings {
+		sectionHTML := htmlSectionAfter(htmlText, heading)
+		if sectionHTML == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"heading": strings.TrimSuffix(heading, ":"),
+			"text":    truncate(stripTags(sectionHTML), textLimit),
+			"links":   cranLinksToMaps(limitedCRANLinks(cranLinksInHTML(baseURL, sectionHTML), linkLimit)),
+		})
+	}
+	return out
+}
+
+func linksContaining(rows []cranPageLink, needles ...string) []cranPageLink {
+	out := make([]cranPageLink, 0)
+	for _, row := range rows {
+		haystack := strings.ToLower(row.Label + " " + row.URL)
+		for _, needle := range needles {
+			if strings.Contains(haystack, strings.ToLower(needle)) {
+				out = append(out, row)
+				break
+			}
+		}
+	}
+	return uniqueCRANLinks(out)
+}
+
+func packageDocumentArtifactLinks(payload map[string]any) []cranPageLink {
+	out := cranPackageArtifactLinks(payload)
+	for _, raw := range []string{
+		stringAny(payload["vignettes_json"]),
+		stringAny(payload["downloads_json"]),
+		stringAny(payload["links_json"]),
+	} {
+		var rows []map[string]string
+		if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+			continue
+		}
+		for _, row := range rows {
+			link := cranPageLink{
+				Label:   row["label"],
+				URL:     row["url"],
+				Section: row["section"],
+				Type:    row["type"],
+			}
+			if isCRANPackageArtifact(link) || strings.Contains(strings.ToLower(link.URL), "/manual") || strings.Contains(strings.ToLower(link.URL), "/citation") {
+				link.Type = firstNonEmpty(link.Type, cranArtifactType(link))
+				out = append(out, link)
+			}
+		}
+	}
+	return uniqueCRANLinks(out)
 }
 
 func collectCRANWebsiteDiscovery(records []cranRecord, limit int) []genericEvent {
