@@ -31,45 +31,45 @@ import (
 )
 
 const (
-	defaultPackageTopic = "rpkg.events"
-	defaultYouTubeTopic = "r.youtube.events"
-	defaultCommunityTopic = "r.community.events"
-	defaultWebRTopic    = "webr.events"
-	userAgent           = "StatgroundBot/1.0 (+https://www.statground.net; R ecosystem collector)"
+	defaultPackageTopic           = "rpkg.events"
+	defaultYouTubeTopic           = "r.youtube.events"
+	defaultCommunityTopic         = "r.community.events"
+	defaultWebRTopic              = "webr.events"
+	userAgent                     = "StatgroundBot/1.0 (+https://www.statground.net; R ecosystem collector)"
 	youtubeBoilerplateDescription = "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
 )
 
 var (
-	tagRE          = regexp.MustCompile(`(?is)<[^>]+>`)
-	spaceRE        = regexp.MustCompile(`[ \t\r\n\x{00a0}]+`)
-	trRE           = regexp.MustCompile(`(?is)<tr\b[^>]*>(.*?)</tr>`)
-	cellRE         = regexp.MustCompile(`(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>`)
-	linkRE         = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
-	titleRE        = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title>`)
-	metaRE         = regexp.MustCompile(`(?is)<meta\b([^>]*)>`)
-	attrRE         = regexp.MustCompile(`(?is)\s([a-zA-Z_:][-a-zA-Z0-9_:]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
-	headingRE      = regexp.MustCompile(`(?is)<h[1-4]\b[^>]*>(.*?)</h[1-4]>`)
-	paragraphRE    = regexp.MustCompile(`(?is)<p\b[^>]*>(.*?)</p>`)
-	listItemRE     = regexp.MustCompile(`(?is)<li\b[^>]*>(.*?)</li>`)
-	youtubeURLRE   = regexp.MustCompile(`https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s"'<>]+`)
-	ytWatchRE      = regexp.MustCompile(`(?:/watch\?v=|watch\\u003fv=|watch\\\?v=)([A-Za-z0-9_-]{11})`)
-	ytChannelRE    = regexp.MustCompile(`/(channel/[A-Za-z0-9_-]+|@[A-Za-z0-9._-]+|c/[A-Za-z0-9._-]+|user/[A-Za-z0-9._-]+)`)
-	ytPlaylistRE   = regexp.MustCompile(`(?:/playlist\?list=|playlist\\u003flist=|playlist\\\?list=)([A-Za-z0-9_-]+)`)
-	githubRepoRE   = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([^/\s?#]+)/([^/\s?#]+)`)
+	tagRE             = regexp.MustCompile(`(?is)<[^>]+>`)
+	spaceRE           = regexp.MustCompile(`[ \t\r\n\x{00a0}]+`)
+	trRE              = regexp.MustCompile(`(?is)<tr\b[^>]*>(.*?)</tr>`)
+	cellRE            = regexp.MustCompile(`(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>`)
+	linkRE            = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
+	titleRE           = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title>`)
+	metaRE            = regexp.MustCompile(`(?is)<meta\b([^>]*)>`)
+	attrRE            = regexp.MustCompile(`(?is)\s([a-zA-Z_:][-a-zA-Z0-9_:]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+	headingRE         = regexp.MustCompile(`(?is)<h[1-4]\b[^>]*>(.*?)</h[1-4]>`)
+	paragraphRE       = regexp.MustCompile(`(?is)<p\b[^>]*>(.*?)</p>`)
+	listItemRE        = regexp.MustCompile(`(?is)<li\b[^>]*>(.*?)</li>`)
+	youtubeURLRE      = regexp.MustCompile(`https?://(?:www\.)?(?:youtube\.com|youtu\.be)/[^\s"'<>]+`)
+	ytWatchRE         = regexp.MustCompile(`(?:/watch\?v=|watch\\u003fv=|watch\\\?v=)([A-Za-z0-9_-]{11})`)
+	ytChannelRE       = regexp.MustCompile(`/(channel/[A-Za-z0-9_-]+|@[A-Za-z0-9._-]+|c/[A-Za-z0-9._-]+|user/[A-Za-z0-9._-]+)`)
+	ytPlaylistRE      = regexp.MustCompile(`(?:/playlist\?list=|playlist\\u003flist=|playlist\\\?list=)([A-Za-z0-9_-]+)`)
+	githubRepoRE      = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([^/\s?#]+)/([^/\s?#]+)`)
 	cranPackageLinkRE = regexp.MustCompile(`(?i)(?:/web/packages/|\.\./packages/)([^/\s?#"']+)/?`)
-	isoDurationRE  = regexp.MustCompile(`^P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$`)
-	depVersionRE   = regexp.MustCompile(`\s*\(.*?\)\s*`)
-	boardURLRE      = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>()"']+`)
-	boardMdLinkRE   = regexp.MustCompile(`\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)`)
-	boardFirstTagRE = regexp.MustCompile(`(?is)<\s*(h2|h3|p|ul|ol|li|strong|em|code|pre|blockquote)\b`)
-	boardAnyTagRE   = regexp.MustCompile(`(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>`)
-	boardAnchorRE   = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
+	isoDurationRE     = regexp.MustCompile(`^P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$`)
+	depVersionRE      = regexp.MustCompile(`\s*\(.*?\)\s*`)
+	boardURLRE        = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>()"']+`)
+	boardMdLinkRE     = regexp.MustCompile(`\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)`)
+	boardFirstTagRE   = regexp.MustCompile(`(?is)<\s*(h2|h3|p|ul|ol|li|strong|em|code|pre|blockquote)\b`)
+	boardAnyTagRE     = regexp.MustCompile(`(?is)</?\s*([a-zA-Z0-9]+)\b[^>]*>`)
+	boardAnchorRE     = regexp.MustCompile(`(?is)<a\b[^>]*>(.*?)</a>`)
 	boardAnchorOnlyRE = regexp.MustCompile(`(?is)^<a\b[^>]*>(.*?)</a>$`)
-	sitemapLocRE    = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
-	rdCommandRE     = regexp.MustCompile(`\\[A-Za-z]+`)
-	statusOrder     = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
-	newsCandidates  = []string{"news/news.html", "news.html"}
-	defaultWebsites = []string{
+	sitemapLocRE      = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
+	rdCommandRE       = regexp.MustCompile(`\\[A-Za-z]+`)
+	statusOrder       = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
+	newsCandidates    = []string{"news/news.html", "news.html"}
+	defaultWebsites   = []string{
 		"https://www.r-project.org/",
 		"https://cran.r-project.org/",
 		"https://cran.r-project.org/web/views/",
@@ -158,8 +158,8 @@ type cranRecord map[string]string
 
 type rssFeed struct {
 	Channel struct {
-		Title string `xml:"title"`
-		Link  string `xml:"link"`
+		Title string    `xml:"title"`
+		Link  string    `xml:"link"`
 		Items []rssItem `xml:"item"`
 	} `xml:"channel"`
 }
@@ -229,6 +229,7 @@ func runPackage(ctx context.Context, args []string) error {
 	taskViewLimit := fs.Int("task-view-limit", envInt("RPKG_CRAN_TASK_VIEW_LIMIT", 0), "CRAN Task View page limit")
 	newsLimit := fs.Int("package-news-limit", envInt("RPKG_PACKAGE_NEWS_LIMIT", 50), "package NEWS page limit")
 	packagePageLimit := fs.Int("package-page-limit", envInt("RPKG_CRAN_PACKAGE_PAGE_LIMIT", 120), "CRAN package index.html page limit")
+	packagePagePackages := fs.String("package-page-packages", envString("RPKG_CRAN_PACKAGE_PAGE_PACKAGES", ""), "comma-separated CRAN package names to always include in package page/manual collection")
 	packageArtifactLimit := fs.Int("package-artifact-limit", envInt("RPKG_CRAN_PACKAGE_ARTIFACT_LIMIT", 8), "CRAN package linked artifact fetch limit per package; 0 means all")
 	packageManualTopicLimit := fs.Int("package-manual-topic-limit", envInt("RPKG_CRAN_PACKAGE_MANUAL_TOPIC_LIMIT", 0), "CRAN package Rd manual topic limit per package; 0 means all")
 	websiteLimit := fs.Int("website-limit", envInt("RPKG_R_WEBSITE_LIMIT", 0), "website seed limit")
@@ -280,14 +281,15 @@ func runPackage(ctx context.Context, args []string) error {
 	total := 0
 	for _, currentJob := range jobs {
 		events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
-			metadataLimit:         *metadataLimit,
-			downloadTop:           *downloadTop,
-			reverseLimit:          *reverseLimit,
-			checkLimit:            *checkLimit,
-			archiveLimit:          *archiveLimit,
-			taskViewLimit:         *taskViewLimit,
+			metadataLimit:           *metadataLimit,
+			downloadTop:             *downloadTop,
+			reverseLimit:            *reverseLimit,
+			checkLimit:              *checkLimit,
+			archiveLimit:            *archiveLimit,
+			taskViewLimit:           *taskViewLimit,
 			newsLimit:               *newsLimit,
 			packagePageLimit:        *packagePageLimit,
+			packagePagePackages:     splitCSV(*packagePagePackages),
 			packageArtifactLimit:    *packageArtifactLimit,
 			packageManualTopicLimit: *packageManualTopicLimit,
 			websiteLimit:            *websiteLimit,
@@ -376,24 +378,25 @@ func communityRowEvent(row map[string]any) genericEvent {
 }
 
 type packageJobLimits struct {
-	metadataLimit         int
-	downloadTop           int
-	reverseLimit          int
-	checkLimit            int
-	archiveLimit          int
-	taskViewLimit         int
-	newsLimit             int
+	metadataLimit           int
+	downloadTop             int
+	reverseLimit            int
+	checkLimit              int
+	archiveLimit            int
+	taskViewLimit           int
+	newsLimit               int
 	packagePageLimit        int
+	packagePagePackages     []string
 	packageArtifactLimit    int
 	packageManualTopicLimit int
-	websiteLimit          int
-	websiteCandidateLimit int
-	websiteFeedLimit      int
-	websiteLinkLimit      int
-	websiteSitemapLimit   int
-	githubLimit           int
-	osvLimit              int
-	bibliometricLimit     int
+	websiteLimit            int
+	websiteCandidateLimit   int
+	websiteFeedLimit        int
+	websiteLinkLimit        int
+	websiteSitemapLimit     int
+	githubLimit             int
+	osvLimit                int
+	bibliometricLimit       int
 }
 
 func collectPackageJob(job string, records func() ([]cranRecord, error), limits packageJobLimits) ([]genericEvent, error) {
@@ -431,7 +434,7 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		if err != nil {
 			return nil, err
 		}
-		return collectCRANPackagePages(rows, limits.packagePageLimit, limits.packageArtifactLimit, limits.packageManualTopicLimit)
+		return collectCRANPackagePages(rows, limits.packagePageLimit, limits.packagePagePackages, limits.packageArtifactLimit, limits.packageManualTopicLimit)
 	case "bioconductor":
 		return collectBioconductor()
 	case "runiverse":
@@ -575,19 +578,19 @@ func collectCRANMetadata(records []cranRecord, limit int) []genericEvent {
 		}
 		version := record["Version"]
 		payload := map[string]any{
-			"package":          packageName,
-			"version":          version,
-			"title":            record["Title"],
-			"description":      record["Description"],
-			"license":          record["License"],
-			"maintainer":       record["Maintainer"],
-			"author":           record["Author"],
-			"authors_at_r":     record["Authors@R"],
-			"depends":          record["Depends"],
-			"imports":          record["Imports"],
-			"suggests":         record["Suggests"],
-			"linking_to":       record["LinkingTo"],
-			"enhances":         record["Enhances"],
+			"package":             packageName,
+			"version":             version,
+			"title":               record["Title"],
+			"description":         record["Description"],
+			"license":             record["License"],
+			"maintainer":          record["Maintainer"],
+			"author":              record["Author"],
+			"authors_at_r":        record["Authors@R"],
+			"depends":             record["Depends"],
+			"imports":             record["Imports"],
+			"suggests":            record["Suggests"],
+			"linking_to":          record["LinkingTo"],
+			"enhances":            record["Enhances"],
 			"system_requirements": record["SystemRequirements"],
 			"needs_compilation":   record["NeedsCompilation"],
 			"date_publication":    record["Date/Publication"],
@@ -666,16 +669,16 @@ func collectReverseDependencies(records []cranRecord, limit int) []genericEvent 
 					return events
 				}
 				payload := map[string]any{
-					"snapshot_date":      snapshotDate,
-					"source":             "CRAN",
-					"from_repository":    "CRAN",
-					"from_package":       fromPackage,
-					"from_version":       record["Version"],
-					"to_package":         dep.name,
-					"dependency_type":    field,
-					"dependency_spec":    dep.spec,
-					"source_method":      "cran_packages_gz_dependency_parser",
-					"collection_status":  "collected",
+					"snapshot_date":     snapshotDate,
+					"source":            "CRAN",
+					"from_repository":   "CRAN",
+					"from_package":      fromPackage,
+					"from_version":      record["Version"],
+					"to_package":        dep.name,
+					"dependency_type":   field,
+					"dependency_spec":   dep.spec,
+					"source_method":     "cran_packages_gz_dependency_parser",
+					"collection_status": "collected",
 				}
 				events = append(events, newGenericEvent("rpkg.cran.dependency_edge_snapshot.v1", "cran_packages_gz_dependency_parser", cranPackagesURL(), "CRAN", fromPackage, record["Version"], snapshotDate+"T00:00:00Z", payload))
 			}
@@ -869,11 +872,11 @@ type cranPageLink struct {
 	Type    string `json:"type,omitempty"`
 }
 
-func collectCRANPackagePages(records []cranRecord, limit, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
+func collectCRANPackagePages(records []cranRecord, limit int, packageNames []string, artifactLimit, manualTopicLimit int) ([]genericEvent, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
-	selected := selectPackagePageRecords(records, limit)
+	selected := selectPackagePageRecords(records, limit, packageNames)
 	events := make([]genericEvent, 0, len(selected))
 	for _, record := range selected {
 		packageName := strings.TrimSpace(record["Package"])
@@ -897,17 +900,52 @@ func collectCRANPackagePages(records []cranRecord, limit, artifactLimit, manualT
 	return events, nil
 }
 
-func selectPackagePageRecords(records []cranRecord, limit int) []cranRecord {
-	if limit <= 0 || limit >= len(records) {
-		return records
+func selectPackagePageRecords(records []cranRecord, limit int, packageNames []string) []cranRecord {
+	if len(records) == 0 {
+		return nil
 	}
-	out := make([]cranRecord, len(records))
-	copy(out, records)
+	include := map[string]bool{}
+	for _, name := range packageNames {
+		if key := strings.ToLower(strings.TrimSpace(name)); key != "" {
+			include[key] = true
+		}
+	}
+	selected := make([]cranRecord, 0)
+	selectedKeys := map[string]bool{}
+	for _, record := range records {
+		key := strings.ToLower(strings.TrimSpace(record["Package"]))
+		if key == "" || !include[key] || selectedKeys[key] {
+			continue
+		}
+		selected = append(selected, record)
+		selectedKeys[key] = true
+	}
+	if limit > 0 && len(selected) >= limit {
+		return selected
+	}
+	out := make([]cranRecord, 0, len(records))
+	for _, record := range records {
+		key := strings.ToLower(strings.TrimSpace(record["Package"]))
+		if key == "" || selectedKeys[key] {
+			continue
+		}
+		out = append(out, record)
+	}
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	r.Shuffle(len(out), func(i, j int) {
 		out[i], out[j] = out[j], out[i]
 	})
-	return out[:limit]
+	if limit <= 0 {
+		return append(selected, out...)
+	}
+	remaining := limit - len(selected)
+	if remaining <= 0 {
+		return selected
+	}
+	if remaining > len(out) {
+		remaining = len(out)
+	}
+	return append(selected, out[:remaining]...)
 }
 
 func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[string]any {
@@ -946,7 +984,7 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	payload := recordPayload(record)
 	payload["fields_json"] = mustJSON(fields)
 	payload["field_rows_json"] = mustJSON(fieldRows)
-	payload["links_json"] = mustJSON(cranLinksToMaps(allLinks))
+	payload["links_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(allLinks, envInt("RPKG_CRAN_PAGE_LINK_LIMIT", 120))))
 	payload["sections_json"] = mustJSON(cranPackagePageSections(pageURL, htmlText))
 	payload["package"] = firstNonEmpty(record["Package"], fields["Package"])
 	payload["version"] = firstNonEmpty(fields["Version"], record["Version"])
@@ -987,11 +1025,12 @@ func cranPackagePagePayload(pageURL, htmlText string, record cranRecord) map[str
 	payload["reverse_suggests_count"] = len(reverseSuggests)
 	payload["reverse_linking_to_count"] = len(reverseLinkingTo)
 	payload["reverse_enhances_count"] = len(reverseEnhances)
-	payload["reverse_depends_json"] = mustJSON(cranLinksToMaps(reverseDepends))
-	payload["reverse_imports_json"] = mustJSON(cranLinksToMaps(reverseImports))
-	payload["reverse_suggests_json"] = mustJSON(cranLinksToMaps(reverseSuggests))
-	payload["reverse_linking_to_json"] = mustJSON(cranLinksToMaps(reverseLinkingTo))
-	payload["reverse_enhances_json"] = mustJSON(cranLinksToMaps(reverseEnhances))
+	reverseLinkLimit := envInt("RPKG_CRAN_PAGE_REVERSE_LINK_LIMIT", 20)
+	payload["reverse_depends_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(reverseDepends, reverseLinkLimit)))
+	payload["reverse_imports_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(reverseImports, reverseLinkLimit)))
+	payload["reverse_suggests_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(reverseSuggests, reverseLinkLimit)))
+	payload["reverse_linking_to_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(reverseLinkingTo, reverseLinkLimit)))
+	payload["reverse_enhances_json"] = mustJSON(cranLinksToMaps(limitedCRANLinks(reverseEnhances, reverseLinkLimit)))
 	payload["all_links_count"] = len(allLinks)
 	payload["page_url"] = pageURL
 	payload["source_method"] = "cran_package_index_html"
@@ -1021,6 +1060,8 @@ func cranPackagePageFields(htmlText string) map[string]string {
 
 func cranPackagePageFieldRows(baseURL, htmlText string) []map[string]any {
 	out := make([]map[string]any, 0)
+	valueLimit := envInt("RPKG_CRAN_PAGE_FIELD_VALUE_LIMIT", 2000)
+	linkLimit := envInt("RPKG_CRAN_PAGE_FIELD_LINK_LIMIT", 20)
 	for _, match := range trRE.FindAllStringSubmatch(htmlText, -1) {
 		if len(match) < 2 {
 			continue
@@ -1035,8 +1076,8 @@ func cranPackagePageFieldRows(baseURL, htmlText string) []map[string]any {
 		}
 		out = append(out, map[string]any{
 			"key":   key,
-			"value": strings.TrimSpace(cells[1]),
-			"links": cranLinksToMaps(withLinkSection(cranLinksInHTML(baseURL, match[1]), key, "field")),
+			"value": truncate(strings.TrimSpace(cells[1]), valueLimit),
+			"links": cranLinksToMaps(limitedCRANLinks(withLinkSection(cranLinksInHTML(baseURL, match[1]), key, "field"), linkLimit)),
 		})
 	}
 	return out
@@ -1163,6 +1204,8 @@ func cranAllPageLinks(baseURL, htmlText string, fieldRows []map[string]any) []cr
 
 func cranPackagePageSections(baseURL, htmlText string) []map[string]any {
 	out := make([]map[string]any, 0)
+	textLimit := envInt("RPKG_CRAN_PAGE_SECTION_TEXT_LIMIT", 2000)
+	linkLimit := envInt("RPKG_CRAN_PAGE_SECTION_LINK_LIMIT", 20)
 	for _, heading := range []string{"Documentation:", "Downloads:", "Reverse dependencies:", "Linking:"} {
 		sectionHTML := htmlSectionAfter(htmlText, heading)
 		if sectionHTML == "" {
@@ -1170,8 +1213,8 @@ func cranPackagePageSections(baseURL, htmlText string) []map[string]any {
 		}
 		out = append(out, map[string]any{
 			"heading": strings.TrimSuffix(heading, ":"),
-			"text":    truncate(stripTags(sectionHTML), 4000),
-			"links":   cranLinksToMaps(cranLinksInHTML(baseURL, sectionHTML)),
+			"text":    truncate(stripTags(sectionHTML), textLimit),
+			"links":   cranLinksToMaps(limitedCRANLinks(cranLinksInHTML(baseURL, sectionHTML), linkLimit)),
 		})
 	}
 	return out
@@ -1211,10 +1254,22 @@ func uniqueCRANLinks(rows []cranPageLink) []cranPageLink {
 	return out
 }
 
+func limitedCRANLinks(rows []cranPageLink, limit int) []cranPageLink {
+	if limit <= 0 || len(rows) <= limit {
+		return rows
+	}
+	return rows[:limit]
+}
+
 func cranLinksToMaps(rows []cranPageLink) []map[string]string {
 	out := make([]map[string]string, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, map[string]string{"label": row.Label, "url": row.URL, "section": row.Section, "type": row.Type})
+		out = append(out, map[string]string{
+			"label":   truncate(row.Label, 240),
+			"url":     truncate(row.URL, 500),
+			"section": truncate(row.Section, 120),
+			"type":    truncate(row.Type, 80),
+		})
 	}
 	return out
 }
@@ -1402,8 +1457,8 @@ func collectCRANPackageArtifacts(record cranRecord, pageURL string, links []cran
 			"content_length":    len(body),
 			"content_sha256":    shaHex(string(body)),
 			"title":             firstNonEmpty(firstTitle(string(body)), link.Label),
-			"text_content":      truncate(textContent, envInt("RPKG_CRAN_ARTIFACT_TEXT_LIMIT", 30000)),
-			"html_content":      truncate(htmlContent, envInt("RPKG_CRAN_ARTIFACT_HTML_LIMIT", 50000)),
+			"text_content":      truncate(textContent, envInt("RPKG_CRAN_ARTIFACT_TEXT_LIMIT", 8000)),
+			"html_content":      truncate(htmlContent, envInt("RPKG_CRAN_ARTIFACT_HTML_LIMIT", 8000)),
 			"source_method":     "cran_package_artifact",
 			"parser_version":    1,
 			"collection_status": "collected",
@@ -1475,38 +1530,57 @@ func cranManualTopicPayload(record cranRecord, pageURL, sourcePackageURL, rdPath
 	keywords := rdSectionValues(rdText, "keyword")
 	concepts := rdSectionValues(rdText, "concept")
 	topicName := firstNonEmpty(rdFirstSection(rdText, "name"), firstString(aliases), rdBaseName(rdPath))
+	fieldLimit := envInt("RPKG_CRAN_RD_FIELD_LIMIT", 12000)
+	argumentLimit := envInt("RPKG_CRAN_RD_ARGUMENT_LIMIT", 80)
+	argumentTextLimit := envInt("RPKG_CRAN_RD_ARGUMENT_TEXT_LIMIT", 2000)
+	customSectionLimit := envInt("RPKG_CRAN_RD_CUSTOM_SECTION_LIMIT", 20)
 	payload := map[string]any{
-		"package":            record["Package"],
-		"version":            record["Version"],
-		"page_url":           pageURL,
-		"source_package_url": sourcePackageURL,
-		"rd_path":            rdPath,
-		"topic_name":         rdPlainText(topicName),
-		"title":              rdPlainText(rdFirstSection(rdText, "title")),
-		"description":        rdPlainText(rdFirstSection(rdText, "description")),
-		"usage":              rdPlainText(rdFirstSection(rdText, "usage")),
-		"arguments_json":     mustJSON(rdArguments(rdFirstSection(rdText, "arguments"))),
-		"details":            rdPlainText(rdFirstSection(rdText, "details")),
-		"value":              rdPlainText(rdFirstSection(rdText, "value")),
-		"format_text":        rdPlainText(rdFirstSection(rdText, "format")),
-		"source_text":        rdPlainText(rdFirstSection(rdText, "source")),
-		"examples":           rdPlainText(rdFirstSection(rdText, "examples")),
-		"seealso":            rdPlainText(rdFirstSection(rdText, "seealso")),
-		"keywords_json":      mustJSON(rdPlainTextList(keywords)),
-		"aliases_json":       mustJSON(rdPlainTextList(aliases)),
-		"concepts_json":      mustJSON(rdPlainTextList(concepts)),
-		"doc_type":           rdPlainText(rdFirstSection(rdText, "docType")),
-		"encoding":           rdPlainText(rdFirstSection(rdText, "encoding")),
-		"custom_sections_json": mustJSON(rdCustomSections(rdText)),
-		"note":               rdPlainText(rdFirstSection(rdText, "note")),
-		"author":             rdPlainText(rdFirstSection(rdText, "author")),
-		"references_text":    rdPlainText(rdFirstSection(rdText, "references")),
-		"raw_rd":             truncate(rdText, envInt("RPKG_CRAN_RD_RAW_LIMIT", 50000)),
-		"source_method":      "cran_source_rd_manual",
-		"parser_version":     1,
-		"collection_status":  "collected",
+		"package":              record["Package"],
+		"version":              record["Version"],
+		"page_url":             pageURL,
+		"source_package_url":   sourcePackageURL,
+		"rd_path":              rdPath,
+		"topic_name":           rdPlainText(topicName),
+		"title":                rdPlainText(rdFirstSection(rdText, "title")),
+		"description":          truncate(rdPlainText(rdFirstSection(rdText, "description")), fieldLimit),
+		"usage":                truncate(rdPlainText(rdFirstSection(rdText, "usage")), fieldLimit),
+		"arguments_json":       mustJSON(limitRDMapRows(rdArguments(rdFirstSection(rdText, "arguments")), argumentLimit, argumentTextLimit)),
+		"details":              truncate(rdPlainText(rdFirstSection(rdText, "details")), fieldLimit),
+		"value":                truncate(rdPlainText(rdFirstSection(rdText, "value")), fieldLimit),
+		"format_text":          truncate(rdPlainText(rdFirstSection(rdText, "format")), fieldLimit),
+		"source_text":          truncate(rdPlainText(rdFirstSection(rdText, "source")), fieldLimit),
+		"examples":             truncate(rdPlainText(rdFirstSection(rdText, "examples")), fieldLimit),
+		"seealso":              truncate(rdPlainText(rdFirstSection(rdText, "seealso")), fieldLimit),
+		"keywords_json":        mustJSON(rdPlainTextList(keywords)),
+		"aliases_json":         mustJSON(rdPlainTextList(aliases)),
+		"concepts_json":        mustJSON(rdPlainTextList(concepts)),
+		"doc_type":             rdPlainText(rdFirstSection(rdText, "docType")),
+		"encoding":             rdPlainText(rdFirstSection(rdText, "encoding")),
+		"custom_sections_json": mustJSON(limitRDMapRows(rdCustomSections(rdText), customSectionLimit, fieldLimit)),
+		"note":                 truncate(rdPlainText(rdFirstSection(rdText, "note")), fieldLimit),
+		"author":               truncate(rdPlainText(rdFirstSection(rdText, "author")), fieldLimit),
+		"references_text":      truncate(rdPlainText(rdFirstSection(rdText, "references")), fieldLimit),
+		"raw_rd":               truncate(rdText, envInt("RPKG_CRAN_RD_RAW_LIMIT", 12000)),
+		"source_method":        "cran_source_rd_manual",
+		"parser_version":       1,
+		"collection_status":    "collected",
 	}
 	return payload
+}
+
+func limitRDMapRows(rows []map[string]string, rowLimit, valueLimit int) []map[string]string {
+	if rowLimit > 0 && len(rows) > rowLimit {
+		rows = rows[:rowLimit]
+	}
+	out := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		next := make(map[string]string, len(row))
+		for key, value := range row {
+			next[key] = truncate(value, valueLimit)
+		}
+		out = append(out, next)
+	}
+	return out
 }
 
 func rdBaseName(rdPath string) string {
@@ -1774,17 +1848,17 @@ func collectRWebsites(limit, feedLimit, linkLimit, sitemapLimit int) ([]genericE
 		payload := fetchWebsitePayload(targetURL)
 		events = append(events, newGenericEvent("rpkg.r_website.fetch_snapshot.v1", "r_website_seed_fetcher", targetURL, "R-Web", "", "", "", payload))
 		for _, packageName := range packageMentionsInText(stringAny(payload["page_text"]), mentions) {
-				events = append(events, newGenericEvent("rpkg.r_website.package_mention_snapshot.v1", "r_website_seed_fetcher", targetURL, "R-Web", packageName, "", "", map[string]any{
-					"source_url":        targetURL,
-					"package":           packageName,
-					"repository":        "CRAN",
-					"mention_context":   packageName,
-					"confidence":        0.4,
-					"detected_at":       utcNow(),
-					"source":            "r_website_seed_fetcher",
-					"source_method":     "html_text_scan_no_api",
-					"collection_status": "collected",
-				}))
+			events = append(events, newGenericEvent("rpkg.r_website.package_mention_snapshot.v1", "r_website_seed_fetcher", targetURL, "R-Web", packageName, "", "", map[string]any{
+				"source_url":        targetURL,
+				"package":           packageName,
+				"repository":        "CRAN",
+				"mention_context":   packageName,
+				"confidence":        0.4,
+				"detected_at":       utcNow(),
+				"source":            "r_website_seed_fetcher",
+				"source_method":     "html_text_scan_no_api",
+				"collection_status": "collected",
+			}))
 		}
 		for _, linkURL := range anyStringSlice(payload["link_urls"]) {
 			if linkLimit > 0 && linkCount >= linkLimit {
@@ -2048,17 +2122,17 @@ func collectBibliometricMentions(records []cranRecord, limit int) ([]genericEven
 			top = mapAny(results[0])
 		}
 		payload := map[string]any{
-			"package":              packageName,
-			"version":              record["Version"],
-			"query":                query,
-			"result_count":         intString(meta["count"]),
-			"top_work_id":          stringAny(top["id"]),
-			"top_work_title":       stringAny(top["title"]),
-			"top_work_year":        intString(top["publication_year"]),
-			"top_work_cited_by":    intString(top["cited_by_count"]),
-			"source_method":        "openalex_works_search",
-			"collection_status":    "collected",
-			"confidence":           "phrase_search",
+			"package":           packageName,
+			"version":           record["Version"],
+			"query":             query,
+			"result_count":      intString(meta["count"]),
+			"top_work_id":       stringAny(top["id"]),
+			"top_work_title":    stringAny(top["title"]),
+			"top_work_year":     intString(top["publication_year"]),
+			"top_work_cited_by": intString(top["cited_by_count"]),
+			"source_method":     "openalex_works_search",
+			"collection_status": "collected",
+			"confidence":        "phrase_search",
 		}
 		events = append(events, newGenericEvent("rpkg.bibliometric.mention_snapshot.v1", "openalex_works_search", sourceURL, "OpenAlex", packageName, record["Version"], "", payload))
 		count++
@@ -2322,32 +2396,32 @@ func youtubePageEvents(seeds []map[string]any, limit int) []genericEvent {
 		ref := parseYouTubeRef(targetURL)
 		if ref["parsed_video_id"] != "" {
 			payload := map[string]any{
-				"youtube_video_id":      ref["parsed_video_id"],
-				"youtube_channel_id":    "",
-				"playlist_ids_json":     "[]",
-				"video_title":           stringAny(page["title"]),
-				"video_description":     stringAny(page["description"]),
-				"canonical_url":         targetURL,
-				"thumbnail_url":         stringAny(page["og_image"]),
-				"published_at":          "",
-				"duration_seconds":      "0",
-				"view_count":            "0",
-				"like_count":            "0",
-				"comment_count":         "0",
-				"favorite_count":        "0",
-				"caption_available":     "0",
+				"youtube_video_id":       ref["parsed_video_id"],
+				"youtube_channel_id":     "",
+				"playlist_ids_json":      "[]",
+				"video_title":            stringAny(page["title"]),
+				"video_description":      stringAny(page["description"]),
+				"canonical_url":          targetURL,
+				"thumbnail_url":          stringAny(page["og_image"]),
+				"published_at":           "",
+				"duration_seconds":       "0",
+				"view_count":             "0",
+				"like_count":             "0",
+				"comment_count":          "0",
+				"favorite_count":         "0",
+				"caption_available":      "0",
 				"default_audio_language": "",
-				"default_language":      "",
-				"language_code":         firstNonEmpty(stringAny(seedPayload["language_hint"]), "und"),
-				"tags_json":             "[]",
-				"thumbnail_urls_json":   "{}",
-				"channel_title":         stringAny(seedPayload["title"]),
-				"privacy_status":        "",
-				"source_method":         "youtube_public_html_no_data_api",
-				"source_tag":            "r_project_ecosystem_youtube",
-				"source_category":       stringAny(seedPayload["category"]),
-				"source_confidence":     firstNonEmpty(stringAny(seedPayload["source_confidence"]), "html_discovered"),
-				"collection_status":     "collected",
+				"default_language":       "",
+				"language_code":          firstNonEmpty(stringAny(seedPayload["language_hint"]), "und"),
+				"tags_json":              "[]",
+				"thumbnail_urls_json":    "{}",
+				"channel_title":          stringAny(seedPayload["title"]),
+				"privacy_status":         "",
+				"source_method":          "youtube_public_html_no_data_api",
+				"source_tag":             "r_project_ecosystem_youtube",
+				"source_category":        stringAny(seedPayload["category"]),
+				"source_confidence":      firstNonEmpty(stringAny(seedPayload["source_confidence"]), "html_discovered"),
+				"collection_status":      "collected",
 			}
 			finalizeYouTubeVideoPayload(payload)
 			events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_public_html", targetURL, "R-YouTube", "", "", "", payload))
@@ -3173,11 +3247,11 @@ func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{
-		"video_title":    stringAny(decoded["title"]),
-		"thumbnail_url":  stringAny(decoded["thumbnail_url"]),
-		"channel_title":  stringAny(decoded["author_name"]),
-		"canonical_url":  canonicalURL,
-		"source_oembed":  sourceURL,
+		"video_title":   stringAny(decoded["title"]),
+		"thumbnail_url": stringAny(decoded["thumbnail_url"]),
+		"channel_title": stringAny(decoded["author_name"]),
+		"canonical_url": canonicalURL,
+		"source_oembed": sourceURL,
 	}, nil
 }
 
