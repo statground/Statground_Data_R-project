@@ -341,47 +341,11 @@ sources:
     language: en
     tags: [R, rstats, memes, reddit]
 
-  - id: reddit:r/R_Programming
-    type: reddit_subreddit
-    source_type: community_archive
-    platform: reddit
-    name: r/R_Programming archive/closed
-    subreddit: R_Programming
-    limit: 50
-    max_items: 50
-    json_fallback: true
-    language: en
-    tags: [R, archive, reddit]
-
-  - id: reddit:r/learnR
-    type: reddit_subreddit
-    source_type: community_archive
-    platform: reddit
-    name: r/learnR restricted/archive
-    subreddit: learnR
-    limit: 50
-    max_items: 50
-    json_fallback: true
-    language: en
-    tags: [R, learning, archive, reddit]
-
-  - id: reddit:r/RStatsProgram
-    type: reddit_subreddit
-    source_type: community_archive
-    platform: reddit
-    name: r/RStatsProgram archive
-    subreddit: RStatsProgram
-    limit: 50
-    max_items: 50
-    json_fallback: true
-    language: en
-    tags: [R, archive, reddit]
-
   # ---------------------------------------------------------------------------
   # Mastodon/Fediverse. API 키 없이 태그 RSS → no-auth public tag API fallback.
   # Instances can disable public preview; such failures are expected and logged.
   # ---------------------------------------------------------------------------
-  - id: mastodon:tag
+  - id: mastodon:tag:rstats
     type: mastodon_tag
     source_type: social_tag
     platform: mastodon
@@ -398,7 +362,7 @@ sources:
     language: en
     tags: [R, rstats, Mastodon]
 
-  - id: mastodon:tag
+  - id: mastodon:tag:tidytuesday
     type: mastodon_tag
     source_type: social_tag
     platform: mastodon
@@ -471,69 +435,6 @@ sources:
     tags: [R, rstats, Fediverse, Mastodon, Guppe]
 
   # ---------------------------------------------------------------------------
-  # Korean communities: DCInside and Korea R community pages.
-  # ---------------------------------------------------------------------------
-  - id: dcinside:rstatistics
-    type: dcinside_gallery
-    source_type: korean_community_forum
-    platform: dcinside
-    name: DCInside R(언어) 마이너 갤러리
-    gallery_id: rstatistics
-    source_url: https://m.dcinside.com/board/rstatistics
-    pages: 2
-    max_items: 120
-    language: ko
-    tags: [R, DCInside, 한국어]
-
-  - id: dcinside:rstudio
-    type: dcinside_gallery
-    source_type: korean_community_forum
-    platform: dcinside
-    name: DCInside Rstudio 마이너 갤러리
-    gallery_id: rstudio
-    source_url: https://m.dcinside.com/board/rstudio
-    pages: 2
-    max_items: 120
-    language: ko
-    tags: [R, RStudio, DCInside, 한국어]
-
-  - id: korea:r-user-group
-    type: html_links
-    source_type: korean_community_site
-    platform: web
-    name: Korea R User Group / 한국 R 사용자회
-    url: https://r2bit.com/
-    emit_page_item: true
-    include_regex: "R|Seoul|Meetup|사용자|통계|데이터|r2bit"
-    max_items: 120
-    language: ko
-    tags: [R, Korea R User Group, 한국어]
-
-  - id: korea:seoul-r-meetup
-    type: html_links
-    source_type: korean_community_site
-    platform: web
-    name: Seoul R Meetup
-    url: https://r2bit.com/seoul-r/
-    emit_page_item: true
-    include_regex: "R|Meetup|Shiny|tidyverse|Quarto|RMarkdown|데이터"
-    max_items: 120
-    language: ko
-    tags: [R, Seoul R Meetup, 한국어]
-
-  - id: korea:r-kor
-    type: html_links
-    source_type: korean_community_site
-    platform: web
-    name: R Korea
-    url: https://r-kor.org/
-    emit_page_item: true
-    include_regex: "R|Korea|한국|커뮤니티|사용자|데이터"
-    max_items: 120
-    language: ko
-    tags: [R, R Korea, 한국어]
-
-  # ---------------------------------------------------------------------------
   # Global community/help channels with no-key RSS/HTML alternatives.
   # ---------------------------------------------------------------------------
   - id: community:stackoverflow:r
@@ -569,18 +470,6 @@ sources:
     max_items: 150
     language: en
     tags: [R, Posit Community, forum]
-
-  - id: community:bioconductor:support-index
-    type: html_links
-    source_type: community_support_index
-    platform: bioconductor
-    name: Bioconductor Support and Community Forum index
-    url: https://bioconductor.org/help/support/
-    emit_page_item: true
-    include_regex: "Support|Community|Zulip|Mastodon|Bioc-devel|forum|Bioconductor"
-    max_items: 120
-    language: en
-    tags: [R, Bioconductor, support]
 
   - id: community:bioconductor:build-rss-info
     type: html_links
@@ -661,27 +550,3 @@ sources:
     max_items: 200
     language: en
     tags: [R, R-universe, rOpenSci, packages]
-
-  - id: community:rladies
-    type: html_links
-    source_type: user_group_index
-    platform: r-community
-    name: R-Ladies Community Explorer
-    url: https://r-community.github.io/user-groups/rladies.html
-    emit_page_item: true
-    include_regex: "R-Ladies|Chapter|Meetup|Korea|Seoul|R"
-    max_items: 300
-    language: en
-    tags: [R, R-Ladies, user-groups]
-
-  - id: community:r-user-groups-worldwide
-    type: html_links
-    source_type: user_group_index
-    platform: r-community
-    name: R User Groups Worldwide
-    url: https://r-community.github.io/user-groups/rugs.html
-    emit_page_item: true
-    include_regex: "R|Korea|Seoul|Meetup|User Group|Tidyverse"
-    max_items: 400
-    language: en
-    tags: [R, user-groups, meetup]

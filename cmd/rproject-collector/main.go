@@ -126,6 +126,36 @@ type clickHouseQueryConfig struct {
 	Timeout  time.Duration
 }
 
+type communityDigestItem struct {
+	ExternalID   string `json:"external_id"`
+	Title        string `json:"title"`
+	CanonicalURL string `json:"canonical_url"`
+	Author       string `json:"author,omitempty"`
+	PublishedAt  string `json:"published_at,omitempty"`
+	SourceName   string `json:"source_name,omitempty"`
+	Context      string `json:"context,omitempty"`
+}
+
+type communityDigestRecord struct {
+	DigestID         string
+	DigestDate       string
+	SourceType       string
+	SourceID         string
+	SourceName       string
+	Platform         string
+	SourceURL        string
+	Title            string
+	Summary          string
+	ItemCount        int
+	DedupedItemCount int
+	Items            []communityDigestItem
+	Model            string
+	PromptHash       string
+	Status           string
+	GeneratedAt      string
+	PayloadHash      string
+}
+
 type publisher struct {
 	topic        string
 	brokers      []string
@@ -195,7 +225,7 @@ type atomLink struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: rproject-collector <package|youtube|community|mastodon> [flags]"))
+		fatal(errors.New("usage: rproject-collector <package|youtube|community|community-digest|mastodon> [flags]"))
 	}
 	ctx := context.Background()
 	var err error
@@ -206,6 +236,8 @@ func main() {
 		err = runYouTube(ctx, os.Args[2:])
 	case "community":
 		err = runCommunity(ctx, os.Args[2:])
+	case "community-digest":
+		err = runCommunityDigest(ctx, os.Args[2:])
 	case "mastodon":
 		err = runMastodon(ctx, os.Args[2:])
 	default:
@@ -393,6 +425,469 @@ func communityRowEvent(row map[string]any) genericEvent {
 	source := firstNonEmpty(stringAny(row["source_id"]), stringAny(row["source_name"]), "r_community_sources_jsonl")
 	observedAt := firstNonEmpty(stringAny(row["published_at"]), stringAny(row["collected_at"]))
 	return newGenericEvent("r.community.item.v1", source, sourceURL, "R-Community", "", "", observedAt, payload)
+}
+
+func runCommunityDigest(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("community-digest", flag.ExitOnError)
+	topic := fs.String("topic", envString("R_COMMUNITY_KAFKA_TOPIC", defaultCommunityTopic), "Kafka topic for digest events")
+	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "print digest events instead of Kafka")
+	insertClickHouse := fs.Bool("insert-clickhouse", envBool("R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE", false), "insert digest rows directly into ClickHouse service table")
+	sinceDays := fs.Int("since-days", envInt("R_COMMUNITY_DIGEST_SINCE_DAYS", 14), "digest source rows newer than N days; -1 means all")
+	groupLimit := fs.Int("group-limit", envInt("R_COMMUNITY_DIGEST_GROUP_LIMIT", 0), "max digest groups to generate; 0 means all")
+	itemLimit := fs.Int("items-per-digest", envInt("R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST", 80), "max source links kept in each digest")
+	model := fs.String("model", envString("R_COMMUNITY_DIGEST_MODEL", envString("MASTODON_TRANSLATION_MODEL", envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.5-flash-lite"))), "AI model for Korean daily digest")
+	allowFallback := fs.Bool("allow-fallback", envBool("R_COMMUNITY_DIGEST_ALLOW_FALLBACK", false), "allow deterministic non-AI digest when no AI provider is configured")
+	fs.Parse(args)
+
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return err
+	}
+	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback)
+	if err != nil {
+		return err
+	}
+	if *insertClickHouse {
+		if err := insertCommunityDigestRecords(ctx, cfg, records); err != nil {
+			return err
+		}
+		fmt.Printf("inserted=%d table=Data_R_Community_Service.r_community_daily_digest\n", len(records))
+		return nil
+	}
+	events := communityDigestEvents(records)
+	pub := newPublisher(*topic, "statground-rcommunity-digest", *dryRun)
+	if err := pub.validate(ctx); err != nil {
+		return err
+	}
+	if err := pub.publishGeneric(ctx, events); err != nil {
+		return err
+	}
+	fmt.Printf("published=%d topic=%s\n", len(events), *topic)
+	return nil
+}
+
+func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, sinceDays, groupLimit, itemLimit int, model string, allowFallback bool) ([]communityDigestRecord, error) {
+	rows, err := fetchCommunityDigestSourceRows(cfg, sinceDays)
+	if err != nil {
+		return nil, err
+	}
+	records := groupCommunityDigestRows(rows, itemLimit)
+	if groupLimit > 0 && len(records) > groupLimit {
+		records = records[:groupLimit]
+	}
+	ai := newAIClient(time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second)
+	if !ai.enabled() && !allowFallback {
+		return nil, errors.New("community digest requires an AI provider key; set OPENROUTER_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, or GH_MODELS_API_KEY")
+	}
+	for i := range records {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		prompt := communityDigestPrompt(records[i])
+		records[i].PromptHash = shaHex(prompt)
+		if ai.enabled() {
+			summary, err := ai.chat(prompt, model)
+			if err != nil {
+				if !allowFallback {
+					return nil, fmt.Errorf("digest %s AI summary: %w", records[i].DigestID, err)
+				}
+				records[i].Summary = fallbackCommunityDigestSummary(records[i])
+				records[i].Status = "fallback_ai_error"
+			} else {
+				records[i].Summary = cleanCommunityDigestSummary(summary)
+				records[i].Status = "generated"
+			}
+		} else {
+			records[i].Summary = fallbackCommunityDigestSummary(records[i])
+			records[i].Status = "fallback_no_ai"
+		}
+		records[i].Model = model
+		records[i].GeneratedAt = nowKST().Format(time.RFC3339)
+		if strings.TrimSpace(records[i].Summary) == "" {
+			records[i].Summary = fallbackCommunityDigestSummary(records[i])
+			records[i].Status = firstNonEmpty(records[i].Status, "fallback_empty")
+		}
+		records[i].PayloadHash = communityDigestPayloadHash(records[i])
+	}
+	return records, nil
+}
+
+func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([]map[string]any, error) {
+	allowed := splitCSV(envString("R_COMMUNITY_DIGEST_SOURCE_TYPES", "community_forum,qna_feed,social_tag,fediverse_group"))
+	quoted := make([]string, 0, len(allowed))
+	for _, value := range allowed {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			quoted = append(quoted, clickHouseQuoteString(value))
+		}
+	}
+	if len(quoted) == 0 {
+		return nil, errors.New("R_COMMUNITY_DIGEST_SOURCE_TYPES resolved to an empty set")
+	}
+	sinceWhere := ""
+	if sinceDays >= 0 {
+		sinceWhere = fmt.Sprintf(" AND toDate(coalesce(original_published_at, collected_at)) >= addDays(today('Asia/Seoul'), -%d)", sinceDays)
+	}
+	query := fmt.Sprintf(`
+SELECT
+    toString(toDate(coalesce(original_published_at, collected_at))) AS digest_date,
+    external_id,
+    source_id,
+    source_name,
+    source_type,
+    platform,
+    source_url,
+    canonical_url,
+    title,
+    summary,
+    raw_json,
+    author,
+    language,
+    ifNull(formatDateTime(original_published_at, '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul'), '') AS published_at_text,
+    formatDateTime(collected_at, '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul') AS collected_at_text
+FROM Data_R_Community_Service.v_r_community_latest
+WHERE source_type IN (%s)
+  AND notEmpty(title)
+  AND notEmpty(canonical_url)
+  %s
+ORDER BY digest_date DESC, source_type ASC, source_id ASC, published_at_text DESC, collected_at_text DESC, title ASC
+FORMAT JSONEachRow`, strings.Join(quoted, ","), sinceWhere)
+	return cfg.queryJSONEachRow(query)
+}
+
+func groupCommunityDigestRows(rows []map[string]any, itemLimit int) []communityDigestRecord {
+	type groupState struct {
+		record communityDigestRecord
+		raw    int
+	}
+	groups := map[string]*groupState{}
+	order := make([]string, 0)
+	seenCanonical := map[string]bool{}
+	for _, row := range rows {
+		digestDate := firstNonEmpty(stringAny(row["digest_date"]), nowKST().Format("2006-01-02"))
+		sourceType := stringAny(row["source_type"])
+		sourceID := stringAny(row["source_id"])
+		sourceName := firstNonEmpty(stringAny(row["source_name"]), sourceID)
+		platform := stringAny(row["platform"])
+		key := strings.Join([]string{digestDate, sourceType, sourceID, sourceName, platform}, "\x00")
+		state := groups[key]
+		if state == nil {
+			digestID := "sha256:" + shaHex(strings.Join([]string{digestDate, sourceType, sourceID, sourceName, platform}, "\n"))
+			state = &groupState{record: communityDigestRecord{
+				DigestID:   digestID,
+				DigestDate: digestDate,
+				SourceType: sourceType,
+				SourceID:   sourceID,
+				SourceName: sourceName,
+				Platform:   platform,
+				SourceURL:  stringAny(row["source_url"]),
+				Title:      fmt.Sprintf("%s %s 일일 요약", digestDate, sourceName),
+			}}
+			groups[key] = state
+			order = append(order, key)
+		}
+		state.raw++
+		canonical := stringAny(row["canonical_url"])
+		canonicalKey := communityDigestCanonicalKey(canonical)
+		if canonicalKey != "" {
+			if seenCanonical[canonicalKey] {
+				continue
+			}
+			seenCanonical[canonicalKey] = true
+		}
+		if len(state.record.Items) >= itemLimit {
+			continue
+		}
+		state.record.Items = append(state.record.Items, communityDigestItem{
+			ExternalID:   stringAny(row["external_id"]),
+			Title:        stringAny(row["title"]),
+			CanonicalURL: canonical,
+			Author:       stringAny(row["author"]),
+			PublishedAt:  firstNonEmpty(stringAny(row["published_at_text"]), stringAny(row["collected_at_text"])),
+			SourceName:   sourceName,
+			Context:      communityDigestItemContext(row),
+		})
+	}
+	records := make([]communityDigestRecord, 0, len(order))
+	for _, key := range order {
+		state := groups[key]
+		if state == nil || len(state.record.Items) == 0 {
+			continue
+		}
+		state.record.ItemCount = state.raw
+		state.record.DedupedItemCount = len(state.record.Items)
+		records = append(records, state.record)
+	}
+	return records
+}
+
+func communityDigestItemContext(row map[string]any) string {
+	parts := make([]string, 0, 4)
+	add := func(value string) {
+		value = strings.TrimSpace(removeBoardURLs(stripTags(value)))
+		if value == "" {
+			return
+		}
+		for _, existing := range parts {
+			if existing == value {
+				return
+			}
+		}
+		parts = append(parts, truncateRunes(value, 1800))
+	}
+	add(stringAny(row["summary"]))
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(stringAny(row["raw_json"])), &raw); err == nil {
+		add(stringAny(raw["text_excerpt"]))
+		if detail, _ := raw["summary_detail"].(map[string]any); detail != nil {
+			add(stringAny(detail["value"]))
+		}
+		if content, _ := raw["content"].([]any); len(content) > 0 {
+			contentParts := make([]string, 0, minInt(3, len(content)))
+			for _, entry := range content {
+				if item, _ := entry.(map[string]any); item != nil {
+					text := strings.TrimSpace(stringAny(item["value"]))
+					if text != "" {
+						contentParts = append(contentParts, text)
+					}
+				}
+				if len(contentParts) >= 3 {
+					break
+				}
+			}
+			add(strings.Join(contentParts, "\n"))
+		}
+	}
+	return truncateRunes(strings.Join(parts, "\n"), 3000)
+}
+
+func communityDigestPrompt(record communityDigestRecord) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are a community activity analyst and meeting-minutes editor for the Web-R Korean website.\n")
+	fmt.Fprintf(&b, "Analyze one day of community posts collected from a single source path. The output must be written in Korean.\n\n")
+	fmt.Fprintf(&b, "Source path: %s\nDate: %s\nSource type: %s\nPlatform: %s\nItems after URL dedupe: %d\n\n", record.SourceName, record.DigestDate, record.SourceType, record.Platform, len(record.Items))
+	b.WriteString("Goal:\n")
+	b.WriteString("- Do not merely compress the items. Explain what happened during the day, preserving chronology, context, issues, mood, decisions, technical topics, jokes, conflicts, discoveries, and unresolved points when the evidence supports them.\n")
+	b.WriteString("- Write so a reader can later understand the day of activity without reading the original posts.\n")
+	b.WriteString("- Use only the provided metadata and excerpts. Do not invent missing replies, decisions, people, conflicts, or reactions.\n")
+	b.WriteString("- Do not republish source bodies. Do not include URLs, Markdown links, HTML links, or long verbatim quotes. The original link list is stored separately.\n")
+	b.WriteString("- Keep technical details specific when they are visible in the collected excerpts.\n\n")
+	b.WriteString("Required output:\n")
+	b.WriteString("- Return only a safe HTML fragment in Korean. The first character must be '<'.\n")
+	b.WriteString("- Allowed tags: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>.\n")
+	b.WriteString("- Never use Markdown headings, Markdown bullets, tables, HTML <a>, href attributes, images, scripts, styles, iframes, or raw URLs.\n")
+	b.WriteString("- Use sections such as <h2>하루 전체 요약</h2>, <h2>주요 토픽</h2>, <h2>시간 흐름</h2>, <h2>기술/운영 포인트</h2>, <h2>액션 아이템</h2>, and <h2>커뮤니티 분위기</h2> when they are useful.\n")
+	b.WriteString("- For sparse days, write concise natural observations. Do not include apology/limitation phrases such as '정보가 부족합니다', '정보가 매우 부족합니다', '분석하기 어렵습니다', '제공된 데이터만으로는', '알 수 없습니다', or '기록되어 있지 않습니다'. Omit unsupported details instead.\n")
+	b.WriteString("- The result should read like a polished community activity report, not a checklist of missing evidence.\n\n")
+	b.WriteString("Style:\n")
+	b.WriteString("- Korean, readable analytical report style, not a dry bullet-only summary.\n")
+	b.WriteString("- Use paragraphs and subheadings. It can be long enough to preserve context, but stay focused on evidence.\n\n")
+	b.WriteString("Collected items:\n")
+	for i, item := range record.Items {
+		if i >= 80 {
+			break
+		}
+		fmt.Fprintf(&b, "\nItem %02d\n", i+1)
+		fmt.Fprintf(&b, "Title: %s\n", truncate(stripTags(item.Title), 260))
+		if item.Author != "" {
+			fmt.Fprintf(&b, "Author: %s\n", truncate(stripTags(item.Author), 100))
+		}
+		if item.PublishedAt != "" {
+			fmt.Fprintf(&b, "Time: %s\n", item.PublishedAt)
+		}
+		if item.Context != "" {
+			fmt.Fprintf(&b, "Collected excerpt: %s\n", truncate(stripTags(item.Context), 1200))
+		}
+	}
+	return b.String()
+}
+
+func fallbackCommunityDigestSummary(record communityDigestRecord) string {
+	titles := make([]string, 0, minInt(5, len(record.Items)))
+	for _, item := range record.Items {
+		title := strings.TrimSpace(removeBoardURLs(stripTags(item.Title)))
+		if title != "" {
+			titles = append(titles, title)
+		}
+		if len(titles) >= 5 {
+			break
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<h2>하루 전체 요약</h2><p>%s에는 <strong>%s</strong> 경로에서 중복 링크를 제외하고 %d건의 R 커뮤니티 게시물이 관찰되었습니다. ", record.DigestDate, html.EscapeString(record.SourceName), record.DedupedItemCount)
+	if len(titles) > 0 {
+		fmt.Fprintf(&b, "수집된 제목 기준으로는 %s 등이 눈에 띄었습니다. ", html.EscapeString(strings.Join(titles, ", ")))
+	}
+	b.WriteString("원문 본문을 재게시하지 않는 정책에 따라 자세한 내용은 별도 원문 링크 목록으로 분리했습니다.</p>")
+	b.WriteString("<h2>주요 토픽</h2><ul>")
+	for _, title := range titles {
+		fmt.Fprintf(&b, "<li>%s</li>", html.EscapeString(title))
+	}
+	b.WriteString("</ul><h2>커뮤니티 분위기</h2><p>이날 수집된 흐름은 R 사용, 개발 도구, 시각화, 문제 해결을 중심으로 이어졌습니다.</p>")
+	return b.String()
+}
+
+func cleanCommunityDigestSummary(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```html")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	sanitized, err := sanitizeBoardHTML(value)
+	if err != nil || strings.TrimSpace(stripTags(sanitized)) == "" {
+		return safeHTML(truncateRunes(removeCommunityDigestLimitationPhrases(removeBoardURLs(stripTags(value))), 3000))
+	}
+	sanitized = removeCommunityDigestLimitationPhrases(sanitized)
+	if strings.TrimSpace(stripTags(sanitized)) == "" {
+		return fallbackCommunityDigestSummary(communityDigestRecord{DigestDate: nowKST().Format("2006-01-02"), SourceName: "R Community"})
+	}
+	return truncateRunes(sanitized, 6000)
+}
+
+func removeCommunityDigestLimitationPhrases(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	phrases := []string{
+		"제공된 데이터만으로는 명확한 액션 아이템을 도출하기 어렵습니다.",
+		"제공된 데이터만으로는 커뮤니티의 전반적인 분위기, 관심사, 긴장감, 유머, 문화적 신호 등을 분석하기에는 정보가 매우 부족합니다.",
+		"정보가 부족합니다",
+		"정보가 매우 부족합니다",
+		"데이터가 부족합니다",
+		"분석하기에는 정보가 매우 부족합니다",
+		"분석하기 어렵습니다",
+		"제공된 데이터만으로는",
+		"알 수 없습니다",
+		"기록되어 있지 않습니다",
+	}
+	for _, phrase := range phrases {
+		quoted := regexp.QuoteMeta(phrase)
+		for _, tag := range []string{"p", "li", "blockquote"} {
+			re := regexp.MustCompile(`(?is)<` + tag + `>[^<]*` + quoted + `.*?</` + tag + `>`)
+			value = re.ReplaceAllString(value, "")
+		}
+		value = strings.ReplaceAll(value, phrase, "")
+	}
+	value = regexp.MustCompile(`(?is)<li>\s*</li>`).ReplaceAllString(value, "")
+	value = regexp.MustCompile(`(?is)<p>\s*</p>`).ReplaceAllString(value, "")
+	value = regexp.MustCompile(`(?is)<ul>\s*</ul>`).ReplaceAllString(value, "")
+	value = regexp.MustCompile(`(?is)<ol>\s*</ol>`).ReplaceAllString(value, "")
+	return strings.TrimSpace(value)
+}
+
+func communityDigestEvents(records []communityDigestRecord) []genericEvent {
+	events := make([]genericEvent, 0, len(records))
+	for _, record := range records {
+		payload := communityDigestPayload(record)
+		observedAt := record.DigestDate + "T00:00:00+09:00"
+		events = append(events, newGenericEvent("r.community.daily_digest.v1", record.SourceID, record.SourceURL, "R-Community", "", "", observedAt, payload))
+	}
+	return events
+}
+
+func communityDigestPayload(record communityDigestRecord) map[string]any {
+	return map[string]any{
+		"payload_schema":       "r_community_daily_digest_v1",
+		"source_method":        "ai_daily_source_path_digest",
+		"collection_status":    record.Status,
+		"digest_id":            record.DigestID,
+		"digest_date":          record.DigestDate,
+		"source_type":          record.SourceType,
+		"source_id":            record.SourceID,
+		"source_name":          record.SourceName,
+		"platform":             record.Platform,
+		"source_url":           record.SourceURL,
+		"title":                record.Title,
+		"summary":              record.Summary,
+		"item_count":           record.ItemCount,
+		"deduped_item_count":   record.DedupedItemCount,
+		"source_items":         record.Items,
+		"model":                record.Model,
+		"prompt_hash":          record.PromptHash,
+		"generated_at":         record.GeneratedAt,
+		"payload_hash":         record.PayloadHash,
+		"copyright_policy":     "digest_and_links_only",
+		"dedupe_policy":        "canonical_url_global_per_run",
+		"excluded_source_types": []string{"korean_community_site", "korean_community_forum", "community_support_index", "user_group_index", "community_archive"},
+	}
+}
+
+func communityDigestPayloadHash(record communityDigestRecord) string {
+	payload := communityDigestPayload(record)
+	delete(payload, "payload_hash")
+	body, _ := json.Marshal(payload)
+	return shaHex(string(body))
+}
+
+func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, records []communityDigestRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("INSERT INTO Data_R_Community_Service.r_community_daily_digest FORMAT JSONEachRow\n")
+	now := nowKST()
+	for _, record := range records {
+		itemsJSON, _ := json.Marshal(record.Items)
+		row := map[string]any{
+			"digest_id":          record.DigestID,
+			"digest_date":        record.DigestDate,
+			"source_type":        record.SourceType,
+			"source_id":          record.SourceID,
+			"source_name":        record.SourceName,
+			"platform":           record.Platform,
+			"source_url":         record.SourceURL,
+			"title":              record.Title,
+			"summary":            record.Summary,
+			"item_count":         record.ItemCount,
+			"deduped_item_count": record.DedupedItemCount,
+			"source_items_json":  string(itemsJSON),
+			"model":              record.Model,
+			"prompt_hash":        record.PromptHash,
+			"generation_status":  record.Status,
+			"created_at":         parseKSTTime(record.GeneratedAt, now).Format("2006-01-02 15:04:05"),
+			"updated_at":         now.Format("2006-01-02 15:04:05"),
+			"payload_hash":       record.PayloadHash,
+			"active":             1,
+			"version":            uint64(now.UnixMilli()),
+		}
+		body, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+	}
+	return cfg.exec(ctx, b.String())
+}
+
+func communityDigestCanonicalKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return strings.ToLower(raw)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Fragment = ""
+	if parsed.Path != "/" && strings.HasSuffix(parsed.Path, "/") {
+		parsed.Path = strings.TrimRight(parsed.Path, "/")
+	}
+	q := parsed.Query()
+	for key := range q {
+		lower := strings.ToLower(key)
+		if strings.HasPrefix(lower, "utm_") || lower == "fbclid" || lower == "gclid" || lower == "ref" || lower == "source" {
+			q.Del(key)
+		}
+	}
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 type packageJobLimits struct {
@@ -6081,6 +6576,34 @@ func (cfg clickHouseQueryConfig) queryJSONEachRow(query string) ([]map[string]an
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+func (cfg clickHouseQueryConfig) exec(ctx context.Context, query string) error {
+	endpoint, err := cfg.endpoint()
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(query))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(cfg.User, cfg.Password)
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	client := &http.Client{Timeout: cfg.Timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("ClickHouse HTTP %d: %s", resp.StatusCode, truncate(string(body), 700))
+	}
+	return nil
 }
 
 func firstTitle(text string) string {

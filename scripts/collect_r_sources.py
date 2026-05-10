@@ -81,6 +81,7 @@ class RSourceCollector:
         self.errors: list[dict[str, Any]] = []
         self.counts: dict[str, int] = defaultdict(int)
         self.seen: set[str] = set()
+        self.seen_canonical: set[str] = set()
         self.started_at = dt.datetime.now(KST).isoformat(timespec="seconds")
         self.session = self._make_session()
         self.context = {
@@ -168,6 +169,9 @@ class RSourceCollector:
             return
         if item.external_id in self.seen:
             return
+        canonical_key = canonical_dedupe_key(item.canonical_url)
+        if canonical_key and canonical_key in self.seen_canonical:
+            return
         if self.since_days is not None and item.published_at:
             parsed = parse_datetime(item.published_at)
             if parsed:
@@ -178,6 +182,8 @@ class RSourceCollector:
         item.summary = compact_text(item.summary or "")[:4000] or None
         item.tags = sorted({compact_text(tag).lstrip("#") for tag in item.tags if compact_text(tag)})
         self.seen.add(item.external_id)
+        if canonical_key:
+            self.seen_canonical.add(canonical_key)
         self.items.append(item)
         self.counts[item.source_id] += 1
 
@@ -1012,6 +1018,22 @@ def canonicalize_url(url: str | None) -> str:
 def make_external_id(source_id: str, native_id: str) -> str:
     digest = hashlib.sha256(f"{source_id}\n{native_id}".encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def canonical_dedupe_key(raw_url: str | None) -> str:
+    canonical = canonicalize_url(raw_url)
+    if not canonical:
+        return ""
+    parsed = urlparse(canonical)
+    normalized = parsed._replace(
+        scheme=parsed.scheme.lower(),
+        netloc=parsed.netloc.lower(),
+        fragment="",
+    )
+    path = normalized.path
+    if path != "/" and path.endswith("/"):
+        normalized = normalized._replace(path=path.rstrip("/"))
+    return urlunparse(normalized)
 
 
 def env_bool(name: str, default: bool = False) -> bool:

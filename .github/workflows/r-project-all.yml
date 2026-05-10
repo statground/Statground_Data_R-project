@@ -300,3 +300,37 @@ jobs:
             --jsonl data/collected/r/latest.jsonl \
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --limit "$R_COMMUNITY_EVENT_LIMIT"
+
+      - name: Generate R Community daily digests
+        env:
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
+          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
+          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
+          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
+          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
+          R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
+          R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
+          R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
+          R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST: ${{ vars.R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST || '80' }}
+          R_COMMUNITY_DIGEST_MODEL: ${{ vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_DATABASE: Data_R_Community_Service
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
+        run: |
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" && "$(TZ=Asia/Seoul date +%H)" != "00" ]]; then
+            echo "Skip daily digest generation outside the KST midnight scheduled run."
+            exit 0
+          fi
+          go run ./cmd/rproject-collector community-digest \
+            --topic "$R_COMMUNITY_KAFKA_TOPIC" \
+            --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
+            --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST"
