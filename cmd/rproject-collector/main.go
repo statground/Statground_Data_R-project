@@ -499,8 +499,8 @@ func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig,
 				records[i].Status = "fallback_ai_error"
 			} else {
 				title, summary := parseCommunityDigestAIResponse(response)
-				records[i].Title = cleanCommunityDigestTitle(firstNonEmpty(title, records[i].Title), records[i])
 				records[i].Summary = cleanCommunityDigestSummary(summary)
+				records[i].Title = cleanCommunityDigestTitle(communityDigestTitleFromSummary(records[i].Summary, firstNonEmpty(title, records[i].Title), records[i]), records[i])
 				records[i].Status = "generated"
 			}
 		} else {
@@ -510,7 +510,7 @@ func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig,
 		}
 		records[i].Model = model
 		records[i].GeneratedAt = nowKST().Format(time.RFC3339)
-		records[i].Title = cleanCommunityDigestTitle(records[i].Title, records[i])
+		records[i].Title = cleanCommunityDigestTitle(communityDigestTitleFromSummary(records[i].Summary, records[i].Title, records[i]), records[i])
 		if strings.TrimSpace(records[i].Summary) == "" {
 			records[i].Summary = fallbackCommunityDigestSummary(records[i])
 			records[i].Status = firstNonEmpty(records[i].Status, "fallback_empty")
@@ -690,11 +690,13 @@ func communityDigestPrompt(record communityDigestRecord) string {
 	b.WriteString("Required output:\n")
 	b.WriteString("- Return only one JSON object. Do not wrap it in Markdown fences.\n")
 	b.WriteString("- JSON shape: {\"title\":\"Korean representative title\",\"html\":\"safe Korean HTML fragment\"}.\n")
-	b.WriteString("- The title must summarize the day's actual theme. Do not include the date, do not use a source-only title, and do not use the phrase '일일 요약'.\n")
+	b.WriteString("- The title must come from the html section named '주요 토픽'. If there is one major topic, use that topic as the title. If there are several major topics, synthesize them into one concise Korean title.\n")
+	b.WriteString("- Do not include the date, source path, platform name, or the phrase '일일 요약' in the title.\n")
+	b.WriteString("- Major topic list items should describe what people discussed. Do not use the source path or platform name itself as a topic.\n")
 	b.WriteString("- The html value must be a safe HTML fragment in Korean. The first non-space character of html must be '<'.\n")
 	b.WriteString("- Allowed tags inside html: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <mark>, <code>, <pre>, <blockquote>.\n")
 	b.WriteString("- Never use Markdown headings, Markdown bullets, tables, HTML <a>, href attributes, images, scripts, styles, iframes, or raw URLs.\n")
-	b.WriteString("- Do not force the same section template every day. Choose only useful sections and vary headings to match the evidence. The report may include overall flow, notable topics, timeline, technical/operational points, action items, or mood when those are supported.\n")
+	b.WriteString("- Include a <h2>주요 토픽</h2> section when there is any meaningful topic evidence. Do not force every other section template every day. Choose only useful sections and vary headings to match the evidence. The report may include overall flow, timeline, technical/operational points, action items, or mood when those are supported.\n")
 	b.WriteString("- For sparse days, write concise natural observations. Do not include apology/limitation phrases such as '정보가 부족합니다', '정보가 매우 부족합니다', '분석하기 어렵습니다', '제공된 데이터만으로는', '알 수 없습니다', or '기록되어 있지 않습니다'. Omit unsupported details instead.\n")
 	b.WriteString("- The result should read like a polished community activity report, not a checklist of missing evidence.\n\n")
 	b.WriteString("Style:\n")
@@ -773,26 +775,96 @@ func parseCommunityDigestAIResponse(value string) (string, string) {
 }
 
 func communityDigestFallbackTitle(record communityDigestRecord) string {
-	source := strings.TrimSpace(removeBoardURLs(stripTags(record.SourceName)))
-	lowerSource := strings.ToLower(source)
+	sourceType := strings.ToLower(strings.TrimSpace(record.SourceType))
+	platform := strings.ToLower(strings.TrimSpace(record.Platform))
 	switch {
-	case strings.Contains(lowerSource, "stack overflow"):
-		return "Stack Overflow의 R 질문과 해결 단서"
-	case strings.Contains(lowerSource, "posit"):
-		return "Posit Community의 R 사용 질문과 답변 흐름"
-	case strings.Contains(lowerSource, "mastodon") || strings.Contains(lowerSource, "rstats@"):
-		return "Fediverse에서 오간 R 커뮤니티 이야기"
-	case strings.Contains(lowerSource, "r/rstudio"):
-		return "r/RStudio의 RStudio 질문과 공유"
-	case strings.Contains(lowerSource, "r/rprogramming"):
-		return "r/rprogramming의 R 프로그래밍 논의"
-	case strings.Contains(lowerSource, "hacker news"):
-		return "Hacker News의 R 관련 토론"
-	case source != "":
-		return truncateRunes(source+"의 R 커뮤니티 흐름", 72)
+	case sourceType == "qna_feed" || strings.Contains(platform, "stackoverflow"):
+		return "R 질문과 해결 단서"
+	case sourceType == "community_forum" || strings.Contains(platform, "posit"):
+		return "R 사용 질문과 답변 흐름"
+	case sourceType == "social_tag" || sourceType == "fediverse_group" || strings.Contains(platform, "mastodon"):
+		return "R 커뮤니티 공유와 논의"
 	default:
-		return "R 커뮤니티에서 오간 이야기"
+		return "R 커뮤니티 주요 토픽"
 	}
+}
+
+func communityDigestTitleFromSummary(summary, fallback string, record communityDigestRecord) string {
+	topics := communityDigestMajorTopics(summary)
+	if len(topics) == 1 {
+		return topics[0]
+	}
+	if len(topics) > 1 {
+		return summarizeCommunityDigestTopics(topics)
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return communityDigestFallbackTitle(record)
+}
+
+func communityDigestMajorTopics(summary string) []string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return nil
+	}
+	headingRE := regexp.MustCompile(`(?is)<h[23][^>]*>\s*주요\s*토픽\s*</h[23]>(.*?)(?:<h[23][^>]*>|$)`)
+	match := headingRE.FindStringSubmatch(summary)
+	if len(match) < 2 {
+		return nil
+	}
+	itemRE := regexp.MustCompile(`(?is)<li[^>]*>(.*?)</li>`)
+	itemMatches := itemRE.FindAllStringSubmatch(match[1], -1)
+	topics := make([]string, 0, len(itemMatches))
+	for _, item := range itemMatches {
+		if len(item) < 2 {
+			continue
+		}
+		topic := strings.TrimSpace(removeBoardURLs(stripTags(item[1])))
+		topic = regexp.MustCompile(`\s+`).ReplaceAllString(topic, " ")
+		if topic != "" {
+			topics = append(topics, truncateRunes(topic, 90))
+		}
+	}
+	return topics
+}
+
+func summarizeCommunityDigestTopics(topics []string) string {
+	joined := strings.ToLower(strings.Join(topics, " "))
+	labels := make([]string, 0, 4)
+	add := func(label string, needles ...string) {
+		for _, existing := range labels {
+			if existing == label {
+				return
+			}
+		}
+		for _, needle := range needles {
+			if strings.Contains(joined, strings.ToLower(needle)) {
+				labels = append(labels, label)
+				return
+			}
+		}
+	}
+	add("R 시각화", "ggplot", "plot", "그래프", "시각화", "tidytuesday", "artwork")
+	add("R 통계 모델링", "lm", "arima", "model", "모델", "sse", "회귀", "통계")
+	add("R 패키지", "package", "패키지", "cran", "terra", "rcpp", "library")
+	add("R 개발 도구", "rstudio", "positron", "ide", "vscode", "개발 도구")
+	add("R 오류 해결", "error", "오류", "버그", "unexpected", "문제 해결")
+	add("R 데이터 작업", "data", "데이터", "dplyr", "tidyverse", "table")
+	add("R 커뮤니티 공유", "공유", "소식", "릴리스", "업데이트", "커뮤니티")
+	if len(labels) == 1 {
+		return labels[0] + " 논의"
+	}
+	if len(labels) == 2 {
+		return labels[0] + "와 " + labels[1] + " 논의"
+	}
+	if len(labels) >= 3 {
+		return labels[0] + ", " + labels[1] + ", " + labels[2] + " 관련 논의"
+	}
+	if len(topics) > 0 {
+		return truncateRunes(topics[0]+" 외 "+strconv.Itoa(len(topics)-1)+"개 토픽", 80)
+	}
+	return "R 커뮤니티 주요 토픽"
 }
 
 func cleanCommunityDigestTitle(value string, record communityDigestRecord) string {
@@ -800,11 +872,40 @@ func cleanCommunityDigestTitle(value string, record communityDigestRecord) strin
 	value = regexp.MustCompile(`\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b`).ReplaceAllString(value, "")
 	value = strings.ReplaceAll(value, "일일 요약", "")
 	value = strings.ReplaceAll(value, "하루 요약", "")
+	value = stripCommunityDigestTitleSourceTerms(value)
 	value = strings.Trim(value, " \t\r\n-_:|·")
 	if value == "" {
 		value = communityDigestFallbackTitle(record)
 	}
 	return truncateRunes(value, 80)
+}
+
+func stripCommunityDigestTitleSourceTerms(value string) string {
+	terms := []string{
+		"Stack Overflow",
+		"Posit Community",
+		"Posit",
+		"Mastodon #rstats",
+		"#rstats",
+		"Fediverse",
+		"rstats@a.gup.pe",
+		"rstats@fosstodon.org",
+		"rstats@",
+		"gup.pe",
+		"r/rprogramming",
+		"r/RStudio",
+		"Reddit",
+		"#TidyTuesday",
+		"TidyTuesday",
+	}
+	for _, term := range terms {
+		re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(term))
+		value = re.ReplaceAllString(value, "")
+	}
+	value = regexp.MustCompile(`\s+`).ReplaceAllString(value, " ")
+	value = regexp.MustCompile(`^\s*(의|에서|와|과|및|:|-|·)\s*`).ReplaceAllString(value, "")
+	value = regexp.MustCompile(`\s+(의|에서)\s*`).ReplaceAllString(value, " ")
+	return strings.TrimSpace(value)
 }
 
 func cleanCommunityDigestSummary(value string) string {
