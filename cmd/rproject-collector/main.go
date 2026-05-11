@@ -86,7 +86,7 @@ var (
 
 var boardAllowedTags = map[string]bool{
 	"h2": true, "h3": true, "p": true, "ul": true, "ol": true, "li": true,
-	"strong": true, "em": true, "code": true, "pre": true, "blockquote": true,
+	"strong": true, "em": true, "mark": true, "code": true, "pre": true, "blockquote": true,
 }
 
 type genericEvent struct {
@@ -138,6 +138,7 @@ type communityDigestItem struct {
 
 type communityDigestRecord struct {
 	DigestID         string
+	DigestUUID       string
 	DigestDate       string
 	SourceType       string
 	SourceID         string
@@ -488,23 +489,28 @@ func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig,
 		prompt := communityDigestPrompt(records[i])
 		records[i].PromptHash = shaHex(prompt)
 		if ai.enabled() {
-			summary, err := ai.chat(prompt, model)
+			response, err := ai.chat(prompt, model)
 			if err != nil {
 				if !allowFallback {
 					return nil, fmt.Errorf("digest %s AI summary: %w", records[i].DigestID, err)
 				}
+				records[i].Title = cleanCommunityDigestTitle(records[i].Title, records[i])
 				records[i].Summary = fallbackCommunityDigestSummary(records[i])
 				records[i].Status = "fallback_ai_error"
 			} else {
+				title, summary := parseCommunityDigestAIResponse(response)
+				records[i].Title = cleanCommunityDigestTitle(firstNonEmpty(title, records[i].Title), records[i])
 				records[i].Summary = cleanCommunityDigestSummary(summary)
 				records[i].Status = "generated"
 			}
 		} else {
+			records[i].Title = cleanCommunityDigestTitle(records[i].Title, records[i])
 			records[i].Summary = fallbackCommunityDigestSummary(records[i])
 			records[i].Status = "fallback_no_ai"
 		}
 		records[i].Model = model
 		records[i].GeneratedAt = nowKST().Format(time.RFC3339)
+		records[i].Title = cleanCommunityDigestTitle(records[i].Title, records[i])
 		if strings.TrimSpace(records[i].Summary) == "" {
 			records[i].Summary = fallbackCommunityDigestSummary(records[i])
 			records[i].Status = firstNonEmpty(records[i].Status, "fallback_empty")
@@ -577,13 +583,13 @@ func groupCommunityDigestRows(rows []map[string]any, itemLimit int) []communityD
 			digestID := "sha256:" + shaHex(strings.Join([]string{digestDate, sourceType, sourceID, sourceName, platform}, "\n"))
 			state = &groupState{record: communityDigestRecord{
 				DigestID:   digestID,
+				DigestUUID: communityDigestUUID(digestID),
 				DigestDate: digestDate,
 				SourceType: sourceType,
 				SourceID:   sourceID,
 				SourceName: sourceName,
 				Platform:   platform,
 				SourceURL:  stringAny(row["source_url"]),
-				Title:      fmt.Sprintf("%s %s 일일 요약", digestDate, sourceName),
 			}}
 			groups[key] = state
 			order = append(order, key)
@@ -618,9 +624,15 @@ func groupCommunityDigestRows(rows []map[string]any, itemLimit int) []communityD
 		}
 		state.record.ItemCount = state.raw
 		state.record.DedupedItemCount = len(state.record.Items)
+		state.record.Title = cleanCommunityDigestTitle(firstNonEmpty(state.record.Title, communityDigestFallbackTitle(state.record)), state.record)
 		records = append(records, state.record)
 	}
 	return records
+}
+
+func communityDigestUUID(digestID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(digestID)))
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 func communityDigestItemContext(row map[string]any) string {
@@ -676,15 +688,19 @@ func communityDigestPrompt(record communityDigestRecord) string {
 	b.WriteString("- Do not republish source bodies. Do not include URLs, Markdown links, HTML links, or long verbatim quotes. The original link list is stored separately.\n")
 	b.WriteString("- Keep technical details specific when they are visible in the collected excerpts.\n\n")
 	b.WriteString("Required output:\n")
-	b.WriteString("- Return only a safe HTML fragment in Korean. The first character must be '<'.\n")
-	b.WriteString("- Allowed tags: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>.\n")
+	b.WriteString("- Return only one JSON object. Do not wrap it in Markdown fences.\n")
+	b.WriteString("- JSON shape: {\"title\":\"Korean representative title\",\"html\":\"safe Korean HTML fragment\"}.\n")
+	b.WriteString("- The title must summarize the day's actual theme. Do not include the date, do not use a source-only title, and do not use the phrase '일일 요약'.\n")
+	b.WriteString("- The html value must be a safe HTML fragment in Korean. The first non-space character of html must be '<'.\n")
+	b.WriteString("- Allowed tags inside html: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <mark>, <code>, <pre>, <blockquote>.\n")
 	b.WriteString("- Never use Markdown headings, Markdown bullets, tables, HTML <a>, href attributes, images, scripts, styles, iframes, or raw URLs.\n")
-	b.WriteString("- Use sections such as <h2>하루 전체 요약</h2>, <h2>주요 토픽</h2>, <h2>시간 흐름</h2>, <h2>기술/운영 포인트</h2>, <h2>액션 아이템</h2>, and <h2>커뮤니티 분위기</h2> when they are useful.\n")
+	b.WriteString("- Do not force the same section template every day. Choose only useful sections and vary headings to match the evidence. The report may include overall flow, notable topics, timeline, technical/operational points, action items, or mood when those are supported.\n")
 	b.WriteString("- For sparse days, write concise natural observations. Do not include apology/limitation phrases such as '정보가 부족합니다', '정보가 매우 부족합니다', '분석하기 어렵습니다', '제공된 데이터만으로는', '알 수 없습니다', or '기록되어 있지 않습니다'. Omit unsupported details instead.\n")
 	b.WriteString("- The result should read like a polished community activity report, not a checklist of missing evidence.\n\n")
 	b.WriteString("Style:\n")
 	b.WriteString("- Korean, readable analytical report style, not a dry bullet-only summary.\n")
-	b.WriteString("- Use paragraphs and subheadings. It can be long enough to preserve context, but stay focused on evidence.\n\n")
+	b.WriteString("- Use paragraphs and subheadings. Use <strong> for important actors, functions, package names, errors, and decisions. Use <mark> sparingly for one or two central themes. Use <blockquote> only for paraphrased notable moments, not verbatim long quotes.\n")
+	b.WriteString("- It can be long enough to preserve context, but stay focused on evidence.\n\n")
 	b.WriteString("Collected items:\n")
 	for i, item := range record.Items {
 		if i >= 80 {
@@ -717,7 +733,7 @@ func fallbackCommunityDigestSummary(record communityDigestRecord) string {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "<h2>하루 전체 요약</h2><p>%s에는 <strong>%s</strong> 경로에서 중복 링크를 제외하고 %d건의 R 커뮤니티 게시물이 관찰되었습니다. ", record.DigestDate, html.EscapeString(record.SourceName), record.DedupedItemCount)
+	fmt.Fprintf(&b, "<h2>커뮤니티 흐름</h2><p><strong>%s</strong> 경로에서는 중복 링크를 제외하고 <mark>%d건</mark>의 R 커뮤니티 게시물이 관찰되었습니다. ", html.EscapeString(record.SourceName), record.DedupedItemCount)
 	if len(titles) > 0 {
 		fmt.Fprintf(&b, "수집된 제목 기준으로는 %s 등이 눈에 띄었습니다. ", html.EscapeString(strings.Join(titles, ", ")))
 	}
@@ -728,6 +744,67 @@ func fallbackCommunityDigestSummary(record communityDigestRecord) string {
 	}
 	b.WriteString("</ul><h2>커뮤니티 분위기</h2><p>이날 수집된 흐름은 R 사용, 개발 도구, 시각화, 문제 해결을 중심으로 이어졌습니다.</p>")
 	return b.String()
+}
+
+func parseCommunityDigestAIResponse(value string) (string, string) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```json")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	type response struct {
+		Title   string `json:"title"`
+		HTML    string `json:"html"`
+		Summary string `json:"summary"`
+		Content string `json:"content"`
+	}
+	var parsed response
+	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+		return parsed.Title, firstNonEmpty(parsed.HTML, parsed.Summary, parsed.Content)
+	}
+	start := strings.Index(value, "{")
+	end := strings.LastIndex(value, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(value[start:end+1]), &parsed); err == nil {
+			return parsed.Title, firstNonEmpty(parsed.HTML, parsed.Summary, parsed.Content)
+		}
+	}
+	return "", value
+}
+
+func communityDigestFallbackTitle(record communityDigestRecord) string {
+	source := strings.TrimSpace(removeBoardURLs(stripTags(record.SourceName)))
+	lowerSource := strings.ToLower(source)
+	switch {
+	case strings.Contains(lowerSource, "stack overflow"):
+		return "Stack Overflow의 R 질문과 해결 단서"
+	case strings.Contains(lowerSource, "posit"):
+		return "Posit Community의 R 사용 질문과 답변 흐름"
+	case strings.Contains(lowerSource, "mastodon") || strings.Contains(lowerSource, "rstats@"):
+		return "Fediverse에서 오간 R 커뮤니티 이야기"
+	case strings.Contains(lowerSource, "r/rstudio"):
+		return "r/RStudio의 RStudio 질문과 공유"
+	case strings.Contains(lowerSource, "r/rprogramming"):
+		return "r/rprogramming의 R 프로그래밍 논의"
+	case strings.Contains(lowerSource, "hacker news"):
+		return "Hacker News의 R 관련 토론"
+	case source != "":
+		return truncateRunes(source+"의 R 커뮤니티 흐름", 72)
+	default:
+		return "R 커뮤니티에서 오간 이야기"
+	}
+}
+
+func cleanCommunityDigestTitle(value string, record communityDigestRecord) string {
+	value = strings.TrimSpace(removeBoardURLs(stripTags(value)))
+	value = regexp.MustCompile(`\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b`).ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "일일 요약", "")
+	value = strings.ReplaceAll(value, "하루 요약", "")
+	value = strings.Trim(value, " \t\r\n-_:|·")
+	if value == "" {
+		value = communityDigestFallbackTitle(record)
+	}
+	return truncateRunes(value, 80)
 }
 
 func cleanCommunityDigestSummary(value string) string {
@@ -795,6 +872,7 @@ func communityDigestPayload(record communityDigestRecord) map[string]any {
 		"source_method":        "ai_daily_source_path_digest",
 		"collection_status":    record.Status,
 		"digest_id":            record.DigestID,
+		"digest_uuid":          record.DigestUUID,
 		"digest_date":          record.DigestDate,
 		"source_type":          record.SourceType,
 		"source_id":            record.SourceID,
@@ -834,6 +912,7 @@ func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig
 		itemsJSON, _ := json.Marshal(record.Items)
 		row := map[string]any{
 			"digest_id":          record.DigestID,
+			"digest_uuid":        record.DigestUUID,
 			"digest_date":        record.DigestDate,
 			"source_type":        record.SourceType,
 			"source_id":          record.SourceID,
