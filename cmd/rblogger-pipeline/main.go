@@ -595,10 +595,8 @@ func (p *KafkaPublisher) Validate(ctx context.Context) error {
 	if len(partitions) == 0 {
 		return fmt.Errorf("kafka preflight found zero partitions for topic %q", p.cfg.Topic)
 	}
-	for _, partition := range partitions {
-		if isLoopbackHost(partition.Leader.Host) {
-			return fmt.Errorf("kafka broker metadata advertises loopback listener %s:%d for topic=%s partition=%d", partition.Leader.Host, partition.Leader.Port, partition.Topic, partition.ID)
-		}
+	if err := validateKafkaAdvertisedLeaders(partitions, p.cfg.Brokers, "kafka broker metadata"); err != nil {
+		return err
 	}
 	fmt.Printf("[kafka] preflight ok topic=%s partitions=%d bootstrap=%s\n", p.cfg.Topic, len(partitions), p.cfg.Brokers[0])
 	return nil
@@ -1960,6 +1958,56 @@ func isLoopbackBrokerEndpoint(raw string) bool {
 		}
 	}
 	return isLoopbackHost(host)
+}
+
+func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []string, label string) error {
+	bootstrap := kafkaBootstrapEndpointSet(brokers)
+	for _, partition := range partitions {
+		leaderHost := strings.TrimSpace(partition.Leader.Host)
+		if isLoopbackHost(leaderHost) {
+			return fmt.Errorf("%s advertises loopback listener %s:%d for topic=%s partition=%d; fix Kafka server KAFKA_PUBLIC_HOST/KAFKA_ADVERTISED_LISTENERS and force-recreate Kafka_Platform", label, leaderHost, partition.Leader.Port, partition.Topic, partition.ID)
+		}
+		leaderEndpoint := normalizedKafkaEndpoint(leaderHost, fmt.Sprint(partition.Leader.Port))
+		if len(bootstrap) > 0 && !bootstrap[leaderEndpoint] {
+			return fmt.Errorf("%s advertises %s for topic=%s partition=%d, but KAFKA_BROKERS bootstrap is %s; fix Kafka server KAFKA_PUBLIC_HOST/KAFKA_ADVERTISED_LISTENERS and force-recreate Kafka_Platform", label, leaderEndpoint, partition.Topic, partition.ID, strings.Join(brokers, ","))
+		}
+	}
+	return nil
+}
+
+func kafkaBootstrapEndpointSet(brokers []string) map[string]bool {
+	endpoints := make(map[string]bool, len(brokers))
+	for _, broker := range brokers {
+		host, port, ok := splitKafkaEndpoint(broker)
+		if ok {
+			endpoints[normalizedKafkaEndpoint(host, port)] = true
+		}
+	}
+	return endpoints
+}
+
+func splitKafkaEndpoint(raw string) (string, string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", false
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		if strings.Count(raw, ":") != 1 {
+			return "", "", false
+		}
+		parts := strings.SplitN(raw, ":", 2)
+		host, port = parts[0], parts[1]
+	}
+	host = strings.TrimSpace(host)
+	port = strings.TrimSpace(port)
+	return host, port, host != "" && port != ""
+}
+
+func normalizedKafkaEndpoint(host, port string) string {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	port = strings.TrimSpace(port)
+	return host + ":" + port
 }
 
 func isLoopbackHost(host string) bool {
