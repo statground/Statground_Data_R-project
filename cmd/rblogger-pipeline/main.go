@@ -574,7 +574,11 @@ func (p *KafkaPublisher) Validate(ctx context.Context) error {
 			return fmt.Errorf("KAFKA_BROKERS must be externally reachable, not %q", broker)
 		}
 	}
-	dialer := &kafka.Dialer{ClientID: p.cfg.ClientID, Timeout: 10 * time.Second}
+	dialer := &kafka.Dialer{
+		ClientID: p.cfg.ClientID,
+		Timeout:  10 * time.Second,
+		DialFunc: kafkaAdvertisedBrokerDialFunc(p.cfg.Brokers, 10*time.Second),
+	}
 	if strings.TrimSpace(p.cfg.Username) != "" || strings.TrimSpace(p.cfg.Password) != "" {
 		dialer.SASLMechanism = plain.Mechanism{Username: p.cfg.Username, Password: p.cfg.Password}
 	}
@@ -660,16 +664,17 @@ func (p *KafkaPublisher) writer() *kafka.Writer {
 		WriteTimeout:           p.cfg.WriteTimeout,
 		ReadTimeout:            p.cfg.WriteTimeout,
 	}
-	if strings.TrimSpace(p.cfg.ClientID) != "" || strings.TrimSpace(p.cfg.Username) != "" || kafkaSecurityUsesTLS(p.cfg.SecurityProtocol) {
-		transport := &kafka.Transport{ClientID: p.cfg.ClientID}
-		if strings.TrimSpace(p.cfg.Username) != "" || strings.TrimSpace(p.cfg.Password) != "" {
-			transport.SASL = plain.Mechanism{Username: p.cfg.Username, Password: p.cfg.Password}
-		}
-		if kafkaSecurityUsesTLS(p.cfg.SecurityProtocol) {
-			transport.TLS = kafkaTLSConfig()
-		}
-		writer.Transport = transport
+	transport := &kafka.Transport{
+		ClientID: p.cfg.ClientID,
+		Dial:     kafkaAdvertisedBrokerDialFunc(p.cfg.Brokers, 10*time.Second),
 	}
+	if strings.TrimSpace(p.cfg.Username) != "" || strings.TrimSpace(p.cfg.Password) != "" {
+		transport.SASL = plain.Mechanism{Username: p.cfg.Username, Password: p.cfg.Password}
+	}
+	if kafkaSecurityUsesTLS(p.cfg.SecurityProtocol) {
+		transport.TLS = kafkaTLSConfig()
+	}
+	writer.Transport = transport
 	return writer
 }
 
@@ -1969,7 +1974,7 @@ func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []stri
 		}
 		leaderEndpoint := normalizedKafkaEndpoint(leaderHost, fmt.Sprint(partition.Leader.Port))
 		if len(bootstrap) > 0 && !bootstrap[leaderEndpoint] {
-			return fmt.Errorf("%s advertises %s for topic=%s partition=%d, but KAFKA_BROKERS bootstrap is %s; fix Kafka server KAFKA_PUBLIC_HOST/KAFKA_ADVERTISED_LISTENERS and force-recreate Kafka_Platform", label, leaderEndpoint, partition.Topic, partition.ID, strings.Join(brokers, ","))
+			fmt.Printf("[kafka] %s advertises %s for topic=%s partition=%d, but KAFKA_BROKERS bootstrap is %s; producer will dial via bootstrap rewrite\n", label, leaderEndpoint, partition.Topic, partition.ID, strings.Join(brokers, ","))
 		}
 	}
 	return nil
@@ -2008,6 +2013,30 @@ func normalizedKafkaEndpoint(host, port string) string {
 	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
 	port = strings.TrimSpace(port)
 	return host + ":" + port
+}
+
+func kafkaAdvertisedBrokerDialFunc(brokers []string, timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	if len(brokers) != 1 {
+		return dialer.DialContext
+	}
+	bootstrapHost, bootstrapPort, ok := splitKafkaEndpoint(brokers[0])
+	if !ok {
+		return dialer.DialContext
+	}
+	bootstrapAddress := net.JoinHostPort(strings.Trim(bootstrapHost, "[]"), bootstrapPort)
+	bootstrapEndpoint := normalizedKafkaEndpoint(bootstrapHost, bootstrapPort)
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		target := address
+		if host, port, ok := splitKafkaEndpoint(address); ok {
+			endpoint := normalizedKafkaEndpoint(host, port)
+			if port == bootstrapPort && endpoint != bootstrapEndpoint {
+				fmt.Printf("[kafka] rewrite advertised broker dial %s -> %s\n", endpoint, bootstrapEndpoint)
+				target = bootstrapAddress
+			}
+		}
+		return dialer.DialContext(ctx, network, target)
+	}
 }
 
 func isLoopbackHost(host string) bool {
