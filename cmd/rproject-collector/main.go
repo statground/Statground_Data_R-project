@@ -534,7 +534,8 @@ func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([
 	}
 	sinceWhere := ""
 	if sinceDays >= 0 {
-		sinceWhere = fmt.Sprintf(" AND toDate(coalesce(original_published_at, collected_at)) >= addDays(today('Asia/Seoul'), -%d)", sinceDays)
+		cutoffDate := nowKST().AddDate(0, 0, -sinceDays).Format("2006-01-02")
+		sinceWhere = fmt.Sprintf(" AND toDate(coalesce(original_published_at, collected_at)) >= toDate(%s)", clickHouseQuoteString(cutoffDate))
 	}
 	query := fmt.Sprintf(`
 SELECT
