@@ -7583,6 +7583,8 @@ func isLoopbackBroker(raw string) bool {
 
 func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []string, label string) error {
 	bootstrap := kafkaBootstrapEndpointSet(brokers)
+	nonBootstrapLeaders := 0
+	topics := map[string]bool{}
 	for _, partition := range partitions {
 		leaderHost := strings.TrimSpace(partition.Leader.Host)
 		if isLoopbackHost(leaderHost) {
@@ -7590,8 +7592,12 @@ func validateKafkaAdvertisedLeaders(partitions []kafka.Partition, brokers []stri
 		}
 		leaderEndpoint := normalizedKafkaEndpoint(leaderHost, fmt.Sprint(partition.Leader.Port))
 		if len(bootstrap) > 0 && !bootstrap[leaderEndpoint] {
-			fmt.Printf("[kafka] %s advertises %s for topic=%s partition=%d, but KAFKA_BROKERS bootstrap is %s; producer will dial via bootstrap rewrite\n", label, leaderEndpoint, partition.Topic, partition.ID, strings.Join(brokers, ","))
+			nonBootstrapLeaders++
+			topics[partition.Topic] = true
 		}
+	}
+	if nonBootstrapLeaders > 0 {
+		fmt.Printf("[kafka] %s metadata has %d non-bootstrap advertised broker entries across %d topic(s); producer will dial via bootstrap rewrite\n", label, nonBootstrapLeaders, len(topics))
 	}
 	return nil
 }
@@ -7647,7 +7653,6 @@ func kafkaAdvertisedBrokerDialFunc(brokers []string, timeout time.Duration) func
 		if host, port, ok := splitKafkaEndpoint(address); ok {
 			endpoint := normalizedKafkaEndpoint(host, port)
 			if port == bootstrapPort && endpoint != bootstrapEndpoint {
-				fmt.Printf("[kafka] rewrite advertised broker dial %s -> %s\n", endpoint, bootstrapEndpoint)
 				target = bootstrapAddress
 			}
 		}
