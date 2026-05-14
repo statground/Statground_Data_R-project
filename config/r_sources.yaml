@@ -19,18 +19,6 @@ sources:
     language: en
     tags: [R, R Project, release-notes, CRAN]
 
-  - id: official:r:whats-new
-    type: html_links
-    source_type: official_index
-    platform: r-project
-    name: R Project What's New
-    url: https://www.r-project.org/news.html
-    emit_page_item: true
-    include_regex: "NEWS|R-announce|R-packages|blog.r-project.org|cran.r-project.org"
-    max_items: 80
-    language: en
-    tags: [R, R Project, official]
-
   - id: official:r:blog
     type: rss
     source_type: official_blog
@@ -61,12 +49,12 @@ sources:
 
   - id: official:r:conferences
     type: html_links
-    source_type: official_events
+    source_type: workshop_event
     platform: r-project
     name: R Project conferences
     url: https://www.r-project.org/conferences/
     emit_page_item: true
-    include_regex: "useR|DSC|conference|2026|2027|r-project.org|mastodon"
+    include_regex: "useR|DSC|conference|2026|2027"
     max_items: 120
     language: en
     tags: [R, conference, useR, DSC]
@@ -88,11 +76,11 @@ sources:
 
   - id: official:r-mail:r-packages
     type: html_links
-    source_type: official_mail_archive
+    source_type: package_update_feed
     platform: r-project-mail
     name: R-packages mailing list archive, current year
     url: "https://stat.ethz.ch/pipermail/r-packages/{year}/date.html"
-    include_regex: '\.html|package|CRAN|R'
+    include_regex: '[0-9]{6}\.html|\[R-pkgs\]'
     max_items: 300
     language: en
     tags: [R, R-packages, mailing-list, CRAN]
@@ -378,27 +366,16 @@ sources:
     language: en
     tags: [R, TidyTuesday, Mastodon]
 
-  - id: mastodon:account:r-foundation
-    type: mastodon_account
-    source_type: official_social
-    platform: mastodon
-    name: R Foundation on Mastodon
-    url: https://fosstodon.org/@R_Foundation.rss
-    source_url: https://fosstodon.org/@R_Foundation
-    max_items: 80
-    language: en
-    tags: [R, R Foundation, Mastodon]
-
   - id: mastodon:account:user-conf
     type: mastodon_account
-    source_type: official_social
+    source_type: workshop_event
     platform: mastodon
     name: useR! conference on Mastodon
     url: https://mastodon.social/@useR_conf.rss
     source_url: https://mastodon.social/@useR_conf
     max_items: 80
     language: en
-    tags: [R, useR, conference, Mastodon]
+    tags: [R, useR, useR2026, conference, Mastodon]
 
   - id: mastodon:account:ropensci
     type: mastodon_account
@@ -471,18 +448,6 @@ sources:
     language: en
     tags: [R, Posit Community, forum]
 
-  - id: community:bioconductor:build-rss-info
-    type: html_links
-    source_type: official_build_rss_index
-    platform: bioconductor
-    name: Bioconductor build system RSS feed documentation
-    url: https://bioconductor.org/developers/rss-feeds/
-    emit_page_item: true
-    include_regex: "RSS|Atom|build|package|Bioconductor"
-    max_items: 120
-    language: en
-    tags: [R, Bioconductor, RSS]
-
   - id: community:ropensci:blog
     type: rss
     source_type: organization_blog
@@ -494,29 +459,6 @@ sources:
     max_items: 150
     language: en
     tags: [R, rOpenSci, blog]
-
-  - id: community:ropensci:forum-closed-notice
-    type: html_links
-    source_type: organization_notice
-    platform: ropensci
-    name: rOpenSci forum closing notice and alternatives
-    url: https://ropensci.org/blog/2026/02/23/forum-closing/
-    emit_page_item: true
-    include_regex: "RSS|newsletter|GitHub|community|forum|rOpenSci"
-    max_items: 80
-    language: en
-    tags: [R, rOpenSci, forum, archive]
-
-  - id: community:r-bloggers
-    type: rss
-    source_type: aggregator_blog
-    platform: r-bloggers
-    name: R-bloggers feed
-    url: https://www.r-bloggers.com/feed/
-    source_url: https://www.r-bloggers.com/
-    max_items: 200
-    language: en
-    tags: [R, R-bloggers, aggregator]
 
   - id: community:rweekly
     type: rss
