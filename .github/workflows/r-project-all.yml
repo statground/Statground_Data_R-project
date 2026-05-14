@@ -95,6 +95,25 @@ jobs:
           test -n "$KAFKA_BROKERS" || { echo "Kafka broker secret is required"; exit 1; }
           test -n "$KAFKA_USERNAME" || { echo "Kafka username secret is required"; exit 1; }
           test -n "$KAFKA_PASSWORD" || { echo "Kafka password secret is required"; exit 1; }
+          python3 - <<'PY'
+          import hashlib
+          import os
+
+          brokers = os.environ.get("KAFKA_BROKERS", "")
+          safe = brokers.replace(".", "[.]").replace(":", "[:]").replace(",", ", ")
+          print(f"KAFKA_BROKERS_SANITIZED={safe}")
+          print(f"KAFKA_BROKERS_SHA256={hashlib.sha256(brokers.encode()).hexdigest()}")
+          PY
+          case ",$KAFKA_BROKERS," in
+            *,180.66.240.243:50004,*)
+              echo "KAFKA_BROKERS still contains old broker endpoint 180.66.240.243:50004"
+              exit 1
+              ;;
+            *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
+              echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
+              exit 1
+              ;;
+          esac
 
       - name: Validate ClickHouse settings
         env:
