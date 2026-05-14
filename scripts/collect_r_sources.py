@@ -546,6 +546,8 @@ class RSourceCollector:
             },
         )
         item.platform = "mastodon"
+        if source_id == "mastodon:account:user-conf":
+            enrich_user_conf_workshop_item(item)
         return item
 
     def collect_dcinside_gallery(self, source: dict[str, Any]) -> None:
@@ -913,6 +915,96 @@ def format_url(url: str, context: dict[str, Any]) -> str:
         return url.format(**context)
     except KeyError:
         return url
+
+
+def enrich_user_conf_workshop_item(item: NormalizedItem) -> None:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            item.title,
+            item.summary,
+            item.canonical_url,
+            item.raw.get("content_text"),
+            item.raw.get("status_url"),
+        )
+    )
+    workshop_key = classify_r_conference_workshop_key(text) or "rconf-user-2026"
+    title = conference_title_from_workshop_key(workshop_key)
+    item.tags = unique_preserve_order([*item.tags, "workshop_board", workshop_key, title.replace(" ", "")])
+    item.raw.update(
+        {
+            "related_workshop_key": workshop_key,
+            "related_conference_title": title,
+            "related_conference_source_id": "official:r:conferences",
+            "related_conference_canonical_url": conference_url_from_workshop_key(workshop_key),
+            "workshop_board_role": "post",
+            "workshop_board_author_email": "rproject@web-r.org",
+            "workshop_board_author_kind": "bot",
+        }
+    )
+
+
+def classify_r_conference_workshop_key(text: str) -> str | None:
+    lowered = text.lower()
+    if "r/basel" in lowered or "r-basel" in lowered:
+        return "rconf-r-basel-2023"
+    match = re.search(r"r\s+summit\s*([12][0-9]{3})", lowered)
+    if match:
+        return f"rconf-r-summit-{match.group(1)}"
+    match = re.search(r"user!?\s*([12][0-9]{3})", lowered)
+    if match:
+        return f"rconf-user-{match.group(1)}"
+    match = re.search(r"user([12][0-9]{3})", lowered)
+    if match:
+        return f"rconf-user-{match.group(1)}"
+    match = re.search(r"dsc[-/\s]*([12][0-9]{3})", lowered)
+    if match:
+        return f"rconf-dsc-{match.group(1)}"
+    return None
+
+
+def conference_title_from_workshop_key(workshop_key: str) -> str:
+    match = re.match(r"rconf-user-([12][0-9]{3})$", workshop_key)
+    if match:
+        return f"useR! {match.group(1)}"
+    match = re.match(r"rconf-dsc-([12][0-9]{3})$", workshop_key)
+    if match:
+        return f"DSC {match.group(1)}"
+    if workshop_key == "rconf-r-basel-2023":
+        return "R/Basel 2023"
+    match = re.match(r"rconf-r-summit-([12][0-9]{3})$", workshop_key)
+    if match:
+        return f"R Summit {match.group(1)}"
+    return workshop_key
+
+
+def conference_url_from_workshop_key(workshop_key: str) -> str:
+    known = {
+        "rconf-user-2026": "https://user2026.r-project.org",
+        "rconf-r-basel-2023": "https://user-regional-2023.gitlab.io/basel/",
+        "rconf-r-summit-2015": "https://www.r-project.org/conferences/rsummit-2015/rsummit2015/",
+    }
+    if workshop_key in known:
+        return known[workshop_key]
+    match = re.match(r"rconf-user-([12][0-9]{3})$", workshop_key)
+    if match:
+        return f"https://user{match.group(1)}.r-project.org/"
+    match = re.match(r"rconf-dsc-([12][0-9]{3})$", workshop_key)
+    if match:
+        return f"https://www.r-project.org/dsc/{match.group(1)}"
+    return "https://www.r-project.org/conferences/"
+
+
+def unique_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        value = str(value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def compact_text(value: str | None) -> str:

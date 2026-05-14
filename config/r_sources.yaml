@@ -53,8 +53,8 @@ sources:
     platform: r-project
     name: R Project conferences
     url: https://www.r-project.org/conferences/
-    emit_page_item: true
-    include_regex: "useR|DSC|conference|2026|2027"
+    emit_page_item: false
+    include_regex: "useR|DSC|R/Basel|R Summit|conference|2026|2027"
     max_items: 120
     language: en
     tags: [R, conference, useR, DSC]
@@ -375,7 +375,7 @@ sources:
     source_url: https://mastodon.social/@useR_conf
     max_items: 80
     language: en
-    tags: [R, useR, useR2026, conference, Mastodon]
+    tags: [R, useR, useR2026, conference, Mastodon, workshop_board]
 
   - id: mastodon:account:ropensci
     type: mastodon_account
