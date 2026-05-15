@@ -519,18 +519,6 @@ sources:
     language: en
     tags: [R, CRAN, CRANberries, Mastodon]
 
-  - id: mastodon:group:rstats
-    type: html_links
-    source_type: fediverse_group
-    platform: mastodon
-    name: rstats@a.gup.pe group profile
-    url: https://a.gup.pe/u/rstats
-    emit_page_item: true
-    include_regex: "rstats|a.gup.pe|ActivityPub|Mastodon"
-    max_items: 40
-    language: en
-    tags: [R, rstats, Fediverse, Mastodon, Guppe]
-
   # ---------------------------------------------------------------------------
   # Global community/help channels with no-key RSS/HTML alternatives.
   # ---------------------------------------------------------------------------
