@@ -329,6 +329,126 @@ sources:
     language: en
     tags: [R, rstats, memes, reddit]
 
+  # PubMed/MEDLINE adjacent Reddit communities. These are broad subreddits, so
+  # only posts mentioning PubMed, MeSH, NCBI/NLM, biomedical literature search,
+  # or evidence-synthesis search strategy terms are collected.
+  - id: reddit:r/librarians
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/librarians (PubMed/MeSH)
+    subreddit: librarians
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, MEDLINE, MeSH, librarians, literature-search, reddit]
+
+  - id: reddit:r/research
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/research (PubMed/literature search)
+    subreddit: research
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, research, literature-search, systematic-review, reddit]
+
+  - id: reddit:r/bioinformatics
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/bioinformatics (PubMed/API)
+    subreddit: bioinformatics
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, NCBI, Entrez, bioinformatics, literature-mining, reddit]
+
+  - id: reddit:r/labrats
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/labrats (PubMed/literature search)
+    subreddit: labrats
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, lab-research, literature-search, reddit]
+
+  - id: reddit:r/AskAcademia
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/AskAcademia (PubMed/literature search)
+    subreddit: AskAcademia
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, academia, literature-search, systematic-review, reddit]
+
+  - id: reddit:r/medicine
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/medicine (PubMed/clinical literature)
+    subreddit: medicine
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, medicine, clinical-literature, evidence-based-medicine, reddit]
+
+  - id: reddit:r/pharmacy
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/pharmacy (PubMed/clinical literature)
+    subreddit: pharmacy
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, pharmacy, clinical-literature, evidence-based-medicine, reddit]
+
+  - id: reddit:r/DataHoarder
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/DataHoarder (PubMed/NLM archives)
+    subreddit: DataHoarder
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, NLM, archive, data-preservation, reddit]
+
+  - id: reddit:r/healthIT
+    type: reddit_subreddit
+    source_type: community_forum
+    platform: reddit
+    name: r/healthIT (PubMed/biomedical data)
+    subreddit: healthIT
+    limit: 100
+    max_items: 100
+    json_fallback: true
+    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    language: en
+    tags: [PubMed, healthIT, biomedical-data, literature-search, reddit]
+
   # ---------------------------------------------------------------------------
   # Mastodon/Fediverse. API 키 없이 태그 RSS → no-auth public tag API fallback.
   # Instances can disable public preview; such failures are expected and logged.

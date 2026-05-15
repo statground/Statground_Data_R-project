@@ -244,11 +244,7 @@ class RSourceCollector:
             title = html_to_text(entry.get("title") or link)
             summary = entry_summary(entry)
             haystack = f"{title}\n{summary or ''}\n{link}"
-            include_regex = source.get("item_include_regex")
-            exclude_regex = source.get("item_exclude_regex")
-            if include_regex and not re.search(include_regex, haystack, re.IGNORECASE):
-                continue
-            if exclude_regex and re.search(exclude_regex, haystack, re.IGNORECASE):
+            if not source_item_allowed(source, haystack):
                 continue
             native_id = entry.get("id") or entry.get("guid") or link
             published_at = entry_datetime(entry)
@@ -341,6 +337,19 @@ class RSourceCollector:
             post = child.get("data", {})
             permalink = post.get("permalink")
             canonical_url = urljoin("https://www.reddit.com", permalink) if permalink else post.get("url") or source_url
+            haystack = "\n".join(
+                str(value or "")
+                for value in (
+                    post.get("title"),
+                    post.get("selftext"),
+                    post.get("url"),
+                    post.get("domain"),
+                    post.get("link_flair_text"),
+                    canonical_url,
+                )
+            )
+            if not source_item_allowed(source, haystack):
+                continue
             published = None
             if post.get("created_utc") is not None:
                 published = dt.datetime.fromtimestamp(float(post["created_utc"]), tz=dt.timezone.utc).astimezone(KST).isoformat(timespec="seconds")
@@ -1256,6 +1265,16 @@ def release_version_text(title: str) -> str:
     if not match:
         return ""
     return compact_text(match.group(0))
+
+
+def source_item_allowed(source: dict[str, Any], haystack: str) -> bool:
+    include_regex = source.get("item_include_regex")
+    exclude_regex = source.get("item_exclude_regex")
+    if include_regex and not re.search(include_regex, haystack, re.IGNORECASE):
+        return False
+    if exclude_regex and re.search(exclude_regex, haystack, re.IGNORECASE):
+        return False
+    return True
 
 
 def parse_datetime(value: str | None) -> dt.datetime | None:
