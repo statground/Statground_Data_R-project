@@ -341,7 +341,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: &pubmed_reddit_item_regex 'PubMed|MEDLINE|PubMed Central|\bPMC\b|\bNCBI\b|\bNLM\b|(?-i:\bMeSH\b)|E[- ]utilities|\bEntrez\b|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
     language: en
     tags: [PubMed, MEDLINE, MeSH, librarians, literature-search, reddit]
 
@@ -354,7 +354,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, research, literature-search, systematic-review, reddit]
 
@@ -367,7 +367,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, NCBI, Entrez, bioinformatics, literature-mining, reddit]
 
@@ -380,7 +380,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, lab-research, literature-search, reddit]
 
@@ -393,7 +393,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, academia, literature-search, systematic-review, reddit]
 
@@ -406,7 +406,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, medicine, clinical-literature, evidence-based-medicine, reddit]
 
@@ -419,7 +419,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, pharmacy, clinical-literature, evidence-based-medicine, reddit]
 
@@ -432,7 +432,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, NLM, archive, data-preservation, reddit]
 
@@ -445,7 +445,7 @@ sources:
     limit: 100
     max_items: 100
     json_fallback: true
-    item_include_regex: 'PubMed|MEDLINE|MeSH|NCBI|NLM|PubMed Central|\bPMC\b|E[- ]utilities|Entrez|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search'
+    item_include_regex: *pubmed_reddit_item_regex
     language: en
     tags: [PubMed, healthIT, biomedical-data, literature-search, reddit]
 

@@ -537,6 +537,12 @@ func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([
 		cutoffDate := nowKST().AddDate(0, 0, -sinceDays).Format("2006-01-02")
 		sinceWhere = fmt.Sprintf(" AND toDate(coalesce(original_published_at, collected_at)) >= toDate(%s)", clickHouseQuoteString(cutoffDate))
 	}
+	pubMedRedditWhere := `
+  AND (
+      positionCaseInsensitiveUTF8(source_name, 'PubMed') = 0
+      OR positionUTF8(concat(title, '\n', summary, '\n', canonical_url), 'MeSH') > 0
+      OR match(concat(title, '\n', summary, '\n', canonical_url), '(?i)PubMed|MEDLINE|PubMed Central|\\bPMC\\b|\\bNCBI\\b|\\bNLM\\b|E[- ]utilities|\\bEntrez\\b|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search')
+  )`
 	query := fmt.Sprintf(`
 SELECT
     toString(toDate(coalesce(original_published_at, collected_at))) AS digest_date,
@@ -559,8 +565,9 @@ WHERE source_type IN (%s)
   AND notEmpty(title)
   AND notEmpty(canonical_url)
   %s
+  %s
 ORDER BY digest_date DESC, source_type ASC, source_id ASC, published_at_text DESC, collected_at_text DESC, title ASC
-FORMAT JSONEachRow`, strings.Join(quoted, ","), sinceWhere)
+FORMAT JSONEachRow`, strings.Join(quoted, ","), sinceWhere, pubMedRedditWhere)
 	return cfg.queryJSONEachRow(query)
 }
 

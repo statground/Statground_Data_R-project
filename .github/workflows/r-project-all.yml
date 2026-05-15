@@ -320,6 +320,48 @@ jobs:
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --limit "$R_COMMUNITY_EVENT_LIMIT"
 
+      - name: Wait for R Community ClickHouse ingestion
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+        run: |
+          item_count=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("data/collected/r/latest_report.json").read_text(encoding="utf-8"))
+          print(int(report.get("item_count") or 0))
+          PY
+          )
+          if [[ "$item_count" -eq 0 ]]; then
+            echo "No R Community rows were collected; skip ingestion wait."
+            exit 0
+          fi
+          started_at=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("data/collected/r/latest_report.json").read_text(encoding="utf-8"))
+          print(str(report.get("started_at") or ""))
+          PY
+          )
+          if [[ -z "$started_at" ]]; then
+            echo "latest_report.json has no started_at; skip ingestion wait."
+            exit 0
+          fi
+          cutoff_sql="parseDateTime64BestEffort('${started_at}', 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
+          for attempt in {1..18}; do
+            visible_count=$(curl -sS --fail --max-time 20 -u "$CH_USER:$CH_PASSWORD" "http://$CH_HOST:$CH_PORT/" --data-binary "SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= ${cutoff_sql} FORMAT TSV" | tr -d '[:space:]')
+            visible_count=${visible_count:-0}
+            echo "R Community ClickHouse visible rows after collection start: ${visible_count}/${item_count} (attempt ${attempt}/18)"
+            if [[ "$visible_count" -gt 0 ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "R Community ClickHouse ingestion did not become visible before digest generation." >&2
+          exit 1
+
       - name: Generate R Community daily digests
         env:
           KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
