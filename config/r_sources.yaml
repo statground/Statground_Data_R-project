@@ -336,7 +336,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/librarians (PubMed/MeSH)
+    name: r/librarians
     subreddit: librarians
     limit: 100
     max_items: 100
@@ -349,7 +349,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/research (PubMed/literature search)
+    name: r/research
     subreddit: research
     limit: 100
     max_items: 100
@@ -362,7 +362,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/bioinformatics (PubMed/API)
+    name: r/bioinformatics
     subreddit: bioinformatics
     limit: 100
     max_items: 100
@@ -375,7 +375,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/labrats (PubMed/literature search)
+    name: r/labrats
     subreddit: labrats
     limit: 100
     max_items: 100
@@ -388,7 +388,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/AskAcademia (PubMed/literature search)
+    name: r/AskAcademia
     subreddit: AskAcademia
     limit: 100
     max_items: 100
@@ -401,7 +401,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/medicine (PubMed/clinical literature)
+    name: r/medicine
     subreddit: medicine
     limit: 100
     max_items: 100
@@ -414,7 +414,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/pharmacy (PubMed/clinical literature)
+    name: r/pharmacy
     subreddit: pharmacy
     limit: 100
     max_items: 100
@@ -427,7 +427,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/DataHoarder (PubMed/NLM archives)
+    name: r/DataHoarder
     subreddit: DataHoarder
     limit: 100
     max_items: 100
@@ -440,7 +440,7 @@ sources:
     type: reddit_subreddit
     source_type: community_forum
     platform: reddit
-    name: r/healthIT (PubMed/biomedical data)
+    name: r/healthIT
     subreddit: healthIT
     limit: 100
     max_items: 100

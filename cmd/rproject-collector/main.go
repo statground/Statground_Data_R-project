@@ -539,7 +539,20 @@ func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([
 	}
 	pubMedRedditWhere := `
   AND (
-      positionCaseInsensitiveUTF8(source_name, 'PubMed') = 0
+      (
+        positionCaseInsensitiveUTF8(source_name, 'PubMed') = 0
+        AND source_id NOT IN (
+          'reddit:r/librarians',
+          'reddit:r/research',
+          'reddit:r/bioinformatics',
+          'reddit:r/labrats',
+          'reddit:r/AskAcademia',
+          'reddit:r/medicine',
+          'reddit:r/pharmacy',
+          'reddit:r/DataHoarder',
+          'reddit:r/healthIT'
+        )
+      )
       OR positionUTF8(concat(title, '\n', summary, '\n', canonical_url), 'MeSH') > 0
       OR match(concat(title, '\n', summary, '\n', canonical_url), '(?i)PubMed|MEDLINE|PubMed Central|\\bPMC\\b|\\bNCBI\\b|\\bNLM\\b|E[- ]utilities|\\bEntrez\\b|literature search|literature review|systematic review|scoping review|search strateg|evidence synthesis|biomedical literature|medical librarian|clinical literature|database search')
   )`
@@ -786,7 +799,7 @@ func parseCommunityDigestAIResponse(value string) (string, string) {
 }
 
 func communityDigestFallbackTitle(record communityDigestRecord) string {
-	if title := specificCommunityDigestTitleFromRecord(record); title != "" {
+	if title := specificCommunityDigestTitleFromRecord(record); title != "" && !isGenericCommunityDigestTitle(title) && !communityDigestTitleNeedsFallback(title) {
 		return title
 	}
 	sourceType := strings.ToLower(strings.TrimSpace(record.SourceType))
@@ -832,12 +845,17 @@ func communityDigestMajorTopics(summary string) []string {
 	}
 	itemRE := regexp.MustCompile(`(?is)<li[^>]*>(.*?)</li>`)
 	itemMatches := itemRE.FindAllStringSubmatch(match[1], -1)
+	strongRE := regexp.MustCompile(`(?is)<strong[^>]*>(.*?)</strong>`)
 	topics := make([]string, 0, len(itemMatches))
 	for _, item := range itemMatches {
 		if len(item) < 2 {
 			continue
 		}
-		topic := cleanCommunityDigestTopicPhrase(item[1])
+		topicSource := item[1]
+		if strongMatch := strongRE.FindStringSubmatch(topicSource); len(strongMatch) >= 2 {
+			topicSource = strongMatch[1]
+		}
+		topic := cleanCommunityDigestTopicPhrase(topicSource)
 		if topic != "" {
 			topics = append(topics, topic)
 		}
@@ -850,7 +868,7 @@ func summarizeCommunityDigestTopics(topics []string, record communityDigestRecor
 	seen := map[string]bool{}
 	for _, topic := range topics {
 		value := communityDigestTitleCandidate(topic)
-		if value == "" || isGenericCommunityDigestTitle(value) || seen[value] {
+		if value == "" || isGenericCommunityDigestTitle(value) || communityDigestTitleNeedsFallback(value) || seen[value] {
 			continue
 		}
 		seen[value] = true
@@ -868,13 +886,14 @@ func summarizeCommunityDigestTopics(topics []string, record communityDigestRecor
 	if len(cleaned) >= 3 {
 		return cleaned[0] + " / " + cleaned[1] + " 외 " + strconv.Itoa(len(cleaned)-2) + "개 토픽"
 	}
-	if title := specificCommunityDigestTitleFromRecord(record); title != "" {
+	if title := specificCommunityDigestTitleFromRecord(record); title != "" && !isGenericCommunityDigestTitle(title) && !communityDigestTitleNeedsFallback(title) {
 		return title
 	}
 	return "R 커뮤니티 활동 정리"
 }
 
 func cleanCommunityDigestTitle(value string, record communityDigestRecord) string {
+	value = normalizeCommunityDigestEscapedWhitespace(value)
 	value = strings.TrimSpace(removeBoardURLs(stripTags(value)))
 	value = regexp.MustCompile(`\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b`).ReplaceAllString(value, "")
 	value = strings.ReplaceAll(value, "일일 요약", "")
@@ -882,10 +901,17 @@ func cleanCommunityDigestTitle(value string, record communityDigestRecord) strin
 	value = stripCommunityDigestTitleSourceTerms(value)
 	value = cleanCommunityDigestTopicPhrase(value)
 	value = strings.Trim(value, " \t\r\n-_:|·")
-	if value == "" || isGenericCommunityDigestTitle(value) {
-		value = communityDigestFallbackTitle(record)
+	if value == "" || isGenericCommunityDigestTitle(value) || communityDigestTitleNeedsFallback(value) {
+		value = bestCommunityDigestTitleFallback(record)
 	}
 	return value
+}
+
+func bestCommunityDigestTitleFallback(record communityDigestRecord) string {
+	if title := specificCommunityDigestTitleFromRecord(record); title != "" && !isGenericCommunityDigestTitle(title) && !communityDigestTitleNeedsFallback(title) {
+		return title
+	}
+	return communityDigestFallbackTitle(record)
 }
 
 func cleanCommunityDigestTopicPhrase(value string) string {
@@ -1005,6 +1031,41 @@ func specificCommunityDigestTitleFromRecord(record communityDigestRecord) string
 	return ""
 }
 
+func communityDigestTitleNeedsFallback(value string) bool {
+	value = strings.TrimSpace(stripTags(value))
+	if value == "" {
+		return true
+	}
+	if strings.Contains(value, `\n`) || strings.Contains(value, `\r`) || strings.Contains(value, `\t`) {
+		return true
+	}
+	runes := []rune(value)
+	if len(runes) > 90 {
+		return true
+	}
+	korean := 0
+	latin := 0
+	for _, r := range runes {
+		if (r >= 0xAC00 && r <= 0xD7A3) || (r >= 0x1100 && r <= 0x11FF) || (r >= 0x3130 && r <= 0x318F) {
+			korean++
+			continue
+		}
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			latin++
+		}
+	}
+	if korean == 0 && latin >= 20 && len(runes) > 45 {
+		return true
+	}
+	if korean == 0 && len(regexp.MustCompile(`[A-Za-z][A-Za-z0-9_+-]*`).FindAllString(value, -1)) >= 4 {
+		return true
+	}
+	if strings.HasPrefix(strings.TrimSpace(value), "#") && korean == 0 && latin >= 8 {
+		return true
+	}
+	return false
+}
+
 func isGenericCommunityDigestTitle(value string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(stripTags(value)))
 	if normalized == "" {
@@ -1073,6 +1134,7 @@ func stripCommunityDigestTitleSourceTerms(value string) string {
 }
 
 func cleanCommunityDigestSummary(value string) string {
+	value = normalizeCommunityDigestEscapedWhitespace(value)
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "```html")
 	value = strings.TrimPrefix(value, "```")
@@ -1080,13 +1142,28 @@ func cleanCommunityDigestSummary(value string) string {
 	value = strings.TrimSpace(value)
 	sanitized, err := sanitizeBoardHTML(value)
 	if err != nil || strings.TrimSpace(stripTags(sanitized)) == "" {
-		return safeHTML(truncateRunes(removeCommunityDigestLimitationPhrases(removeBoardURLs(stripTags(value))), 3000))
+		return safeHTML(truncateRunes(removeCommunityDigestLimitationPhrases(removeBoardURLs(stripTags(normalizeCommunityDigestEscapedWhitespace(value)))), 3000))
 	}
+	sanitized = normalizeCommunityDigestEscapedWhitespace(sanitized)
 	sanitized = removeCommunityDigestLimitationPhrases(sanitized)
 	if strings.TrimSpace(stripTags(sanitized)) == "" {
 		return fallbackCommunityDigestSummary(communityDigestRecord{DigestDate: nowKST().Format("2006-01-02"), SourceName: "R Community"})
 	}
 	return truncateRunes(sanitized, 6000)
+}
+
+func normalizeCommunityDigestEscapedWhitespace(value string) string {
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, `\r\n`, "\n")
+	value = strings.ReplaceAll(value, `\n`, "\n")
+	value = strings.ReplaceAll(value, `\r`, "\n")
+	value = strings.ReplaceAll(value, `\t`, " ")
+	value = regexp.MustCompile(`[ \t]+\n`).ReplaceAllString(value, "\n")
+	value = regexp.MustCompile(`\n[ \t]+`).ReplaceAllString(value, "\n")
+	value = regexp.MustCompile(`\n{3,}`).ReplaceAllString(value, "\n\n")
+	return strings.TrimSpace(value)
 }
 
 func removeCommunityDigestLimitationPhrases(value string) string {
