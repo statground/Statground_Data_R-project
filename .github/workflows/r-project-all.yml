@@ -88,9 +88,9 @@ jobs:
 
       - name: Validate Kafka settings
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
         run: |
           test -n "$KAFKA_BROKERS" || { echo "Kafka broker secret is required"; exit 1; }
           test -n "$KAFKA_USERNAME" || { echo "Kafka username secret is required"; exit 1; }
@@ -127,9 +127,9 @@ jobs:
 
       - name: Collect R package ecosystem
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -176,9 +176,9 @@ jobs:
 
       - name: Collect public R YouTube signals
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
@@ -216,9 +216,9 @@ jobs:
         env:
           KAFKA_TOPIC: webr.events
           KAFKA_CLIENT_ID: statground-rblogger-crawler
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
@@ -246,9 +246,9 @@ jobs:
         env:
           KAFKA_TOPIC: webr.events
           KAFKA_CLIENT_ID: statground-mastodon-rss-collector
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
           KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
@@ -304,9 +304,9 @@ jobs:
 
       - name: Publish R Community events to Kafka
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
@@ -363,7 +363,34 @@ jobs:
           fi
           cutoff_sql="parseDateTime64BestEffort('${started_at}', 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
           for attempt in {1..18}; do
-            visible_count=$(curl -sS --fail --max-time 20 -u "$CH_USER:$CH_PASSWORD" "http://$CH_HOST:$CH_PORT/" --data-binary "SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= ${cutoff_sql} FORMAT TSV" | tr -d '[:space:]')
+            visible_count=$(CUTOFF_SQL="$cutoff_sql" python - <<'PY'
+          import base64
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          sys.path.insert(0, "scripts")
+          from clickhouse_http import build_clickhouse_url
+
+          user = os.environ.get("CH_USER", "").strip()
+          password = os.environ.get("CH_PASSWORD", "")
+          cutoff_sql = os.environ.get("CUTOFF_SQL", "")
+          if not user or not cutoff_sql:
+              print("0")
+              raise SystemExit(0)
+          sql = f"SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql} FORMAT TSV"
+          try:
+              url = build_clickhouse_url(os.environ, default_format="TSV", max_execution_time="20")
+              request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
+              request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
+              request.add_header("Content-Type", "text/plain; charset=utf-8")
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  print(response.read().decode("utf-8", errors="replace").strip() or "0")
+          except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError):
+              print("0")
+          PY
+          )
             visible_count=${visible_count:-0}
             echo "R Community ClickHouse visible rows after collection start: ${visible_count}/${item_count} (attempt ${attempt}/18)"
             if [[ "$visible_count" -gt 0 ]]; then
@@ -376,9 +403,9 @@ jobs:
 
       - name: Generate R Community daily digests
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 || secrets.KAFKA_BROKERS || secrets.KAFKA_BOOTSTRAP_SERVERS }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 || secrets.KAFKA_USERNAME || secrets.KAFKA_EXTERNAL_USER }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 || secrets.KAFKA_PASSWORD || secrets.KAFKA_EXTERNAL_PASSWORD }}
+          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
+          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
@@ -407,3 +434,84 @@ jobs:
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST"
+
+      - name: Validate Web-R CDN publish settings
+        env:
+          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+        run: |
+          test -n "$WEBR_CDN_PUSH_TOKEN" || { echo "WEBR_CDN_PUSH_TOKEN secret is required"; exit 1; }
+          test -n "$R_ECOSYSTEM_CONTENT_KEY" || { echo "R_ECOSYSTEM_CONTENT_KEY secret is required"; exit 1; }
+
+      - name: Checkout Web-R CDN
+        uses: actions/checkout@v4
+        with:
+          repository: statground/web-R_CDN
+          ref: master
+          path: web-R_CDN
+          token: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+
+      - name: Export encrypted Web-R content CDN
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+        run: |
+          python scripts/export_r_ecosystem_cdn.py --cdn-root web-R_CDN --language ko > /tmp/r_ecosystem_export.json
+          python scripts/export_community_cdn.py --cdn-root web-R_CDN --language ko > /tmp/community_export.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          r_eco = json.loads(Path("/tmp/r_ecosystem_export.json").read_text(encoding="utf-8"))
+          community = json.loads(Path("/tmp/community_export.json").read_text(encoding="utf-8"))
+          report = {
+              "schema": "web-r.content-cdn.export-report.v1",
+              "language": "ko",
+              "r_ecosystem": r_eco,
+              "community": community,
+              "r_ecosystem_export": int(r_eco.get("export") or 0),
+              "community_export": int(community.get("export") or 0),
+              "manifest_paths": ["contents/ko/index.json", "community/ko/index.json"],
+          }
+          Path("web_r_content_cdn_export_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(json.dumps({k: report[k] for k in ("r_ecosystem_export", "community_export")}, ensure_ascii=False))
+          PY
+
+      - name: Commit and push Web-R CDN content
+        id: web_r_cdn
+        working-directory: web-R_CDN
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add contents community
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Web-R content CDN is already up to date."
+            exit 0
+          fi
+          git commit -m "Refresh Web-R encrypted content CDN"
+          git push origin HEAD:master
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Record Web-R CDN release
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+        run: |
+          python scripts/record_web_r_cdn_release.py \
+            --report web_r_content_cdn_export_report.json \
+            --commit-sha "${{ steps.web_r_cdn.outputs.commit_sha }}" \
+            --repo statground/web-R_CDN \
+            --branch master \
+            --scope web-r-content \
+            --language ko
