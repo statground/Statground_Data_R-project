@@ -44,6 +44,9 @@ sources:
       first_n: 4
       extract_include_regex: "journal.r-project.org/archive/.+|RJ-|articles"
       max_items_per_page: 120
+    fetch_target_meta: true
+    fetch_target_body: false
+    target_meta_limit: 160
     language: en
     tags: [R, The R Journal, R Foundation, journal]
 

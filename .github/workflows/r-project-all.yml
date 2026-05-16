@@ -314,11 +314,21 @@ jobs:
           KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
           R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
+          R_COMMUNITY_TRANSLATE_ENABLED: ${{ vars.R_COMMUNITY_TRANSLATE_ENABLED || 'true' }}
+          R_COMMUNITY_TRANSLATION_LIMIT: ${{ vars.R_COMMUNITY_TRANSLATION_LIMIT || vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
+          R_COMMUNITY_TRANSLATION_MODEL: ${{ vars.R_COMMUNITY_TRANSLATION_MODEL || vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
         run: |
           go run ./cmd/rproject-collector community \
             --jsonl data/collected/r/latest.jsonl \
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
-            --limit "$R_COMMUNITY_EVENT_LIMIT"
+            --limit "$R_COMMUNITY_EVENT_LIMIT" \
+            --translate="$R_COMMUNITY_TRANSLATE_ENABLED" \
+            --translation-limit "$R_COMMUNITY_TRANSLATION_LIMIT" \
+            --translation-model "$R_COMMUNITY_TRANSLATION_MODEL"
 
       - name: Wait for R Community ClickHouse ingestion
         env:

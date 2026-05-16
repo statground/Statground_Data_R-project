@@ -371,9 +371,42 @@ func runCommunity(ctx context.Context, args []string) error {
 	topic := fs.String("topic", envString("R_COMMUNITY_KAFKA_TOPIC", defaultCommunityTopic), "Kafka topic")
 	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "print events instead of Kafka")
 	limit := fs.Int("limit", envInt("R_COMMUNITY_EVENT_LIMIT", 0), "max JSONL rows to publish; 0 means all")
+	translate := fs.Bool("translate", envBool("R_COMMUNITY_TRANSLATE_ENABLED", true), "translate non-Korean source rows into title_ko/summary_ko/content_ko before publish")
+	translationLimit := fs.Int("translation-limit", envInt("R_COMMUNITY_TRANSLATION_LIMIT", 0), "max rows to translate in this run; 0 means all rows that need translation")
+	translationModel := fs.String("translation-model", envString("R_COMMUNITY_TRANSLATION_MODEL", envString("R_COMMUNITY_DIGEST_MODEL", "google/gemini-2.5-flash-lite")), "AI model for R Community source item Korean translation")
+	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
 	fs.Parse(args)
 
-	events, err := readCommunityJSONLEvents(*jsonlPath, *limit)
+	var ai *aiClient
+	translated := 0
+	translationErrors := make([]string, 0)
+	var enrich func(map[string]any) error
+	if *translate {
+		ai = newAIClient(time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second)
+		if !ai.enabled() {
+			return errors.New("R Community source translation is enabled, but no AI provider key is configured")
+		}
+		enrich = func(row map[string]any) error {
+			if *translationLimit > 0 && translated >= *translationLimit {
+				return nil
+			}
+			changed, err := translateCommunitySourceRow(ai, *translationModel, row)
+			if err != nil {
+				message := fmt.Sprintf("%s: %v", firstNonEmpty(stringAny(row["canonical_url"]), stringAny(row["external_id"])), err)
+				translationErrors = append(translationErrors, message)
+				if *failOnTranslationErr {
+					return errors.New(message)
+				}
+				return nil
+			}
+			if changed {
+				translated++
+			}
+			return nil
+		}
+	}
+
+	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, enrich)
 	if err != nil {
 		return err
 	}
@@ -384,11 +417,14 @@ func runCommunity(ctx context.Context, args []string) error {
 	if err := pub.publishGeneric(ctx, events); err != nil {
 		return err
 	}
-	fmt.Printf("published=%d topic=%s jsonl=%s\n", len(events), *topic, *jsonlPath)
+	if len(translationErrors) > 0 {
+		fmt.Printf("translation_errors=%d first_error=%s\n", len(translationErrors), translationErrors[0])
+	}
+	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s\n", len(events), translated, *topic, *jsonlPath)
 	return nil
 }
 
-func readCommunityJSONLEvents(path string, limit int) ([]genericEvent, error) {
+func readCommunityJSONLEvents(path string, limit int, enrich func(map[string]any) error) ([]genericEvent, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -405,6 +441,11 @@ func readCommunityJSONLEvents(path string, limit int) ([]genericEvent, error) {
 		var row map[string]any
 		if err := json.Unmarshal(line, &row); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		if enrich != nil {
+			if err := enrich(row); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+			}
 		}
 		events = append(events, communityRowEvent(row))
 	}
@@ -426,6 +467,190 @@ func communityRowEvent(row map[string]any) genericEvent {
 	source := firstNonEmpty(stringAny(row["source_id"]), stringAny(row["source_name"]), "r_community_sources_jsonl")
 	observedAt := firstNonEmpty(stringAny(row["published_at"]), stringAny(row["collected_at"]))
 	return newGenericEvent("r.community.item.v1", source, sourceURL, "R-Community", "", "", observedAt, payload)
+}
+
+func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any) (bool, error) {
+	if ai == nil || !ai.enabled() {
+		return false, errors.New("AI client is not enabled")
+	}
+	title := stringAny(row["title"])
+	summary := stringAny(row["summary"])
+	content := stringAny(row["content"])
+	changed := false
+	needsTitle := strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && !looksKorean(title, 0.20)
+	needsSummary := strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && !looksKorean(summary, 0.25)
+
+	if strings.TrimSpace(content) == "" && (needsTitle || needsSummary) {
+		response, err := ai.chat(communitySourceTitleSummaryPrompt(title, summary), model)
+		if err != nil {
+			return changed, err
+		}
+		translatedTitle, translatedSummary := parseCommunitySourceTranslationResponse(response)
+		if needsTitle {
+			translatedTitle = cleanBoardTitle(translatedTitle)
+			if translatedTitle != "" {
+				row["title_ko"] = translatedTitle
+				changed = true
+				needsTitle = false
+			}
+		}
+		if needsSummary {
+			translatedSummary = strings.TrimSpace(removeBoardURLs(stripTags(translatedSummary)))
+			if translatedSummary != "" {
+				row["summary_ko"] = translatedSummary
+				changed = true
+				needsSummary = false
+			}
+		}
+	}
+
+	if needsTitle {
+		translatedTitle, err := ai.chat(communitySourceTitlePrompt(title, summary), model)
+		if err != nil {
+			return changed, err
+		}
+		translatedTitle = cleanBoardTitle(translatedTitle)
+		if translatedTitle != "" {
+			row["title_ko"] = translatedTitle
+			changed = true
+		}
+	}
+	if needsSummary {
+		translatedSummary, err := ai.chat(communitySourceSummaryPrompt(title, summary), model)
+		if err != nil {
+			return changed, err
+		}
+		translatedSummary = strings.TrimSpace(removeBoardURLs(stripTags(translatedSummary)))
+		if translatedSummary != "" {
+			row["summary_ko"] = translatedSummary
+			changed = true
+		}
+	}
+	if strings.TrimSpace(stringAny(row["content_ko"])) == "" && strings.TrimSpace(content) != "" && !looksKorean(content, 0.25) {
+		translatedContent, err := ai.chat(communitySourceContentPrompt(title, content), model)
+		if err != nil {
+			return changed, err
+		}
+		sanitized, err := sanitizeBoardHTML(translatedContent)
+		if err != nil {
+			return changed, err
+		}
+		if strings.TrimSpace(stripTags(sanitized)) != "" {
+			row["content_ko"] = sanitized
+			changed = true
+		}
+	}
+	if strings.TrimSpace(stringAny(row["content_ko"])) == "" && strings.TrimSpace(stringAny(row["summary_ko"])) != "" {
+		row["content_ko"] = safeHTML(stringAny(row["summary_ko"]))
+		changed = true
+	}
+	if changed {
+		row["translation_status"] = "translated"
+		row["translation_language"] = "ko"
+		row["translation_model"] = model
+		row["translation_updated_at"] = nowKST().Format(time.RFC3339)
+	}
+	return changed, nil
+}
+
+func communitySourceTitleSummaryPrompt(title, summary string) string {
+	return fmt.Sprintf(`You are a professional Korean translator for the Web-R R ecosystem reader.
+
+Translate the source title and abstract/summary into Korean.
+
+Output rules:
+- Return only JSON: {"title_ko":"...","summary_ko":"..."}
+- Do not include Markdown fences, explanations, labels, HTML, URLs, or hyperlinks.
+- title_ko must be one concise Korean title line.
+- summary_ko must be one compact Korean paragraph in polite formal Korean ending in ~합니다 or ~입니다.
+- Preserve R, CRAN, package names, function names, code, formulas, numbers, version strings, statistical terms, and proper nouns.
+
+Source title:
+%s
+
+Source abstract/summary:
+%s`, title, truncateRunes(summary, 3000))
+}
+
+func parseCommunitySourceTranslationResponse(value string) (string, string) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```json")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	type response struct {
+		TitleKo   string `json:"title_ko"`
+		SummaryKo string `json:"summary_ko"`
+		Title     string `json:"title"`
+		Summary   string `json:"summary"`
+	}
+	var parsed response
+	if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+		return firstNonEmpty(parsed.TitleKo, parsed.Title), firstNonEmpty(parsed.SummaryKo, parsed.Summary)
+	}
+	start := strings.Index(value, "{")
+	end := strings.LastIndex(value, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(value[start:end+1]), &parsed); err == nil {
+			return firstNonEmpty(parsed.TitleKo, parsed.Title), firstNonEmpty(parsed.SummaryKo, parsed.Summary)
+		}
+	}
+	return "", value
+}
+
+func communitySourceTitlePrompt(title, summary string) string {
+	return fmt.Sprintf(`You are a professional Korean translator for the Web-R R ecosystem reader.
+
+Output rules:
+- Return exactly one Korean title line.
+- Do not include explanations, labels, quotes, Markdown, HTML, URLs, or hyperlinks.
+- Preserve R, CRAN, package names, function names, version numbers, statistical terms, and proper nouns.
+- Keep it concise and natural for Korean readers.
+
+Source title:
+%s
+
+Source summary:
+%s`, title, truncateRunes(summary, 1200))
+}
+
+func communitySourceSummaryPrompt(title, summary string) string {
+	return fmt.Sprintf(`You are an editorial Korean translator for the Web-R R ecosystem reader.
+
+Translate the source summary into Korean.
+
+Output rules:
+- Return one compact Korean paragraph as plain text.
+- Do not include explanations, labels, Markdown, HTML, URLs, or hyperlinks.
+- Use polite formal Korean ending in ~합니다 or ~입니다.
+- Preserve R, CRAN, package names, function names, code, numbers, version strings, and proper nouns.
+
+Source title:
+%s
+
+Source summary:
+%s`, title, truncateRunes(summary, 3000))
+}
+
+func communitySourceContentPrompt(title, content string) string {
+	return fmt.Sprintf(`You are an editorial Korean translator for the Web-R R ecosystem reader.
+
+Translate and lightly edit the source body for Korean Web-R readers.
+
+Output rules:
+- Return only a compact HTML fragment. The first character must be "<".
+- Never use <html>, <head>, or <body>.
+- Allowed tags only: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <code>, <pre>, <blockquote>.
+- Do not output hyperlinks, URLs, Markdown links, HTML <a> tags, href attributes, citations, source links, or "read more" links.
+- Use polite formal Korean ending in ~합니다 or ~입니다.
+- Preserve R, CRAN, package names, function names, code, formulas, numbers, version strings, and proper nouns.
+- Do not add an introduction, explanation, label, or meta-commentary.
+
+Source title:
+%s
+
+Source body:
+%s`, title, truncateRunes(stripTags(content), 9000))
 }
 
 func runCommunityDigest(ctx context.Context, args []string) error {
@@ -1210,28 +1435,28 @@ func communityDigestEvents(records []communityDigestRecord) []genericEvent {
 
 func communityDigestPayload(record communityDigestRecord) map[string]any {
 	return map[string]any{
-		"payload_schema":       "r_community_daily_digest_v1",
-		"source_method":        "ai_daily_source_path_digest",
-		"collection_status":    record.Status,
-		"digest_id":            record.DigestID,
-		"digest_uuid":          record.DigestUUID,
-		"digest_date":          record.DigestDate,
-		"source_type":          record.SourceType,
-		"source_id":            record.SourceID,
-		"source_name":          record.SourceName,
-		"platform":             record.Platform,
-		"source_url":           record.SourceURL,
-		"title":                record.Title,
-		"summary":              record.Summary,
-		"item_count":           record.ItemCount,
-		"deduped_item_count":   record.DedupedItemCount,
-		"source_items":         record.Items,
-		"model":                record.Model,
-		"prompt_hash":          record.PromptHash,
-		"generated_at":         record.GeneratedAt,
-		"payload_hash":         record.PayloadHash,
-		"copyright_policy":     "digest_and_links_only",
-		"dedupe_policy":        "canonical_url_global_per_run",
+		"payload_schema":        "r_community_daily_digest_v1",
+		"source_method":         "ai_daily_source_path_digest",
+		"collection_status":     record.Status,
+		"digest_id":             record.DigestID,
+		"digest_uuid":           record.DigestUUID,
+		"digest_date":           record.DigestDate,
+		"source_type":           record.SourceType,
+		"source_id":             record.SourceID,
+		"source_name":           record.SourceName,
+		"platform":              record.Platform,
+		"source_url":            record.SourceURL,
+		"title":                 record.Title,
+		"summary":               record.Summary,
+		"item_count":            record.ItemCount,
+		"deduped_item_count":    record.DedupedItemCount,
+		"source_items":          record.Items,
+		"model":                 record.Model,
+		"prompt_hash":           record.PromptHash,
+		"generated_at":          record.GeneratedAt,
+		"payload_hash":          record.PayloadHash,
+		"copyright_policy":      "digest_and_links_only",
+		"dedupe_policy":         "canonical_url_global_per_run",
 		"excluded_source_types": []string{"korean_community_site", "korean_community_forum", "community_support_index", "user_group_index", "community_archive"},
 	}
 }

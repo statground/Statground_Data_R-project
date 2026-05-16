@@ -59,7 +59,11 @@ class NormalizedItem:
     source_url: str
     canonical_url: str
     title: str
+    title_ko: str | None = None
     summary: str | None = None
+    summary_ko: str | None = None
+    content: str | None = None
+    content_ko: str | None = None
     author: str | None = None
     published_at: str | None = None
     collected_at: str = field(default_factory=lambda: dt.datetime.now(KST).isoformat(timespec="seconds"))
@@ -179,7 +183,11 @@ class RSourceCollector:
                 if parsed.astimezone(dt.timezone.utc) < cutoff:
                     return
         item.title = compact_text(item.title)[:500]
+        item.title_ko = compact_text(item.title_ko or "")[:500] or None
         item.summary = compact_text(item.summary or "")[:4000] or None
+        item.summary_ko = compact_text(item.summary_ko or "")[:4000] or None
+        item.content = compact_multiline_text(item.content or "")[:20000] or None
+        item.content_ko = compact_multiline_text(item.content_ko or "")[:20000] or None
         item.tags = sorted({compact_text(tag).lstrip("#") for tag in item.tags if compact_text(tag)})
         self.seen.add(item.external_id)
         if canonical_key:
@@ -195,8 +203,12 @@ class RSourceCollector:
         source_url: str,
         canonical_url: str,
         title: str,
+        title_ko: str | None = None,
         native_id: str | None = None,
         summary: str | None = None,
+        summary_ko: str | None = None,
+        content: str | None = None,
+        content_ko: str | None = None,
         author: str | None = None,
         published_at: str | None = None,
         language: str | None = None,
@@ -215,7 +227,11 @@ class RSourceCollector:
             source_url=source_url,
             canonical_url=canonical,
             title=title or canonical or source_id,
+            title_ko=title_ko,
             summary=summary,
+            summary_ko=summary_ko,
+            content=content,
+            content_ko=content_ko,
             author=author,
             published_at=published_at,
             language=language or source.get("language"),
@@ -767,25 +783,40 @@ class RSourceCollector:
     ) -> None:
         emitted = 0
         fetch_target_meta = bool(source.get("fetch_target_meta", False))
+        fetch_target_body = bool(source.get("fetch_target_body", False))
         target_meta_limit = int(source.get("target_meta_limit", os.environ.get("HTML_TARGET_META_LIMIT", 20)))
+        target_body_limit = int(source.get("target_body_limit", os.environ.get("HTML_TARGET_BODY_LIMIT", target_meta_limit)))
+        target_selectors = source.get("target_content_selectors") or []
+        target_body_max_chars = int(source.get("target_body_max_chars", os.environ.get("HTML_TARGET_BODY_MAX_CHARS", 12000)))
         for link in unique_by_url(links):
             if emitted >= int(max_items):
                 break
             target_meta: dict[str, Any] = {}
-            if fetch_target_meta and emitted < target_meta_limit and same_scheme_http(link["url"]):
+            fetch_target_content = fetch_target_body and emitted < target_body_limit
+            should_fetch_target = (fetch_target_meta and emitted < target_meta_limit) or fetch_target_content
+            if should_fetch_target and same_scheme_http(link["url"]):
                 try:
                     target_response = self.fetch(link["url"], accept="text/html")
                     if "html" in target_response.headers.get("Content-Type", "").lower():
                         target_soup = BeautifulSoup(target_response.text, "html.parser")
-                        target_snapshot = html_page_snapshot(target_soup, link["url"])
-                        target_meta = {
-                            "target_title": target_snapshot.get("html_title"),
-                            "target_meta_description": target_snapshot.get("meta_description"),
-                            "target_og_image": target_snapshot.get("og_image"),
-                            "target_content_type": target_response.headers.get("Content-Type", ""),
-                        }
+                        target_meta = html_target_detail(target_soup, link["url"], target_selectors, target_body_max_chars, fetch_target_content)
+                        target_meta["target_content_type"] = target_response.headers.get("Content-Type", "")
                 except Exception as exc:  # noqa: BLE001
                     target_meta = {"target_fetch_error": str(exc)}
+            target_title = first_nonempty(target_meta.get("target_title"), link.get("title"), link["url"])
+            target_summary = first_nonempty(target_meta.get("target_abstract"), target_meta.get("target_meta_description"))
+            target_content = str(target_meta.get("target_content_text") or "").strip()
+            summary = first_nonempty(target_summary, target_content[:1000])
+            if not summary:
+                summary = f"Discovered from {page_title}: {page_url}"
+            published_at = first_nonempty(
+                target_meta.get("target_published_at"),
+                parse_fuzzy_date_to_iso(" ".join([link.get("title", ""), link.get("context_text", "")])),
+            )
+            target_authors = target_meta.get("target_authors") or []
+            if isinstance(target_authors, str):
+                target_authors = [target_authors]
+            author = ", ".join(str(value) for value in target_authors if str(value).strip()) or None
             raw = {
                 "collector": "html_links",
                 "page_url": page_url,
@@ -814,10 +845,11 @@ class RSourceCollector:
                 source_url=source_url,
                 canonical_url=link["url"],
                 native_id=link["url"],
-                title=link["title"] or link["url"],
-                summary=f"Discovered from {page_title}: {page_url}",
-                author=None,
-                published_at=parse_fuzzy_date_to_iso(" ".join([link.get("title", ""), link.get("context_text", "")])),
+                title=target_title,
+                summary=summary,
+                content=target_content,
+                author=author,
+                published_at=published_at,
                 language=source.get("language"),
                 tags=source.get("tags", []),
                 raw=raw,
@@ -1016,10 +1048,26 @@ def unique_preserve_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+def first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = compact_text(str(value or ""))
+        if text:
+            return text
+    return ""
+
+
 def compact_text(value: str | None) -> str:
     if value is None:
         return ""
     return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def compact_multiline_text(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [compact_text(line) for line in text.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
 
 
 def truncate_text(value: str | None, limit: int) -> str:
@@ -1077,6 +1125,99 @@ def meta_content(soup: BeautifulSoup, *, name: str | None = None, property_name:
     tag = soup.find("meta", attrs=attrs)
     if tag and tag.get("content"):
         return compact_text(str(tag.get("content")))
+    return ""
+
+
+def meta_content_any(soup: BeautifulSoup, candidates: Iterable[dict[str, str]]) -> str:
+    for attrs in candidates:
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            value = compact_text(str(tag.get("content")))
+            if value:
+                return value
+    return ""
+
+
+def meta_content_list(soup: BeautifulSoup, candidates: Iterable[dict[str, str]]) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for attrs in candidates:
+        for tag in soup.find_all("meta", attrs=attrs):
+            value = compact_text(str(tag.get("content") or ""))
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
+def html_target_detail(soup: BeautifulSoup, page_url: str, selectors: list[str], max_chars: int, include_content: bool = True) -> dict[str, Any]:
+    snapshot = html_page_snapshot(soup, page_url)
+    title = first_nonempty(
+        meta_content_any(soup, [{"name": "citation_title"}, {"property": "og:title"}, {"name": "twitter:title"}]),
+        snapshot.get("h1_title"),
+        snapshot.get("html_title"),
+    )
+    abstract = first_nonempty(
+        meta_content_any(
+            soup,
+            [
+                {"name": "citation_abstract"},
+                {"property": "description"},
+                {"name": "description"},
+                {"property": "og:description"},
+            ],
+        ),
+        snapshot.get("meta_description"),
+        snapshot.get("og_description"),
+    )
+    published_at = parse_datetime_to_iso(
+        first_nonempty(
+            meta_content_any(
+                soup,
+                [
+                    {"property": "article:published"},
+                    {"property": "article:published_time"},
+                    {"itemprop": "datePublished"},
+                    {"name": "citation_publication_date"},
+                    {"name": "dc.date"},
+                    {"name": "date"},
+                ],
+            )
+        )
+    )
+    authors = meta_content_list(soup, [{"name": "citation_author"}, {"name": "article:author"}, {"property": "article:author"}])
+    doi = meta_content_any(soup, [{"name": "citation_doi"}, {"name": "doi"}])
+    content_text = extract_article_content_text(soup, selectors, max_chars) if include_content else ""
+    return {
+        "target_title": title,
+        "target_canonical_url": snapshot.get("canonical_url"),
+        "target_meta_description": snapshot.get("meta_description"),
+        "target_og_title": snapshot.get("og_title"),
+        "target_og_description": snapshot.get("og_description"),
+        "target_og_image": snapshot.get("og_image"),
+        "target_published_at": published_at,
+        "target_authors": authors,
+        "target_doi": doi,
+        "target_abstract": truncate_text(abstract, 4000),
+        "target_content_text": content_text,
+    }
+
+
+def extract_article_content_text(soup: BeautifulSoup, selectors: list[str], max_chars: int) -> str:
+    fallback_selectors = ["d-article", "article", "main", ".article", ".content", "body"]
+    selectors = list(dict.fromkeys([*(selectors or []), *fallback_selectors]))
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+        for unwanted in node.select(
+            "script, style, nav, header, footer, aside, form, noscript, "
+            ".distill-site-nav, .appendix-bottom, .d-appendix"
+        ):
+            unwanted.decompose()
+        text = compact_multiline_text(node.get_text("\n", strip=True))
+        if text:
+            return text[:max_chars] if max_chars > 0 else text
     return ""
 
 
