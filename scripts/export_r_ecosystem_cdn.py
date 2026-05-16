@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import hmac
 import json
@@ -227,10 +228,11 @@ def derive_key(secret: str) -> bytes:
     return hashlib.sha256((secret.strip() + "\0" + KEY_PURPOSE).encode("utf-8")).digest()
 
 
-def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str) -> dict[str, Any]:
+def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str, compress: bool = False) -> dict[str, Any]:
     plaintext = json.dumps(plain, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    nonce = hmac.new(key, normalize_path(rel_path).encode("utf-8") + b"\0" + plaintext, hashlib.sha256).digest()[:12]
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext, normalize_path(rel_path).encode("utf-8"))
+    payload = gzip.compress(plaintext, compresslevel=9) if compress else plaintext
+    nonce = hmac.new(key, normalize_path(rel_path).encode("utf-8") + b"\0" + payload, hashlib.sha256).digest()[:12]
+    ciphertext = AESGCM(key).encrypt(nonce, payload, normalize_path(rel_path).encode("utf-8"))
     doc = {
         "schema": ENCRYPTED_SCHEMA,
         "alg": "AES-256-GCM",
@@ -240,6 +242,8 @@ def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language:
         "nonce": b64url(nonce),
         "ciphertext": b64url(ciphertext),
     }
+    if compress:
+        doc["compression"] = "gzip"
     if uuid:
         doc["uuid"] = uuid
     return doc

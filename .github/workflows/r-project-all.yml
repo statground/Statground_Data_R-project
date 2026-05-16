@@ -457,49 +457,50 @@ jobs:
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST"
 
-      - name: Validate Web-R CDN publish settings
+      - name: Validate Web-R CDN2 publish settings
         env:
-          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
         run: |
-          test -n "$WEBR_CDN_PUSH_TOKEN" || { echo "WEBR_CDN_PUSH_TOKEN secret is required"; exit 1; }
+          test -n "$STATGROUND_CDN2_ADMIN_TOKEN" || { echo "STATGROUND_CDN2_ADMIN_TOKEN secret is required"; exit 1; }
           test -n "$R_ECOSYSTEM_CONTENT_KEY" || { echo "R_ECOSYSTEM_CONTENT_KEY secret is required"; exit 1; }
 
-      - name: Checkout Web-R CDN
+      - name: Ensure Web-R CDN2 repositories
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_contents --description "Statground Web-R CDN2 R ecosystem encrypted content"
+          python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_packages --description "Statground Web-R CDN2 R package encrypted content"
+          python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_community --description "Statground Web-R CDN2 community encrypted content"
+
+      - name: Checkout Web-R CDN2 contents
         uses: actions/checkout@v4
         with:
-          repository: statground/web-R_CDN
-          ref: master
-          path: web-R_CDN
-          token: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+          repository: statground/web-r_CDN2_contents
+          ref: main
+          path: web-r_CDN2_contents
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           persist-credentials: false
 
-      - name: Validate Web-R CDN push permission
-        env:
-          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import urllib.error
-          import urllib.request
+      - name: Checkout Web-R CDN2 packages
+        uses: actions/checkout@v4
+        with:
+          repository: statground/web-r_CDN2_packages
+          ref: main
+          path: web-r_CDN2_packages
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
 
-          token = os.environ.get("WEBR_CDN_PUSH_TOKEN", "").strip()
-          req = urllib.request.Request("https://api.github.com/repos/statground/web-R_CDN")
-          req.add_header("Accept", "application/vnd.github+json")
-          req.add_header("Authorization", f"Bearer {token}")
-          try:
-              with urllib.request.urlopen(req, timeout=20) as resp:
-                  payload = json.loads(resp.read().decode("utf-8"))
-          except urllib.error.HTTPError as exc:
-              raise SystemExit(f"WEBR_CDN_PUSH_TOKEN cannot read statground/web-R_CDN: HTTP {exc.code}") from exc
-          permissions = payload.get("permissions") or {}
-          if not permissions.get("push"):
-              raise SystemExit("WEBR_CDN_PUSH_TOKEN must have write access to statground/web-R_CDN contents.")
-          print("WEBR_CDN_PUSH_TOKEN can push to statground/web-R_CDN.")
-          PY
+      - name: Checkout Web-R CDN2 community
+        uses: actions/checkout@v4
+        with:
+          repository: statground/web-r_CDN2_community
+          ref: main
+          path: web-r_CDN2_community
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
 
-      - name: Export encrypted Web-R content CDN
+      - name: Export encrypted Web-R CDN2 content
         env:
           CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -509,9 +510,9 @@ jobs:
           CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
         run: |
-          python scripts/export_r_ecosystem_cdn.py --cdn-root web-R_CDN --language ko > /tmp/r_ecosystem_export.json
-          python scripts/export_r_package_cdn.py --cdn-root web-R_CDN --language ko > /tmp/r_package_export.json
-          python scripts/export_community_cdn.py --cdn-root web-R_CDN --language ko > /tmp/community_export.json
+          python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
+          python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
+          python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -519,43 +520,113 @@ jobs:
           r_eco = json.loads(Path("/tmp/r_ecosystem_export.json").read_text(encoding="utf-8"))
           r_package = json.loads(Path("/tmp/r_package_export.json").read_text(encoding="utf-8"))
           community = json.loads(Path("/tmp/community_export.json").read_text(encoding="utf-8"))
-          report = {
-              "schema": "web-r.content-cdn.export-report.v1",
+          reports = {
+              "contents": {
+                  "schema": "web-r.content-cdn.export-report.v2",
+                  "language": "ko",
+                  "scope": "web-r-content",
+                  "r_ecosystem": r_eco,
+                  "r_ecosystem_export": int(r_eco.get("export") or 0),
+                  "manifest_paths": ["contents/ko/index.json"],
+              },
+              "packages": {
+                  "schema": "web-r.content-cdn.export-report.v2",
+                  "language": "ko",
+                  "scope": "web-r-packages",
+                  "r_package": r_package,
+                  "packages": int(r_package.get("packages") or 0),
+                  "news": int(r_package.get("news") or 0),
+                  "package_details": int(r_package.get("package_details") or 0),
+                  "manifest_paths": ["packages/ko/index.json", "packages/ko/versions.json"],
+              },
+              "community": {
+                  "schema": "web-r.content-cdn.export-report.v2",
+                  "language": "ko",
+                  "scope": "web-r-community",
+                  "community": community,
+                  "community_export": int(community.get("export") or 0),
+                  "manifest_paths": ["community/ko/index.json"],
+              },
+          }
+          for key, report in reports.items():
+              report["item_count"] = int(report.get("r_ecosystem_export") or 0) + int(report.get("community_export") or 0) + int(report.get("packages") or 0) + int(report.get("news") or 0) + int(report.get("package_details") or 0)
+              Path(f"web_r_cdn2_{key}_export_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+          combined = {
+              "schema": "web-r.content-cdn.export-report.v2",
               "language": "ko",
               "r_ecosystem": r_eco,
               "r_package": r_package,
               "community": community,
-              "r_ecosystem_export": int(r_eco.get("export") or 0),
-              "r_package_export": int(r_package.get("packages") or 0) + int(r_package.get("news") or 0),
-              "community_export": int(community.get("export") or 0),
-              "manifest_paths": ["contents/ko/index.json", "packages/ko/index.json", "community/ko/index.json"],
+              "reports": reports,
           }
-          Path("web_r_content_cdn_export_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-          print(json.dumps({k: report[k] for k in ("r_ecosystem_export", "r_package_export", "community_export")}, ensure_ascii=False))
+          Path("web_r_content_cdn_export_report.json").write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(json.dumps({key: report["item_count"] for key, report in reports.items()}, ensure_ascii=False))
           PY
 
-      - name: Commit and push Web-R CDN content
-        id: web_r_cdn
-        working-directory: web-R_CDN
+      - name: Commit and push Web-R CDN2 contents
+        id: web_r_cdn2_contents
+        working-directory: web-r_CDN2_contents
         env:
-          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
         run: |
           git config user.name "statground-r-project-bot"
           git config user.email "actions@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${WEBR_CDN_PUSH_TOKEN}@github.com/statground/web-R_CDN.git"
-          git add contents packages community
+          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_contents.git"
+          git add contents
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "Web-R content CDN is already up to date."
+            echo "Web-R CDN2 contents are already up to date."
             exit 0
           fi
-          git commit -m "Refresh Web-R encrypted content CDN"
-          git push origin HEAD:master
+          git commit -m "Refresh Web-R CDN2 encrypted contents"
+          git push origin HEAD:main
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Record Web-R CDN release
+      - name: Commit and push Web-R CDN2 packages
+        id: web_r_cdn2_packages
+        working-directory: web-r_CDN2_packages
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_packages.git"
+          git add packages
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Web-R CDN2 packages are already up to date."
+            exit 0
+          fi
+          git commit -m "Refresh Web-R CDN2 encrypted packages"
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push Web-R CDN2 community
+        id: web_r_cdn2_community
+        working-directory: web-r_CDN2_community
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_community.git"
+          git add community
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Web-R CDN2 community is already up to date."
+            exit 0
+          fi
+          git commit -m "Refresh Web-R CDN2 encrypted community"
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Record Web-R CDN2 releases
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -564,9 +635,23 @@ jobs:
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
         run: |
           python scripts/record_web_r_cdn_release.py \
-            --report web_r_content_cdn_export_report.json \
-            --commit-sha "${{ steps.web_r_cdn.outputs.commit_sha }}" \
-            --repo statground/web-R_CDN \
-            --branch master \
+            --report web_r_cdn2_contents_export_report.json \
+            --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
+            --repo statground/web-r_CDN2_contents \
+            --branch main \
             --scope web-r-content \
+            --language ko
+          python scripts/record_web_r_cdn_release.py \
+            --report web_r_cdn2_packages_export_report.json \
+            --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
+            --repo statground/web-r_CDN2_packages \
+            --branch main \
+            --scope web-r-packages \
+            --language ko
+          python scripts/record_web_r_cdn_release.py \
+            --report web_r_cdn2_community_export_report.json \
+            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --repo statground/web-r_CDN2_community \
+            --branch main \
+            --scope web-r-community \
             --language ko
