@@ -255,6 +255,7 @@ class RSourceCollector:
         feed_title = getattr(feed, "title", None)
         result: list[NormalizedItem] = []
         max_items = int(source.get("max_items", 200))
+        emit_feed_item = bool(source.get("emit_feed_item", not bool(source.get("expand_entry_links", False))))
         for entry in parsed.entries[:max_items]:
             link = entry.get("link") or entry.get("id") or url
             title = html_to_text(entry.get("title") or link)
@@ -264,46 +265,85 @@ class RSourceCollector:
                 continue
             native_id = entry.get("id") or entry.get("guid") or link
             published_at = entry_datetime(entry)
+            if self.since_days is not None and published_at:
+                parsed_at = parse_datetime(published_at)
+                cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.since_days)
+                if parsed_at and parsed_at.astimezone(dt.timezone.utc) < cutoff:
+                    continue
             tags = [tag.get("term") for tag in entry.get("tags", []) if tag.get("term")]
-            result.append(
-                self.make_item(
-                    source=source,
-                    source_id=source_id,
-                    source_url=source_url,
-                    canonical_url=link,
-                    native_id=native_id,
-                    title=title,
-                    summary=summary,
-                    author=entry.get("author"),
-                    published_at=published_at,
-                    language=entry.get("language") or source.get("language"),
-                    tags=tags,
-                    raw={
-                        "collector": "rss",
-                        "feed_url": url,
-                        "feed_title": feed_title,
-                        "feed_link": feed.get("link"),
-                        "feed_subtitle": html_to_text(feed.get("subtitle")),
-                        "feed_language": feed.get("language"),
-                        "feed_updated": feed.get("updated"),
-                        "feed_updated_parsed": struct_time_to_iso(feed.get("updated_parsed")) if feed.get("updated_parsed") else None,
-                        "entry_id": native_id,
-                        "link": link,
-                        "published": entry.get("published"),
-                        "updated": entry.get("updated"),
-                        "author": entry.get("author"),
-                        "author_detail": json_safe(entry.get("author_detail") or {}),
-                        "tags": tags,
-                        "title_detail": json_safe(entry.get("title_detail") or {}),
-                        "summary_detail": json_safe(entry.get("summary_detail") or {}),
-                        "links": json_safe(entry.get("links") or []),
-                        "enclosures": json_safe(entry.get("enclosures") or []),
-                        "media_content": json_safe(entry.get("media_content") or []),
-                        "media_thumbnail": json_safe(entry.get("media_thumbnail") or []),
-                        "content": json_safe(entry.get("content") or []),
-                    },
+            raw = {
+                "collector": "rss",
+                "feed_url": url,
+                "feed_title": feed_title,
+                "feed_link": feed.get("link"),
+                "feed_subtitle": html_to_text(feed.get("subtitle")),
+                "feed_language": feed.get("language"),
+                "feed_updated": feed.get("updated"),
+                "feed_updated_parsed": struct_time_to_iso(feed.get("updated_parsed")) if feed.get("updated_parsed") else None,
+                "entry_id": native_id,
+                "link": link,
+                "published": entry.get("published"),
+                "updated": entry.get("updated"),
+                "author": entry.get("author"),
+                "author_detail": json_safe(entry.get("author_detail") or {}),
+                "tags": tags,
+                "title_detail": json_safe(entry.get("title_detail") or {}),
+                "summary_detail": json_safe(entry.get("summary_detail") or {}),
+                "links": json_safe(entry.get("links") or []),
+                "enclosures": json_safe(entry.get("enclosures") or []),
+                "media_content": json_safe(entry.get("media_content") or []),
+                "media_thumbnail": json_safe(entry.get("media_thumbnail") or []),
+                "content": json_safe(entry.get("content") or []),
+            }
+            if emit_feed_item:
+                result.append(
+                    self.make_item(
+                        source=source,
+                        source_id=source_id,
+                        source_url=source_url,
+                        canonical_url=link,
+                        native_id=native_id,
+                        title=title,
+                        summary=summary,
+                        author=entry.get("author"),
+                        published_at=published_at,
+                        language=entry.get("language") or source.get("language"),
+                        tags=tags,
+                        raw=raw,
+                    )
                 )
-            )
+            if source.get("expand_entry_links", False):
+                entry_html = entry_html_value(entry)
+                if not entry_html:
+                    continue
+                entry_soup = BeautifulSoup(entry_html, "html.parser")
+                links = extract_links(
+                    entry_soup,
+                    base_url=link,
+                    include_regex=source.get("entry_link_include_regex"),
+                    exclude_regex=source.get("entry_link_exclude_regex"),
+                )
+                page_meta = {
+                    "page_host": urlparse(link).netloc.lower(),
+                    "h1_title": title,
+                    "html_title": title,
+                    "meta_description": summary or "",
+                    "canonical_url": canonicalize_url(link),
+                    "feed_urls": [],
+                    "og_title": "",
+                    "og_description": "",
+                    "og_image": "",
+                }
+                self._emit_html_links(
+                    source,
+                    source_id,
+                    source_url,
+                    link,
+                    links,
+                    title,
+                    page_meta,
+                    source.get("entry_link_max_items", 80),
+                )
         return result
 
     def collect_reddit_subreddit(self, source: dict[str, Any]) -> None:
@@ -1332,6 +1372,15 @@ def entry_summary(entry: Any) -> str | None:
     if content and isinstance(content, list):
         return html_to_text(content[0].get("value"))
     return None
+
+
+def entry_html_value(entry: Any) -> str:
+    content = entry.get("content") or []
+    if content and isinstance(content, list):
+        for row in content:
+            if isinstance(row, dict) and row.get("value"):
+                return str(row.get("value"))
+    return str(entry.get("summary") or "")
 
 
 def entry_datetime(entry: Any) -> str | None:

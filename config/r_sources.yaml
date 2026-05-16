@@ -424,6 +424,13 @@ sources:
     url: https://rweekly.org/atom.xml
     source_url: https://rweekly.org/
     max_items: 100
+    expand_entry_links: true
+    emit_feed_item: false
+    entry_link_max_items: 50
+    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html"
+    fetch_target_meta: true
+    fetch_target_body: false
+    target_meta_limit: 40
     language: en
     tags: [R, R Weekly, newsletter]
 

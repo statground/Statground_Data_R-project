@@ -479,6 +479,14 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	changed := false
 	needsTitle := strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && !looksKorean(title, 0.20)
 	needsSummary := strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && !looksKorean(summary, 0.25)
+	if strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && looksKorean(title, 0.20) {
+		row["title_ko"] = title
+		changed = true
+	}
+	if strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && looksKorean(summary, 0.25) {
+		row["summary_ko"] = summary
+		changed = true
+	}
 
 	if strings.TrimSpace(content) == "" && (needsTitle || needsSummary) {
 		response, err := ai.chat(communitySourceTitleSummaryPrompt(title, summary), model)
