@@ -41,8 +41,8 @@ def main() -> int:
 
     report_path = Path(args.report)
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
-    manifest_paths = ["contents/ko/index.json", "community/ko/index.json"]
-    item_count = int(report.get("r_ecosystem_export", 0)) + int(report.get("community_export", 0))
+    manifest_paths = report.get("manifest_paths") or ["contents/ko/index.json", "packages/ko/index.json", "community/ko/index.json"]
+    item_count = int(report.get("r_ecosystem_export", 0)) + int(report.get("r_package_export", 0)) + int(report.get("community_export", 0))
     published_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     version = int(time.time() * 1000)
     base_url = f"https://cdn.jsdelivr.net/gh/{args.repo}@{commit_sha}"

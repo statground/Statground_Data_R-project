@@ -78,6 +78,26 @@ sources:
     language: en
     tags: [R, R-packages, mailing-list, CRAN]
 
+  - id: official:bioconductor:release-announcements
+    type: html_links
+    source_type: package_update_feed
+    platform: bioconductor
+    name: Bioconductor release announcements
+    url: https://bioconductor.org/about/release-announcements/
+    source_url: https://bioconductor.org/about/release-announcements/
+    include_regex: "bioconductor\\.org/news/bioc_[0-9_]+_release|/news/bioc_[0-9_]+_release"
+    exclude_regex: "bioc[0-9]{4}\\.bioconductor\\.org|/packages/[0-9.]+/"
+    max_items: 80
+    prefer_target_html_title: true
+    fetch_target_meta: true
+    fetch_target_body: true
+    target_meta_limit: 40
+    target_body_limit: 20
+    target_body_max_chars: 12000
+    target_content_selectors: [".content", "main"]
+    language: en
+    tags: [R, Bioconductor, packages, release-notes]
+
   # ---------------------------------------------------------------------------
   # Reddit R communities. API key 없이 RSS 우선, public JSON fallback 사용.
   # ---------------------------------------------------------------------------

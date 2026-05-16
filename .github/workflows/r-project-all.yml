@@ -362,8 +362,9 @@ jobs:
             exit 0
           fi
           cutoff_sql="parseDateTime64BestEffort('${started_at}', 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
-          for attempt in {1..18}; do
-            visible_count=$(CUTOFF_SQL="$cutoff_sql" python - <<'PY'
+          last_status=""
+          for attempt in {1..36}; do
+            status_tsv=$(CUTOFF_SQL="$cutoff_sql" python - <<'PY'
           import base64
           import os
           import sys
@@ -377,28 +378,49 @@ jobs:
           password = os.environ.get("CH_PASSWORD", "")
           cutoff_sql = os.environ.get("CUTOFF_SQL", "")
           if not user or not cutoff_sql:
-              print("0")
+              print("0\t0\t0\tmissing-clickhouse-credentials")
               raise SystemExit(0)
-          sql = f"SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql} FORMAT TSV"
+          sql = f"""
+          SELECT
+              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND collected_at >= {cutoff_sql}) AS raw_events,
+              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE collected_at >= {cutoff_sql}) AS raw_items,
+              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql}) AS latest_items,
+              ifNull((SELECT anyHeavy(left(error_message, 120)) FROM Data_R_Community_Log.kafka_ingest_error WHERE ingested_at >= {cutoff_sql}), '') AS ingest_error
+          FORMAT TSV
+          """
           try:
               url = build_clickhouse_url(os.environ, default_format="TSV", max_execution_time="20")
               request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
               request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
               request.add_header("Content-Type", "text/plain; charset=utf-8")
               with urllib.request.urlopen(request, timeout=20) as response:
-                  print(response.read().decode("utf-8", errors="replace").strip() or "0")
-          except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError):
-              print("0")
+                  print(response.read().decode("utf-8", errors="replace").strip() or "0\t0\t0\t")
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", errors="replace").strip().replace("\n", " ")[:160]
+              print(f"0\t0\t0\tclickhouse-http-{exc.code}:{detail}")
+          except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
+              print(f"0\t0\t0\tclickhouse-query-error:{str(exc).replace(chr(10), ' ')[:160]}")
           PY
           )
-            visible_count=${visible_count:-0}
-            echo "R Community ClickHouse visible rows after collection start: ${visible_count}/${item_count} (attempt ${attempt}/18)"
-            if [[ "$visible_count" -gt 0 ]]; then
+            status_tsv=${status_tsv:-$'0\t0\t0\tempty-status'}
+            last_status="$status_tsv"
+            IFS=$'\t' read -r raw_events raw_items latest_items ingest_error <<< "$status_tsv"
+            raw_events=${raw_events:-0}
+            raw_items=${raw_items:-0}
+            latest_items=${latest_items:-0}
+            [[ "$raw_events" =~ ^[0-9]+$ ]] || raw_events=0
+            [[ "$raw_items" =~ ^[0-9]+$ ]] || raw_items=0
+            [[ "$latest_items" =~ ^[0-9]+$ ]] || latest_items=0
+            echo "R Community ClickHouse rows after collection start: latest=${latest_items}/${item_count}, raw_items=${raw_items}, raw_events=${raw_events} (attempt ${attempt}/36)"
+            if [[ -n "${ingest_error:-}" ]]; then
+              echo "Recent R Community ingestion diagnostic: ${ingest_error}" >&2
+            fi
+            if [[ "$latest_items" -gt 0 ]]; then
               exit 0
             fi
             sleep 10
           done
-          echo "R Community ClickHouse ingestion did not become visible before digest generation." >&2
+          echo "R Community ClickHouse ingestion did not become visible before digest generation. last_status=${last_status}" >&2
           exit 1
 
       - name: Generate R Community daily digests
@@ -450,6 +472,32 @@ jobs:
           ref: master
           path: web-R_CDN
           token: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+          persist-credentials: false
+
+      - name: Validate Web-R CDN push permission
+        env:
+          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("WEBR_CDN_PUSH_TOKEN", "").strip()
+          req = urllib.request.Request("https://api.github.com/repos/statground/web-R_CDN")
+          req.add_header("Accept", "application/vnd.github+json")
+          req.add_header("Authorization", f"Bearer {token}")
+          try:
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  payload = json.loads(resp.read().decode("utf-8"))
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(f"WEBR_CDN_PUSH_TOKEN cannot read statground/web-R_CDN: HTTP {exc.code}") from exc
+          permissions = payload.get("permissions") or {}
+          if not permissions.get("push"):
+              raise SystemExit("WEBR_CDN_PUSH_TOKEN must have write access to statground/web-R_CDN contents.")
+          print("WEBR_CDN_PUSH_TOKEN can push to statground/web-R_CDN.")
+          PY
 
       - name: Export encrypted Web-R content CDN
         env:
@@ -462,33 +510,40 @@ jobs:
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
         run: |
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-R_CDN --language ko > /tmp/r_ecosystem_export.json
+          python scripts/export_r_package_cdn.py --cdn-root web-R_CDN --language ko > /tmp/r_package_export.json
           python scripts/export_community_cdn.py --cdn-root web-R_CDN --language ko > /tmp/community_export.json
           python - <<'PY'
           import json
           from pathlib import Path
 
           r_eco = json.loads(Path("/tmp/r_ecosystem_export.json").read_text(encoding="utf-8"))
+          r_package = json.loads(Path("/tmp/r_package_export.json").read_text(encoding="utf-8"))
           community = json.loads(Path("/tmp/community_export.json").read_text(encoding="utf-8"))
           report = {
               "schema": "web-r.content-cdn.export-report.v1",
               "language": "ko",
               "r_ecosystem": r_eco,
+              "r_package": r_package,
               "community": community,
               "r_ecosystem_export": int(r_eco.get("export") or 0),
+              "r_package_export": int(r_package.get("packages") or 0) + int(r_package.get("news") or 0),
               "community_export": int(community.get("export") or 0),
-              "manifest_paths": ["contents/ko/index.json", "community/ko/index.json"],
+              "manifest_paths": ["contents/ko/index.json", "packages/ko/index.json", "community/ko/index.json"],
           }
           Path("web_r_content_cdn_export_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-          print(json.dumps({k: report[k] for k in ("r_ecosystem_export", "community_export")}, ensure_ascii=False))
+          print(json.dumps({k: report[k] for k in ("r_ecosystem_export", "r_package_export", "community_export")}, ensure_ascii=False))
           PY
 
       - name: Commit and push Web-R CDN content
         id: web_r_cdn
         working-directory: web-R_CDN
+        env:
+          WEBR_CDN_PUSH_TOKEN: ${{ secrets.WEBR_CDN_PUSH_TOKEN }}
         run: |
           git config user.name "statground-r-project-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add contents community
+          git remote set-url origin "https://x-access-token:${WEBR_CDN_PUSH_TOKEN}@github.com/statground/web-R_CDN.git"
+          git add contents packages community
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

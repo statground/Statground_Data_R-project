@@ -67,6 +67,8 @@ var (
 	boardAnchorOnlyRE = regexp.MustCompile(`(?is)^<a\b[^>]*>(.*?)</a>$`)
 	sitemapLocRE      = regexp.MustCompile(`(?is)<loc>\s*([^<]+?)\s*</loc>`)
 	rdCommandRE       = regexp.MustCompile(`\\[A-Za-z]+`)
+	enAnniversaryRE   = regexp.MustCompile(`(?i)\b([0-9]{1,3})(?:st|nd|rd|th)?\s*(?:years?|anniversar(?:y|ies))\b`)
+	koAnniversaryRE   = regexp.MustCompile(`([0-9]{1,3})\s*주년`)
 	statusOrder       = []string{"ERROR", "FAIL", "WARNING", "NOTE", "OK"}
 	newsCandidates    = []string{"news/news.html", "news.html"}
 	defaultWebsites   = []string{
@@ -476,6 +478,7 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	title := stringAny(row["title"])
 	summary := stringAny(row["summary"])
 	content := stringAny(row["content"])
+	evidence := communitySourceTranslationEvidence(row)
 	changed := false
 	needsTitle := strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && !looksKorean(title, 0.20)
 	needsSummary := strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && !looksKorean(summary, 0.25)
@@ -489,12 +492,13 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	}
 
 	if strings.TrimSpace(content) == "" && (needsTitle || needsSummary) {
-		response, err := ai.chat(communitySourceTitleSummaryPrompt(title, summary), model)
+		response, err := ai.chat(communitySourceTitleSummaryPrompt(title, summary, evidence), model)
 		if err != nil {
 			return changed, err
 		}
 		translatedTitle, translatedSummary := parseCommunitySourceTranslationResponse(response)
 		if needsTitle {
+			translatedTitle = preserveCommunityAnniversaryNumbers(evidence, translatedTitle)
 			translatedTitle = cleanBoardTitle(translatedTitle)
 			if translatedTitle != "" {
 				row["title_ko"] = translatedTitle
@@ -503,6 +507,7 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 			}
 		}
 		if needsSummary {
+			translatedSummary = preserveCommunityAnniversaryNumbers(evidence, translatedSummary)
 			translatedSummary = strings.TrimSpace(removeBoardURLs(stripTags(translatedSummary)))
 			if translatedSummary != "" {
 				row["summary_ko"] = translatedSummary
@@ -513,10 +518,11 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	}
 
 	if needsTitle {
-		translatedTitle, err := ai.chat(communitySourceTitlePrompt(title, summary), model)
+		translatedTitle, err := ai.chat(communitySourceTitlePrompt(title, summary, evidence), model)
 		if err != nil {
 			return changed, err
 		}
+		translatedTitle = preserveCommunityAnniversaryNumbers(evidence, translatedTitle)
 		translatedTitle = cleanBoardTitle(translatedTitle)
 		if translatedTitle != "" {
 			row["title_ko"] = translatedTitle
@@ -524,10 +530,11 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 		}
 	}
 	if needsSummary {
-		translatedSummary, err := ai.chat(communitySourceSummaryPrompt(title, summary), model)
+		translatedSummary, err := ai.chat(communitySourceSummaryPrompt(title, summary, evidence), model)
 		if err != nil {
 			return changed, err
 		}
+		translatedSummary = preserveCommunityAnniversaryNumbers(evidence, translatedSummary)
 		translatedSummary = strings.TrimSpace(removeBoardURLs(stripTags(translatedSummary)))
 		if translatedSummary != "" {
 			row["summary_ko"] = translatedSummary
@@ -535,10 +542,11 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 		}
 	}
 	if strings.TrimSpace(stringAny(row["content_ko"])) == "" && strings.TrimSpace(content) != "" && !looksKorean(content, 0.25) {
-		translatedContent, err := ai.chat(communitySourceContentPrompt(title, content), model)
+		translatedContent, err := ai.chat(communitySourceContentPrompt(title, content, evidence), model)
 		if err != nil {
 			return changed, err
 		}
+		translatedContent = preserveCommunityAnniversaryNumbers(evidence, translatedContent)
 		sanitized, err := sanitizeBoardHTML(translatedContent)
 		if err != nil {
 			return changed, err
@@ -561,7 +569,103 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	return changed, nil
 }
 
-func communitySourceTitleSummaryPrompt(title, summary string) string {
+func communitySourceTranslationEvidence(row map[string]any) string {
+	parts := make([]string, 0, 10)
+	seen := map[string]bool{}
+	add := func(label, value string) {
+		value = strings.TrimSpace(removeBoardURLs(stripTags(value)))
+		if value == "" {
+			return
+		}
+		value = spaceRE.ReplaceAllString(value, " ")
+		if seen[value] {
+			return
+		}
+		seen[value] = true
+		parts = append(parts, label+": "+truncateRunes(value, 1200))
+	}
+	add("title", stringField(row, "title"))
+	add("summary", stringField(row, "summary"))
+	add("content", stringField(row, "content"))
+	addCommunitySourceEvidenceFromMap(add, "row", row, 0)
+	if rawJSON := strings.TrimSpace(stringAny(row["raw_json"])); rawJSON != "" {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(rawJSON), &raw); err == nil {
+			addCommunitySourceEvidenceFromMap(add, "raw_json", raw, 0)
+		}
+	}
+	return truncateRunes(strings.Join(parts, "\n"), 5000)
+}
+
+func addCommunitySourceEvidenceFromMap(add func(string, string), label string, row map[string]any, depth int) {
+	if len(row) == 0 || depth > 4 {
+		return
+	}
+	for _, key := range []string{"title", "description", "image_description", "content_text", "text_excerpt", "summary", "content"} {
+		add(label+"."+key, stringField(row, key))
+	}
+	for _, key := range []string{"card", "status", "original_status", "reblog", "quote", "summary_detail"} {
+		if nested := mapAny(row[key]); len(nested) > 0 {
+			addCommunitySourceEvidenceFromMap(add, label+"."+key, nested, depth+1)
+		}
+	}
+}
+
+func stringField(row map[string]any, key string) string {
+	value, ok := row[key]
+	if !ok {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func preserveCommunityAnniversaryNumbers(evidence, translated string) string {
+	numbers := communityAnniversaryNumbers(evidence)
+	if len(numbers) == 0 || strings.TrimSpace(translated) == "" {
+		return translated
+	}
+	allowed := make(map[string]bool, len(numbers))
+	for _, number := range numbers {
+		allowed[number] = true
+	}
+	preferred := numbers[0]
+	return koAnniversaryRE.ReplaceAllStringFunc(translated, func(match string) string {
+		parts := koAnniversaryRE.FindStringSubmatch(match)
+		if len(parts) < 2 || allowed[parts[1]] {
+			return match
+		}
+		return strings.Replace(match, parts[1], preferred, 1)
+	})
+}
+
+func communityAnniversaryNumbers(value string) []string {
+	out := make([]string, 0, 2)
+	seen := map[string]bool{}
+	add := func(number string) {
+		number = strings.TrimSpace(number)
+		if number == "" || seen[number] {
+			return
+		}
+		seen[number] = true
+		out = append(out, number)
+	}
+	for _, match := range enAnniversaryRE.FindAllStringSubmatch(value, -1) {
+		if len(match) > 1 {
+			add(match[1])
+		}
+	}
+	for _, match := range koAnniversaryRE.FindAllStringSubmatch(value, -1) {
+		if len(match) > 1 {
+			add(match[1])
+		}
+	}
+	return out
+}
+
+func communitySourceTitleSummaryPrompt(title, summary, evidence string) string {
 	return fmt.Sprintf(`You are a professional Korean translator for the Web-R R ecosystem reader.
 
 Translate the source title and abstract/summary into Korean.
@@ -572,12 +676,17 @@ Output rules:
 - title_ko must be one concise Korean title line.
 - summary_ko must be one compact Korean paragraph in polite formal Korean ending in ~합니다 or ~입니다.
 - Preserve R, CRAN, package names, function names, code, formulas, numbers, version strings, statistical terms, and proper nouns.
+- Preserve factual numeric claims exactly. If the source evidence says "15 Years" or "15th anniversary", Korean must say "15주년"; never replace it with another number.
+- Use only the source title, summary, and evidence below. Do not infer anniversaries, ages, counts, release numbers, dates, or durations that are not supported by the evidence.
 
 Source title:
 %s
 
 Source abstract/summary:
-%s`, title, truncateRunes(summary, 3000))
+%s
+
+Source evidence/context:
+%s`, title, truncateRunes(summary, 3000), evidence)
 }
 
 func parseCommunitySourceTranslationResponse(value string) (string, string) {
@@ -606,23 +715,28 @@ func parseCommunitySourceTranslationResponse(value string) (string, string) {
 	return "", value
 }
 
-func communitySourceTitlePrompt(title, summary string) string {
+func communitySourceTitlePrompt(title, summary, evidence string) string {
 	return fmt.Sprintf(`You are a professional Korean translator for the Web-R R ecosystem reader.
 
 Output rules:
 - Return exactly one Korean title line.
 - Do not include explanations, labels, quotes, Markdown, HTML, URLs, or hyperlinks.
 - Preserve R, CRAN, package names, function names, version numbers, statistical terms, and proper nouns.
+- Preserve factual numeric claims exactly. If the source evidence says "15 Years" or "15th anniversary", Korean must say "15주년"; never replace it with another number.
+- Use only the source title, summary, and evidence below. Do not infer anniversaries, ages, counts, release numbers, dates, or durations that are not supported by the evidence.
 - Keep it concise and natural for Korean readers.
 
 Source title:
 %s
 
 Source summary:
-%s`, title, truncateRunes(summary, 1200))
+%s
+
+Source evidence/context:
+%s`, title, truncateRunes(summary, 1200), evidence)
 }
 
-func communitySourceSummaryPrompt(title, summary string) string {
+func communitySourceSummaryPrompt(title, summary, evidence string) string {
 	return fmt.Sprintf(`You are an editorial Korean translator for the Web-R R ecosystem reader.
 
 Translate the source summary into Korean.
@@ -632,15 +746,20 @@ Output rules:
 - Do not include explanations, labels, Markdown, HTML, URLs, or hyperlinks.
 - Use polite formal Korean ending in ~합니다 or ~입니다.
 - Preserve R, CRAN, package names, function names, code, numbers, version strings, and proper nouns.
+- Preserve factual numeric claims exactly. If the source evidence says "15 Years" or "15th anniversary", Korean must say "15주년"; never replace it with another number.
+- Use only the source title, summary, and evidence below. Do not infer anniversaries, ages, counts, release numbers, dates, or durations that are not supported by the evidence.
 
 Source title:
 %s
 
 Source summary:
-%s`, title, truncateRunes(summary, 3000))
+%s
+
+Source evidence/context:
+%s`, title, truncateRunes(summary, 3000), evidence)
 }
 
-func communitySourceContentPrompt(title, content string) string {
+func communitySourceContentPrompt(title, content, evidence string) string {
 	return fmt.Sprintf(`You are an editorial Korean translator for the Web-R R ecosystem reader.
 
 Translate and lightly edit the source body for Korean Web-R readers.
@@ -652,13 +771,18 @@ Output rules:
 - Do not output hyperlinks, URLs, Markdown links, HTML <a> tags, href attributes, citations, source links, or "read more" links.
 - Use polite formal Korean ending in ~합니다 or ~입니다.
 - Preserve R, CRAN, package names, function names, code, formulas, numbers, version strings, and proper nouns.
+- Preserve factual numeric claims exactly. If the source evidence says "15 Years" or "15th anniversary", Korean must say "15주년"; never replace it with another number.
+- Use only the source title, body, and evidence below. Do not infer anniversaries, ages, counts, release numbers, dates, or durations that are not supported by the evidence.
 - Do not add an introduction, explanation, label, or meta-commentary.
 
 Source title:
 %s
 
 Source body:
-%s`, title, truncateRunes(stripTags(content), 9000))
+%s
+
+Source evidence/context:
+%s`, title, truncateRunes(stripTags(content), 9000), evidence)
 }
 
 func runCommunityDigest(ctx context.Context, args []string) error {

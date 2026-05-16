@@ -843,14 +843,30 @@ class RSourceCollector:
                         target_meta["target_content_type"] = target_response.headers.get("Content-Type", "")
                 except Exception as exc:  # noqa: BLE001
                     target_meta = {"target_fetch_error": str(exc)}
-            target_title = first_nonempty(target_meta.get("target_title"), link.get("title"), link["url"])
-            target_summary = first_nonempty(target_meta.get("target_abstract"), target_meta.get("target_meta_description"))
+            preferred_html_title = target_meta.get("target_html_title") if source.get("prefer_target_html_title", False) else None
+            if is_generic_target_title(preferred_html_title):
+                preferred_html_title = None
+            target_title = first_nonempty(
+                preferred_html_title,
+                target_meta.get("target_title"),
+                link.get("title"),
+                link["url"],
+            )
+            target_title_ko = first_nonempty(target_meta.get("target_title_ko"))
+            target_summary_ko = first_nonempty(target_meta.get("target_summary_ko"))
+            target_content_ko = first_nonempty(target_meta.get("target_content_ko"), target_summary_ko)
+            target_summary = first_nonempty(
+                target_meta.get("target_release_summary"),
+                target_meta.get("target_abstract"),
+                target_meta.get("target_meta_description"),
+            )
             target_content = str(target_meta.get("target_content_text") or "").strip()
             summary = first_nonempty(target_summary, target_content[:1000])
             if not summary:
                 summary = f"Discovered from {page_title}: {page_url}"
             published_at = first_nonempty(
                 target_meta.get("target_published_at"),
+                first_fuzzy_date_from_lines(target_content, max_lines=40),
                 parse_fuzzy_date_to_iso(" ".join([link.get("title", ""), link.get("context_text", "")])),
             )
             target_authors = target_meta.get("target_authors") or []
@@ -886,8 +902,11 @@ class RSourceCollector:
                 canonical_url=link["url"],
                 native_id=link["url"],
                 title=target_title,
+                title_ko=target_title_ko,
                 summary=summary,
+                summary_ko=target_summary_ko,
                 content=target_content,
+                content_ko=target_content_ko,
                 author=author,
                 published_at=published_at,
                 language=source.get("language"),
@@ -1228,8 +1247,14 @@ def html_target_detail(soup: BeautifulSoup, page_url: str, selectors: list[str],
     authors = meta_content_list(soup, [{"name": "citation_author"}, {"name": "article:author"}, {"property": "article:author"}])
     doi = meta_content_any(soup, [{"name": "citation_doi"}, {"name": "doi"}])
     content_text = extract_article_content_text(soup, selectors, max_chars) if include_content else ""
+    release_meta = bioconductor_release_metadata(soup, page_url, title, content_text)
+    if release_meta:
+        title = first_nonempty(release_meta.get("target_title"), title)
+        abstract = first_nonempty(release_meta.get("target_release_summary"), abstract)
+        published_at = first_nonempty(published_at, release_meta.get("target_published_at"))
     return {
         "target_title": title,
+        "target_html_title": snapshot.get("html_title"),
         "target_canonical_url": snapshot.get("canonical_url"),
         "target_meta_description": snapshot.get("meta_description"),
         "target_og_title": snapshot.get("og_title"),
@@ -1240,7 +1265,113 @@ def html_target_detail(soup: BeautifulSoup, page_url: str, selectors: list[str],
         "target_doi": doi,
         "target_abstract": truncate_text(abstract, 4000),
         "target_content_text": content_text,
+        **release_meta,
     }
+
+
+def is_generic_target_title(value: str | None) -> bool:
+    title = compact_text(value or "").lower()
+    return title in {"", "bioconductor", "bioconductor - bioconductor"}
+
+
+def bioconductor_release_metadata(soup: BeautifulSoup, page_url: str, title: str, content_text: str) -> dict[str, str]:
+    parsed = urlparse(page_url)
+    if "bioconductor.org" not in parsed.netloc.lower() or not re.search(r"/news/bioc_[0-9_]+_release/?$", parsed.path):
+        return {}
+    version = bioconductor_release_version(page_url, title)
+    title_en = f"Bioconductor {version} Released" if version else first_nonempty(title, html_page_title(soup), "Bioconductor release announcement")
+    title_ko = f"Bioconductor {version} 릴리스" if version else "Bioconductor 릴리스 공지"
+    full_text = compact_multiline_text(content_text or soup.get_text("\n", strip=True))
+    published_at = first_fuzzy_date_from_lines(full_text, max_lines=80)
+    summary_en = bioconductor_release_english_summary(full_text)
+    summary_ko = bioconductor_release_korean_summary(version, full_text)
+    return {
+        "target_title": title_en,
+        "target_title_ko": title_ko,
+        "target_published_at": published_at or "",
+        "target_release_summary": summary_en,
+        "target_summary_ko": summary_ko,
+        "target_content_ko": summary_ko,
+    }
+
+
+def bioconductor_release_version(page_url: str, title: str) -> str:
+    for value in (title, page_url):
+        match = re.search(r"Bioconductor\s+([0-9]+(?:\.[0-9]+)?)", value or "", re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.search(r"bioc_([0-9]+)_([0-9]+)_release", value or "", re.IGNORECASE)
+        if match:
+            return f"{int(match.group(1))}.{int(match.group(2))}"
+    return ""
+
+
+def bioconductor_release_english_summary(text: str) -> str:
+    lines = [compact_text(line) for line in (text or "").splitlines()]
+    selected: list[str] = []
+    for line in lines:
+        if not line or line.lower() in {"bioconductor:", "contents"}:
+            continue
+        if re.fullmatch(r"[A-Z][a-z]+ [0-9]{1,2}, [12][0-9]{3}", line):
+            continue
+        lower = line.lower()
+        if any(key in lower for key in ("pleased to announce", "there are", "compatible with r", "new software packages")):
+            selected.append(line)
+        if len(selected) >= 3:
+            break
+    if selected:
+        return truncate_text(" ".join(selected), 1200)
+    return truncate_text(text, 1200)
+
+
+def bioconductor_release_korean_summary(version: str, text: str) -> str:
+    text = compact_text(text or "")
+    total = re.search(
+        r"consisting of\s+([0-9,]+)\s+software packages,\s+([0-9,]+)\s+experiment data packages,\s+([0-9,]+)\s+annotation packages,\s+([0-9,]+)\s+workflows?\s+and\s+([0-9,]+)\s+books?",
+        text,
+        re.IGNORECASE,
+    )
+    new = re.search(
+        r"There are\s+([a-z0-9,]+)\s+new software packages,\s+([a-z0-9,]+)\s+new data experiment packages,\s+([a-z0-9,]+)\s+new annotation packages,\s+([a-z0-9,]+)\s+new workflows?,\s+([a-z0-9,]+)\s+new books?",
+        text,
+        re.IGNORECASE,
+    )
+    r_version = re.search(r"compatible with R\s+([0-9.]+)", text, re.IGNORECASE)
+    label = f"Bioconductor {version}" if version else "Bioconductor"
+    parts = []
+    if total:
+        r_part = f" R {r_version.group(1)} 호환" if r_version else ""
+        parts.append(
+            f"{label}은{r_part} 릴리스로, 소프트웨어 패키지 {total.group(1)}개, 실험 데이터 패키지 {total.group(2)}개, annotation 패키지 {total.group(3)}개, workflow {total.group(4)}개, book {total.group(5)}개로 구성됩니다."
+        )
+    else:
+        parts.append(f"{label} 릴리스 공지입니다.")
+    if new:
+        parts.append(
+            f"이번 릴리스에는 새 소프트웨어 패키지 {bioconductor_count_ko(new.group(1))}개, 새 실험 데이터 패키지 {bioconductor_count_ko(new.group(2))}개, 새 annotation 패키지 {bioconductor_count_ko(new.group(3))}개, 새 workflow {bioconductor_count_ko(new.group(4))}개, 새 book {bioconductor_count_ko(new.group(5))}개와 기존 패키지의 업데이트가 포함됩니다."
+        )
+    else:
+        parts.append("원문에는 새 패키지, 기존 패키지 NEWS, deprecated/defunct 패키지 등 릴리스 변경 사항이 정리되어 있습니다.")
+    return " ".join(parts)
+
+
+def bioconductor_count_ko(value: str) -> str:
+    value = compact_text(value).lower()
+    words = {
+        "no": "0",
+        "zero": "0",
+        "one": "1",
+        "two": "2",
+        "three": "3",
+        "four": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8",
+        "nine": "9",
+        "ten": "10",
+    }
+    return words.get(value, value)
 
 
 def extract_article_content_text(soup: BeautifulSoup, selectors: list[str], max_chars: int) -> str:
@@ -1500,6 +1631,27 @@ def parse_fuzzy_date_to_iso(text: str | None) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=KST)
     return parsed.astimezone(KST).isoformat(timespec="seconds")
+
+
+def first_fuzzy_date_from_lines(text: str | None, max_lines: int = 80) -> str | None:
+    if not text:
+        return None
+    month_date = re.compile(
+        r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+        r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+[0-9]{1,2},\s+[12][0-9]{3}\b",
+        re.IGNORECASE,
+    )
+    iso_date = re.compile(r"\b[12][0-9]{3}-[01][0-9]-[0-3][0-9]\b")
+    for line in (text or "").splitlines()[:max_lines]:
+        line = compact_text(line)
+        if not line:
+            continue
+        match = month_date.search(line) or iso_date.search(line)
+        if match:
+            parsed = parse_fuzzy_date_to_iso(match.group(0))
+            if parsed:
+                return parsed
+    return None
 
 
 def slugify(text: str) -> str:
