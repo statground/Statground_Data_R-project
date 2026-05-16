@@ -36,7 +36,7 @@ DATE_RE = re.compile(r"(\d{4})-(\d{2})")
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
-    parser.add_argument("--cdn-root", default="../web-R_CDN", help="web-R_CDN checkout path")
+    parser.add_argument("--cdn-root", default="../web-r_CDN2_contents", help="web-r_CDN2_contents checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--limit", type=int, default=0, help="optional row limit for smoke exports")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")

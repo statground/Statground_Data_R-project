@@ -33,7 +33,7 @@ PACKAGE_VERSIONS_SCHEMA = "web-r.r-ecosystem.package-versions.plain.v1"
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
-    parser.add_argument("--cdn-root", default="../web-R_CDN", help="web-R_CDN checkout path")
+    parser.add_argument("--cdn-root", default="../web-r_CDN2_packages", help="web-r_CDN2_packages checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--package-limit", type=int, default=0, help="optional package row limit for smoke exports")
     parser.add_argument("--news-limit", type=int, default=0, help="optional package news limit for smoke exports")
