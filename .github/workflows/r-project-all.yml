@@ -378,13 +378,16 @@ jobs:
           password = os.environ.get("CH_PASSWORD", "")
           cutoff_sql = os.environ.get("CUTOFF_SQL", "")
           if not user or not cutoff_sql:
-              print("0\t0\t0\tmissing-clickhouse-credentials")
+              print("0\t0\t0\t0\t0\t0\tmissing-clickhouse-credentials")
               raise SystemExit(0)
           sql = f"""
           SELECT
-              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND collected_at >= {cutoff_sql}) AS raw_events,
-              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE collected_at >= {cutoff_sql}) AS raw_items,
-              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql}) AS latest_items,
+              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND ingested_at >= {cutoff_sql}) AS raw_events,
+              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE ingested_at >= {cutoff_sql}) AS raw_items,
+              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE ingested_at >= {cutoff_sql}) AS latest_items,
+              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND collected_at >= {cutoff_sql}) AS collected_raw_events,
+              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE collected_at >= {cutoff_sql}) AS collected_raw_items,
+              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql}) AS collected_latest_items,
               ifNull((SELECT anyHeavy(left(error_message, 120)) FROM Data_R_Community_Log.kafka_ingest_error WHERE ingested_at >= {cutoff_sql}), '') AS ingest_error
           FORMAT TSV
           """
@@ -394,24 +397,30 @@ jobs:
               request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
               request.add_header("Content-Type", "text/plain; charset=utf-8")
               with urllib.request.urlopen(request, timeout=20) as response:
-                  print(response.read().decode("utf-8", errors="replace").strip() or "0\t0\t0\t")
+                  print(response.read().decode("utf-8", errors="replace").strip() or "0\t0\t0\t0\t0\t0\t")
           except urllib.error.HTTPError as exc:
               detail = exc.read().decode("utf-8", errors="replace").strip().replace("\n", " ")[:160]
-              print(f"0\t0\t0\tclickhouse-http-{exc.code}:{detail}")
+              print(f"0\t0\t0\t0\t0\t0\tclickhouse-http-{exc.code}:{detail}")
           except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
-              print(f"0\t0\t0\tclickhouse-query-error:{str(exc).replace(chr(10), ' ')[:160]}")
+              print(f"0\t0\t0\t0\t0\t0\tclickhouse-query-error:{str(exc).replace(chr(10), ' ')[:160]}")
           PY
           )
-            status_tsv=${status_tsv:-$'0\t0\t0\tempty-status'}
+            status_tsv=${status_tsv:-$'0\t0\t0\t0\t0\t0\tempty-status'}
             last_status="$status_tsv"
-            IFS=$'\t' read -r raw_events raw_items latest_items ingest_error <<< "$status_tsv"
+            IFS=$'\t' read -r raw_events raw_items latest_items collected_raw_events collected_raw_items collected_latest_items ingest_error <<< "$status_tsv"
             raw_events=${raw_events:-0}
             raw_items=${raw_items:-0}
             latest_items=${latest_items:-0}
+            collected_raw_events=${collected_raw_events:-0}
+            collected_raw_items=${collected_raw_items:-0}
+            collected_latest_items=${collected_latest_items:-0}
             [[ "$raw_events" =~ ^[0-9]+$ ]] || raw_events=0
             [[ "$raw_items" =~ ^[0-9]+$ ]] || raw_items=0
             [[ "$latest_items" =~ ^[0-9]+$ ]] || latest_items=0
-            echo "R Community ClickHouse rows after collection start: latest=${latest_items}/${item_count}, raw_items=${raw_items}, raw_events=${raw_events} (attempt ${attempt}/36)"
+            [[ "$collected_raw_events" =~ ^[0-9]+$ ]] || collected_raw_events=0
+            [[ "$collected_raw_items" =~ ^[0-9]+$ ]] || collected_raw_items=0
+            [[ "$collected_latest_items" =~ ^[0-9]+$ ]] || collected_latest_items=0
+            echo "R Community ClickHouse rows ingested after collection start: latest=${latest_items}/${item_count}, raw_items=${raw_items}, raw_events=${raw_events}; collected_after_start latest=${collected_latest_items}, raw_items=${collected_raw_items}, raw_events=${collected_raw_events} (attempt ${attempt}/36)"
             if [[ -n "${ingest_error:-}" ]]; then
               echo "Recent R Community ingestion diagnostic: ${ingest_error}" >&2
             fi
