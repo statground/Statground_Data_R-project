@@ -78,6 +78,28 @@ PACKAGE_NEWS_SUMMARY_SQL = r"""
 coalesce(
     nullIf(
         multiIf(
+            source_id = 'official:r-mail:r-packages'
+                AND match(canonical_url, '/pipermail/r-packages/[0-9]{4}/[0-9]+[.]html')
+                AND positionCaseInsensitiveUTF8(title, '신규 CRAN 패키지 공지') > 0,
+                concat(
+                    'R-packages 메일링 리스트에 올라온 ',
+                    replaceRegexpOne(title, '\\s+신규 CRAN 패키지 공지$', ''),
+                    ' 신규 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
+                ),
+            source_id = 'official:r-mail:r-packages'
+                AND match(canonical_url, '/pipermail/r-packages/[0-9]{4}/[0-9]+[.]html'),
+                concat(
+                    'R-packages 메일링 리스트에 올라온 ',
+                    replaceRegexpOne(title, '\\s+CRAN 패키지 공지$', ''),
+                    ' 관련 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
+                ),
+            source_id = 'official:bioconductor:release-announcements'
+                AND notEmpty(extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)')),
+                concat(
+                    'Bioconductor ',
+                    extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)'),
+                    ' 릴리스 공지입니다. 원문에는 새 패키지, 기존 패키지 NEWS, deprecated/defunct 패키지 등 릴리스 변경 사항이 정리되어 있습니다.'
+                ),
             startsWith(source_id, 'community:runiverse:') AND notEmpty(title),
                 concat(
                     if(positionCaseInsensitiveUTF8(source_id, 'ropensci') > 0, 'rOpenSci R-universe', source_name),
