@@ -345,6 +345,12 @@ SELECT external_id,
                    source_id = 'community:rweekly'
                        AND (
                            positionCaseInsensitiveUTF8(summary, 'Discovered from') > 0
+                           OR positionCaseInsensitiveUTF8(summary, 'discovered') > 0
+                           OR positionCaseInsensitiveUTF8(summary, '발견') > 0
+                           OR positionCaseInsensitiveUTF8(summary, 'targets vs dbt') > 0
+                           OR positionCaseInsensitiveUTF8(summary, 'Shiny webAwesome') > 0
+                           OR positionCaseInsensitiveUTF8(summary, 'ggplot2 트릭') > 0
+                           OR positionCaseInsensitiveUTF8(summary, 'knitr') > 0
                            OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'discovered') > 0
                            OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), '발견') > 0
                            OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'S at 50') > 0
@@ -361,7 +367,7 @@ SELECT external_id,
                        concat(
                            'R Weekly에서 소개된 ',
                            multiIf(
-                               positionCaseInsensitiveUTF8(title, 'Daily News about R-devel/NEWS') > 0, 'R-devel/NEWS 변경 사항',
+                               positionCaseInsensitiveUTF8(title, 'Daily News about R-devel/NEWS') > 0 OR positionCaseInsensitiveUTF8(title, 'R-devel/NEWS') > 0, 'R-devel/NEWS 변경 사항',
                                positionCaseInsensitiveUTF8(title, 'EMODnet Biology Geospatial R Tutorials') > 0, 'EMODnet Biology 지리공간 R 튜토리얼',
                                positionCaseInsensitiveUTF8(title, 'R Conferences and Meetups') > 0, 'R 컨퍼런스와 모임',
                                positionCaseInsensitiveUTF8(title, 'Conference') > 0 AND positionCaseInsensitiveUTF8(title, 'Events') > 0, '컨퍼런스와 이벤트',
@@ -396,6 +402,12 @@ SELECT external_id,
                source_id = 'community:rweekly'
                AND (
                    positionCaseInsensitiveUTF8(summary, 'Discovered from') > 0
+                   OR positionCaseInsensitiveUTF8(summary, 'discovered') > 0
+                   OR positionCaseInsensitiveUTF8(summary, '발견') > 0
+                   OR positionCaseInsensitiveUTF8(summary, 'targets vs dbt') > 0
+                   OR positionCaseInsensitiveUTF8(summary, 'Shiny webAwesome') > 0
+                   OR positionCaseInsensitiveUTF8(summary, 'ggplot2 트릭') > 0
+                   OR positionCaseInsensitiveUTF8(summary, 'knitr') > 0
                    OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'discovered') > 0
                    OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), '발견') > 0
                    OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'S at 50') > 0
