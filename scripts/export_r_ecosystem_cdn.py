@@ -230,7 +230,7 @@ def derive_key(secret: str) -> bytes:
 
 def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str, compress: bool = False) -> dict[str, Any]:
     plaintext = json.dumps(plain, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    payload = gzip.compress(plaintext, compresslevel=9) if compress else plaintext
+    payload = gzip.compress(plaintext, compresslevel=9, mtime=0) if compress else plaintext
     nonce = hmac.new(key, normalize_path(rel_path).encode("utf-8") + b"\0" + payload, hashlib.sha256).digest()[:12]
     ciphertext = AESGCM(key).encrypt(nonce, payload, normalize_path(rel_path).encode("utf-8"))
     doc = {

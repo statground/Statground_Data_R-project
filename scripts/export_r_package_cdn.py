@@ -29,6 +29,101 @@ from export_r_ecosystem_cdn import (
 PACKAGE_MANIFEST_SCHEMA = "web-r.r-ecosystem.package-manifest.plain.v1"
 PACKAGE_VERSIONS_SCHEMA = "web-r.r-ecosystem.package-versions.plain.v1"
 
+PACKAGE_NEWS_TITLE_SQL = r"""
+coalesce(
+    nullIf(
+        multiIf(
+            startsWith(source_id, 'community:runiverse:') AND notEmpty(title),
+                concat(
+                    replaceRegexpOne(title, '^\\[[^\\]]+\\]\\s+', ''),
+                    if(positionCaseInsensitiveUTF8(title, 'R-universe 업데이트') > 0, '', ' R-universe 업데이트')
+                ),
+            ''
+        ),
+        ''
+    ),
+    nullIf(JSONExtractString(payload_json, 'title_ko'), ''),
+    nullIf(JSONExtractString(raw_json, 'title_ko'), ''),
+    nullIf(
+        multiIf(
+            source_id = 'official:r-mail:r-packages'
+                AND startsWith(title, '[R-pkgs]')
+                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+([^:]+)')),
+                concat(
+                    extract(title, '^\\[R-pkgs\\]\\s+([^:]+)'),
+                    if(notEmpty(extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), concat(' ', extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), ''),
+                    ' CRAN 패키지 공지'
+                ),
+            startsWith(source_id, 'community:runiverse:')
+                AND notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)')),
+                concat(
+                    extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)'),
+                    if(notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), concat(' ', extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), ''),
+                    ' R-universe 업데이트'
+                ),
+            source_id = 'official:bioconductor:release-announcements'
+                AND notEmpty(extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)')),
+                concat('Bioconductor ', extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)'), ' 릴리스'),
+            ''
+        ),
+        ''
+    ),
+    title
+)"""
+
+PACKAGE_NEWS_SUMMARY_SQL = r"""
+coalesce(
+    nullIf(
+        multiIf(
+            startsWith(source_id, 'community:runiverse:') AND notEmpty(title),
+                concat(
+                    if(positionCaseInsensitiveUTF8(source_id, 'ropensci') > 0, 'rOpenSci R-universe', source_name),
+                    '에서 확인된 ',
+                    replaceRegexpOne(replaceRegexpOne(title, '^\\[[^\\]]+\\]\\s+', ''), '\\s+R-universe 업데이트$', ''),
+                    ' 패키지 업데이트입니다. 빌드 결과와 패키지 설명은 원문 링크에서 확인할 수 있습니다.'
+                ),
+            ''
+        ),
+        ''
+    ),
+    nullIf(JSONExtractString(payload_json, 'summary_ko'), ''),
+    nullIf(JSONExtractString(raw_json, 'summary_ko'), ''),
+    nullIf(JSONExtractString(payload_json, 'content_ko'), ''),
+    nullIf(JSONExtractString(raw_json, 'content_ko'), ''),
+    nullIf(
+        multiIf(
+            source_id = 'official:r-mail:r-packages'
+                AND startsWith(title, '[R-pkgs]')
+                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+([^:]+)')),
+                concat(
+                    'R-packages 메일링 리스트에 올라온 ',
+                    extract(title, '^\\[R-pkgs\\]\\s+([^:]+)'),
+                    if(notEmpty(extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), concat(' ', extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), ''),
+                    ' 관련 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
+                ),
+            startsWith(source_id, 'community:runiverse:')
+                AND notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)')),
+                concat(
+                    if(positionCaseInsensitiveUTF8(source_id, 'ropensci') > 0, 'rOpenSci R-universe', source_name),
+                    '에서 확인된 ',
+                    extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)'),
+                    if(notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), concat(' ', extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), ''),
+                    ' 패키지 업데이트입니다. 빌드 결과와 패키지 설명은 원문 링크에서 확인할 수 있습니다.'
+                ),
+            source_id = 'official:bioconductor:release-announcements'
+                AND notEmpty(extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)')),
+                concat(
+                    'Bioconductor ',
+                    extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)'),
+                    ' 릴리스 공지입니다. 원문에는 새 패키지, 기존 패키지 NEWS, deprecated/defunct 패키지 등 릴리스 변경 사항이 정리되어 있습니다.'
+                ),
+            ''
+        ),
+        ''
+    ),
+    summary
+)"""
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -482,25 +577,33 @@ SELECT external_id,
        platform,
        source_url,
        canonical_url,
-       coalesce(nullIf(JSONExtractString(payload_json, 'title_ko'), ''), nullIf(JSONExtractString(raw_json, 'title_ko'), ''), title) AS title,
-       coalesce(nullIf(JSONExtractString(payload_json, 'summary_ko'), ''), nullIf(JSONExtractString(raw_json, 'summary_ko'), ''), nullIf(JSONExtractString(payload_json, 'content_ko'), ''), nullIf(JSONExtractString(raw_json, 'content_ko'), ''), summary) AS summary,
+       {PACKAGE_NEWS_TITLE_SQL} AS title,
+       {PACKAGE_NEWS_SUMMARY_SQL} AS summary,
        author,
        tags_json,
        toString(raw_json) AS raw_json,
        toString(payload_json) AS payload_json,
        if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S')) AS published_at_text,
        formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S') AS collected_at_text
-  FROM Data_R_Community_Service.r_community_item_read_current
- WHERE active = 1
-   AND notEmpty(canonical_url)
-   AND notEmpty(coalesce(nullIf(JSONExtractString(payload_json, 'title_ko'), ''), nullIf(JSONExtractString(raw_json, 'title_ko'), ''), title))
+  FROM Data_R_Community_Service.v_r_community_latest_dedup
+ WHERE notEmpty(canonical_url)
+   AND notEmpty({PACKAGE_NEWS_TITLE_SQL})
    AND (
           source_type = 'package_update_feed'
           OR source_id = 'official:r-mail:r-packages'
        )
    AND (
           source_id != 'official:r-mail:r-packages'
-          OR startsWith(title, '[R-pkgs]')
+          OR (
+              startsWith(title, '[R-pkgs]')
+              AND position(canonical_url, '/pipermail/r-packages/') > 0
+          )
+       )
+   AND (
+          source_id != 'official:bioconductor:release-announcements'
+          OR positionCaseInsensitiveUTF8(canonical_url, '/news/bioc_') > 0
+          OR positionCaseInsensitiveUTF8(title, 'Released') > 0
+          OR positionCaseInsensitiveUTF8(title, '릴리스') > 0
        )
  ORDER BY if(isNull(original_published_at), collected_at, original_published_at) DESC,
           sipHash64(if(notEmpty(external_id), external_id, canonical_url)) ASC{suffix}

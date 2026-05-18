@@ -74,7 +74,15 @@ sources:
     name: R-packages mailing list archive, current year
     url: "https://stat.ethz.ch/pipermail/r-packages/{year}/date.html"
     include_regex: '[0-9]{6}\.html|\[R-pkgs\]'
+    item_url_include_regex: '/pipermail/r-packages/[0-9]{4}/[0-9]{6}\.html$'
     max_items: 300
+    prefer_target_html_title: true
+    fetch_target_meta: true
+    fetch_target_body: true
+    target_meta_limit: 300
+    target_body_limit: 300
+    target_body_max_chars: 20000
+    target_content_selectors: ["pre"]
     language: en
     tags: [R, R-packages, mailing-list, CRAN]
 

@@ -34,6 +34,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 KST = dt.timezone(dt.timedelta(hours=9), name="Asia/Seoul")
+DATE_TZINFOS = {
+    "UTC": dt.timezone.utc,
+    "GMT": dt.timezone.utc,
+    "CET": dt.timezone(dt.timedelta(hours=1), name="CET"),
+    "CEST": dt.timezone(dt.timedelta(hours=2), name="CEST"),
+}
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {
     "fbclid",
@@ -296,6 +302,7 @@ class RSourceCollector:
                 "content": json_safe(entry.get("content") or []),
             }
             if emit_feed_item:
+                korean_meta = rss_package_display_metadata(source_id, source.get("name") or source_id, title, summary)
                 result.append(
                     self.make_item(
                         source=source,
@@ -304,7 +311,10 @@ class RSourceCollector:
                         canonical_url=link,
                         native_id=native_id,
                         title=title,
+                        title_ko=korean_meta.get("title_ko"),
                         summary=summary,
+                        summary_ko=korean_meta.get("summary_ko"),
+                        content_ko=korean_meta.get("content_ko"),
                         author=entry.get("author"),
                         published_at=published_at,
                         language=entry.get("language") or source.get("language"),
@@ -831,6 +841,12 @@ class RSourceCollector:
         for link in unique_by_url(links):
             if emitted >= int(max_items):
                 break
+            item_haystack = "\n".join(
+                str(link.get(key) or "")
+                for key in ("title", "url", "link_text", "context_text", "title_attr", "aria_label")
+            )
+            if not source_item_allowed(source, item_haystack) or not source_item_url_allowed(source, link.get("url") or ""):
+                continue
             target_meta: dict[str, Any] = {}
             fetch_target_content = fetch_target_body and emitted < target_body_limit
             should_fetch_target = (fetch_target_meta and emitted < target_meta_limit) or fetch_target_content
@@ -1247,6 +1263,13 @@ def html_target_detail(soup: BeautifulSoup, page_url: str, selectors: list[str],
     authors = meta_content_list(soup, [{"name": "citation_author"}, {"name": "article:author"}, {"property": "article:author"}])
     doi = meta_content_any(soup, [{"name": "citation_doi"}, {"name": "doi"}])
     content_text = extract_article_content_text(soup, selectors, max_chars) if include_content else ""
+    r_packages_meta = r_packages_pipermail_metadata(soup, page_url, content_text, max_chars)
+    if r_packages_meta:
+        title = first_nonempty(r_packages_meta.get("target_title"), title)
+        abstract = first_nonempty(r_packages_meta.get("target_abstract"), abstract)
+        published_at = first_nonempty(published_at, r_packages_meta.get("target_published_at"))
+        authors = r_packages_meta.get("target_authors") or authors
+        content_text = first_nonempty(r_packages_meta.get("target_content_text"), content_text)
     release_meta = bioconductor_release_metadata(soup, page_url, title, content_text)
     if release_meta:
         title = first_nonempty(release_meta.get("target_title"), title)
@@ -1265,6 +1288,7 @@ def html_target_detail(soup: BeautifulSoup, page_url: str, selectors: list[str],
         "target_doi": doi,
         "target_abstract": truncate_text(abstract, 4000),
         "target_content_text": content_text,
+        **r_packages_meta,
         **release_meta,
     }
 
@@ -1292,6 +1316,81 @@ def bioconductor_release_metadata(soup: BeautifulSoup, page_url: str, title: str
         "target_release_summary": summary_en,
         "target_summary_ko": summary_ko,
         "target_content_ko": summary_ko,
+    }
+
+
+def r_packages_pipermail_metadata(soup: BeautifulSoup, page_url: str, content_text: str, max_chars: int) -> dict[str, Any]:
+    parsed = urlparse(page_url)
+    if parsed.netloc.lower() != "stat.ethz.ch" or "/pipermail/r-packages/" not in parsed.path:
+        return {}
+    title_node = soup.find("h1") or soup.find("title")
+    title = compact_text(title_node.get_text(" ", strip=True) if title_node else "")
+    author_tag = soup.find("b")
+    author = compact_text(author_tag.get_text(" ", strip=True)) if author_tag else ""
+    date_tag = soup.find("i")
+    published_at = parse_fuzzy_date_to_iso(date_tag.get_text(" ", strip=True) if date_tag else "")
+    pre = soup.find("pre")
+    if pre:
+        content_text = compact_multiline_text(pre.get_text("\n", strip=True))
+    content_text = (content_text or "")[:max_chars] if max_chars > 0 else content_text
+    summary = r_packages_message_summary(content_text)
+    title_ko, summary_ko = r_packages_korean_display(title)
+    return {
+        "target_title": title,
+        "target_title_ko": title_ko,
+        "target_authors": [author] if author else [],
+        "target_published_at": published_at or "",
+        "target_abstract": summary,
+        "target_summary_ko": summary_ko,
+        "target_content_ko": summary_ko,
+        "target_content_text": content_text,
+    }
+
+
+def r_packages_message_summary(content_text: str | None) -> str:
+    text = compact_multiline_text(content_text or "")
+    if not text:
+        return ""
+    for marker in ("[[alternative HTML version deleted]]", " -- "):
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[:idx].strip()
+    return truncate_text(text, 1000)
+
+
+def r_packages_korean_display(title: str | None) -> tuple[str, str]:
+    title_text = compact_text(title or "")
+    package = ""
+    match = re.search(r"^\[R-pkgs\]\s+([^:]+)", title_text)
+    if match:
+        package = compact_text(match.group(1))
+    version = ""
+    match = re.search(r"(?:version|v)\s*([0-9][A-Za-z0-9._-]*)", title_text, re.IGNORECASE)
+    if match:
+        version = match.group(1)
+    subject = compact_text(" ".join(part for part in (package, version) if part)) or "R 패키지"
+    return (
+        f"{subject} CRAN 패키지 공지",
+        f"R-packages 메일링 리스트에 올라온 {subject} 관련 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.",
+    )
+
+
+def rss_package_display_metadata(source_id: str, source_name: str, title: str, summary: str | None) -> dict[str, str]:
+    if not source_id.startswith("community:runiverse:"):
+        return {}
+    title_text = compact_text(title or "")
+    match = re.search(r"^\[([^\]]+)\]\s+([^\s]+)\s+([^\s]+)", title_text)
+    if not match:
+        return {}
+    owner = compact_text(match.group(1))
+    package = compact_text(match.group(2))
+    version = compact_text(match.group(3))
+    source_label = "rOpenSci R-universe" if "ropensci" in source_id.lower() else first_nonempty(source_name, "R-universe")
+    subject = compact_text(" ".join(part for part in (package, version) if part))
+    return {
+        "title_ko": f"{subject} R-universe 업데이트",
+        "summary_ko": f"{source_label}에서 확인된 {subject} 패키지 업데이트입니다. 빌드 결과와 패키지 설명은 원문 링크에서 확인할 수 있습니다.",
+        "content_ko": f"{source_label}의 {owner} 저장소에서 {subject} 패키지 업데이트가 감지되었습니다. 원문 링크에서 빌드 결과와 상세 설명을 확인할 수 있습니다.",
     }
 
 
@@ -1598,11 +1697,22 @@ def source_item_allowed(source: dict[str, Any], haystack: str) -> bool:
     return True
 
 
+def source_item_url_allowed(source: dict[str, Any], url: str) -> bool:
+    url = url or ""
+    include_regex = source.get("item_url_include_regex")
+    exclude_regex = source.get("item_url_exclude_regex")
+    if include_regex and not re.search(include_regex, url, re.IGNORECASE):
+        return False
+    if exclude_regex and re.search(exclude_regex, url, re.IGNORECASE):
+        return False
+    return True
+
+
 def parse_datetime(value: str | None) -> dt.datetime | None:
     if not value:
         return None
     try:
-        parsed = dateparser.parse(str(value))
+        parsed = dateparser.parse(str(value), tzinfos=DATE_TZINFOS)
     except (ValueError, TypeError, OverflowError):
         return None
     if parsed is None:
@@ -1623,7 +1733,7 @@ def parse_fuzzy_date_to_iso(text: str | None) -> str | None:
     if not text or not re.search(r"(?:19|20)\d{2}", text):
         return None
     try:
-        parsed = dateparser.parse(text, fuzzy=True, default=dt.datetime(1, 1, 1, tzinfo=KST))
+        parsed = dateparser.parse(text, fuzzy=True, default=dt.datetime(1, 1, 1, tzinfo=KST), tzinfos=DATE_TZINFOS)
     except (ValueError, TypeError, OverflowError):
         return None
     if parsed is None or parsed.year < 1900:
