@@ -48,10 +48,13 @@ coalesce(
         multiIf(
             source_id = 'official:r-mail:r-packages'
                 AND startsWith(title, '[R-pkgs]')
+                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)')),
+                concat(extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)'), ' 신규 CRAN 패키지 공지'),
+            source_id = 'official:r-mail:r-packages'
+                AND startsWith(title, '[R-pkgs]')
                 AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+([^:]+)')),
                 concat(
                     extract(title, '^\\[R-pkgs\\]\\s+([^:]+)'),
-                    if(notEmpty(extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), concat(' ', extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), ''),
                     ' CRAN 패키지 공지'
                 ),
             startsWith(source_id, 'community:runiverse:')
@@ -94,12 +97,19 @@ coalesce(
         multiIf(
             source_id = 'official:r-mail:r-packages'
                 AND startsWith(title, '[R-pkgs]')
+                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)')),
+                concat(
+                    'R-packages 메일링 리스트에 올라온 ',
+                    extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)'),
+                    ' 신규 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
+                ),
+            source_id = 'official:r-mail:r-packages'
+                AND startsWith(title, '[R-pkgs]')
                 AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+([^:]+)')),
                 concat(
                     'R-packages 메일링 리스트에 올라온 ',
                     extract(title, '^\\[R-pkgs\\]\\s+([^:]+)'),
-                    if(notEmpty(extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), concat(' ', extract(title, '(?i)(?:version|v)\\s*([0-9][A-Za-z0-9._-]*)')), ''),
-                    ' 관련 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
+                    ' 관련 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
                 ),
             startsWith(source_id, 'community:runiverse:')
                 AND notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)')),
@@ -192,6 +202,7 @@ def main() -> int:
             "maintainer": text(row.get("maintainer")),
             "license_text": text(row.get("license_text")),
             "published_at": text(row.get("published_at")),
+            "first_seen_at": text(row.get("first_seen_at")),
             "last_observed_at": text(row.get("last_observed_at")),
             "downloads_30d": int(row.get("downloads_30d") or 0),
             "reverse_depends_count": int(row.get("reverse_depends_count") or 0),
@@ -455,6 +466,7 @@ SELECT repository,
        package_url,
        bug_reports,
        if(isNull(published_sort_key), '', formatDateTime(published_sort_key, '%Y-%m-%d %H:%i:%S')) AS published_at,
+       if(isNull(first_seen_at), '', formatDateTime(first_seen_at, '%Y-%m-%d %H:%i:%S')) AS first_seen_at,
        formatDateTime(last_observed_at, '%Y-%m-%d %H:%i:%S') AS last_observed_at,
        downloads_30d,
        reverse_depends_count,
@@ -483,6 +495,7 @@ SELECT repository,
            b.package_url,
            b.bug_reports,
            coalesce(cran_page.published_at, package_current.published_at, version_history.version_published_at) AS published_sort_key,
+           package_seen.first_seen_at AS first_seen_at,
            b.last_observed_at,
            ifNull(metrics.downloads_30d, 0) AS downloads_30d,
            ifNull(metrics.reverse_depends_count, 0) AS reverse_depends_count,
@@ -559,6 +572,15 @@ SELECT repository,
     ) AS version_history ON b.repository_key = version_history.repository_key
                         AND b.package_key = version_history.package_key
                         AND b.latest_version = version_history.package_version
+      LEFT JOIN
+    (
+        SELECT lowerUTF8(repository) AS repository_key,
+               lowerUTF8(package_name) AS package_key,
+               min(first_seen_at) AS first_seen_at
+          FROM Data_R_Package_Service.package_version_history
+         GROUP BY repository_key, package_key
+    ) AS package_seen ON b.repository_key = package_seen.repository_key
+                     AND b.package_key = package_seen.package_key
 )
  ORDER BY lowerUTF8(repository), lowerUTF8(package_name){suffix}
  FORMAT JSONEachRow
@@ -594,10 +616,7 @@ SELECT external_id,
        )
    AND (
           source_id != 'official:r-mail:r-packages'
-          OR (
-              startsWith(title, '[R-pkgs]')
-              AND position(canonical_url, '/pipermail/r-packages/') > 0
-          )
+          OR match(canonical_url, '/pipermail/r-packages/[0-9]{{4}}/[0-9]+[.]html')
        )
    AND (
           source_id != 'official:bioconductor:release-announcements'
