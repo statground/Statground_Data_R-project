@@ -8,6 +8,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -230,7 +231,7 @@ def derive_key(secret: str) -> bytes:
 
 def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str, compress: bool = False) -> dict[str, Any]:
     plaintext = json.dumps(plain, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    payload = gzip.compress(plaintext, compresslevel=9, mtime=0) if compress else plaintext
+    payload = gzip_stable(plaintext) if compress else plaintext
     nonce = hmac.new(key, normalize_path(rel_path).encode("utf-8") + b"\0" + payload, hashlib.sha256).digest()[:12]
     ciphertext = AESGCM(key).encrypt(nonce, payload, normalize_path(rel_path).encode("utf-8"))
     doc = {
@@ -247,6 +248,13 @@ def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language:
     if uuid:
         doc["uuid"] = uuid
     return doc
+
+
+def gzip_stable(data: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=buffer, compresslevel=9, mtime=0) as gz_file:
+        gz_file.write(data)
+    return buffer.getvalue()
 
 
 def b64url(data: bytes) -> str:
