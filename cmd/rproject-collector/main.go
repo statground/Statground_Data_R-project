@@ -601,7 +601,7 @@ func addCommunitySourceEvidenceFromMap(add func(string, string), label string, r
 	if len(row) == 0 || depth > 4 {
 		return
 	}
-	for _, key := range []string{"title", "description", "image_description", "content_text", "text_excerpt", "summary", "content"} {
+	for _, key := range []string{"title", "description", "image_description", "content_text", "text_excerpt", "summary", "content", "link_text", "link_context", "target_title", "target_html_title", "target_meta_description", "target_abstract"} {
 		add(label+"."+key, stringField(row, key))
 	}
 	for _, key := range []string{"card", "status", "original_status", "reblog", "quote", "summary_detail"} {
@@ -795,13 +795,14 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	itemLimit := fs.Int("items-per-digest", envInt("R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST", 80), "max source links kept in each digest")
 	model := fs.String("model", envString("R_COMMUNITY_DIGEST_MODEL", envString("MASTODON_TRANSLATION_MODEL", envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.5-flash-lite"))), "AI model for Korean daily digest")
 	allowFallback := fs.Bool("allow-fallback", envBool("R_COMMUNITY_DIGEST_ALLOW_FALLBACK", false), "allow deterministic non-AI digest when no AI provider is configured")
+	missingOnly := fs.Bool("missing-only", envBool("R_COMMUNITY_DIGEST_MISSING_ONLY", false), "only publish or insert digest groups not already present in the latest digest view")
 	fs.Parse(args)
 
 	cfg, err := newClickHouseQueryConfig()
 	if err != nil {
 		return err
 	}
-	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback)
+	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback, *missingOnly)
 	if err != nil {
 		return err
 	}
@@ -824,12 +825,20 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	return nil
 }
 
-func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, sinceDays, groupLimit, itemLimit int, model string, allowFallback bool) ([]communityDigestRecord, error) {
+func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, sinceDays, groupLimit, itemLimit int, model string, allowFallback bool, missingOnly bool) ([]communityDigestRecord, error) {
 	rows, err := fetchCommunityDigestSourceRows(cfg, sinceDays)
 	if err != nil {
 		return nil, err
 	}
 	records := groupCommunityDigestRows(rows, itemLimit)
+	if missingOnly {
+		before := len(records)
+		records, err = filterMissingCommunityDigestRecords(cfg, records)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("missing_only_before=%d missing_only_after=%d\n", before, len(records))
+	}
 	if groupLimit > 0 && len(records) > groupLimit {
 		records = records[:groupLimit]
 	}
@@ -875,6 +884,51 @@ func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig,
 		records[i].PayloadHash = communityDigestPayloadHash(records[i])
 	}
 	return records, nil
+}
+
+func filterMissingCommunityDigestRecords(cfg clickHouseQueryConfig, records []communityDigestRecord) ([]communityDigestRecord, error) {
+	if len(records) == 0 {
+		return records, nil
+	}
+	existing := make(map[string]bool, len(records))
+	const chunkSize = 200
+	for start := 0; start < len(records); start += chunkSize {
+		end := start + chunkSize
+		if end > len(records) {
+			end = len(records)
+		}
+		quotedIDs := make([]string, 0, end-start)
+		for _, record := range records[start:end] {
+			if strings.TrimSpace(record.DigestID) != "" {
+				quotedIDs = append(quotedIDs, clickHouseQuoteString(record.DigestID))
+			}
+		}
+		if len(quotedIDs) == 0 {
+			continue
+		}
+		query := fmt.Sprintf(`
+SELECT digest_id
+  FROM Data_R_Community_Service.v_r_community_daily_digest_latest
+ WHERE digest_id IN (%s)
+ FORMAT JSONEachRow`, strings.Join(quotedIDs, ","))
+		rows, err := cfg.queryJSONEachRow(query)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if digestID := strings.TrimSpace(stringAny(row["digest_id"])); digestID != "" {
+				existing[digestID] = true
+			}
+		}
+	}
+	missing := make([]communityDigestRecord, 0, len(records))
+	for _, record := range records {
+		if strings.TrimSpace(record.DigestID) == "" || existing[record.DigestID] {
+			continue
+		}
+		missing = append(missing, record)
+	}
+	return missing, nil
 }
 
 func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([]map[string]any, error) {

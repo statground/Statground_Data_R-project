@@ -878,6 +878,12 @@ class RSourceCollector:
             )
             target_content = str(target_meta.get("target_content_text") or "").strip()
             summary = first_nonempty(target_summary, target_content[:1000])
+            if not summary and source_id == "community:rweekly":
+                summary = first_nonempty(
+                    link.get("context_text"),
+                    link.get("link_text"),
+                    target_title,
+                )
             if not summary:
                 summary = f"Discovered from {page_title}: {page_url}"
             published_at = first_nonempty(

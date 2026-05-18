@@ -447,6 +447,7 @@ jobs:
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
           R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST: ${{ vars.R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST || '80' }}
           R_COMMUNITY_DIGEST_MODEL: ${{ vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
+          R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -457,14 +458,11 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
         run: |
-          if [[ "${{ github.event_name }}" != "workflow_dispatch" && "$(TZ=Asia/Seoul date +%H)" != "00" ]]; then
-            echo "Skip daily digest generation outside the KST midnight scheduled run."
-            exit 0
-          fi
           go run ./cmd/rproject-collector community-digest \
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
-            --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST"
+            --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST" \
+            --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY"
 
       - name: Validate Web-R CDN2 publish settings
         env:
@@ -602,15 +600,34 @@ jobs:
           git config user.name "statground-r-project-bot"
           git config user.email "actions@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_packages.git"
+          changed=false
+          git add packages/ko/index.json packages/ko/versions.json packages/ko/news
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh Web-R CDN2 encrypted package news"
+            git push origin HEAD:main
+            changed=true
+          fi
+          for prefix in "a-d" "e-h" "i-l" "m-p" "q-t" "u-z"; do
+            git add ":(glob)packages/ko/details/[${prefix}]*.json"
+            if git diff --cached --quiet; then
+              continue
+            fi
+            git commit -m "Refresh Web-R CDN2 encrypted package details ${prefix}"
+            git push origin HEAD:main
+            changed=true
+          done
           git add packages
-          if git diff --cached --quiet; then
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh Web-R CDN2 encrypted package remainder"
+            git push origin HEAD:main
+            changed=true
+          fi
+          if [[ "$changed" != "true" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             echo "Web-R CDN2 packages are already up to date."
             exit 0
           fi
-          git commit -m "Refresh Web-R CDN2 encrypted packages"
-          git push origin HEAD:main
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -664,3 +681,30 @@ jobs:
             --branch main \
             --scope web-r-community \
             --language ko
+
+      - name: Verify Web-R CDN2 release pointers
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+        run: |
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-content \
+            --language ko \
+            --repo statground/web-r_CDN2_contents \
+            --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
+            --manifest contents/ko/index.json
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-packages \
+            --language ko \
+            --repo statground/web-r_CDN2_packages \
+            --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
+            --manifest packages/ko/index.json
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-community \
+            --language ko \
+            --repo statground/web-r_CDN2_community \
+            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --manifest community/ko/index.json

@@ -303,8 +303,87 @@ SELECT external_id,
        platform,
        source_url,
        canonical_url,
-       coalesce(nullIf(JSONExtractString(payload_json, 'title_ko'), ''), nullIf(JSONExtractString(raw_json, 'title_ko'), ''), title) AS title,
-       coalesce(nullIf(JSONExtractString(payload_json, 'summary_ko'), ''), nullIf(JSONExtractString(raw_json, 'summary_ko'), ''), nullIf(JSONExtractString(payload_json, 'content_ko'), ''), nullIf(JSONExtractString(raw_json, 'content_ko'), ''), summary) AS summary,
+       coalesce(
+           nullIf(
+               multiIf(
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'Daily News about R-devel/NEWS') > 0,
+                       'R-devel/NEWS 일일 업데이트',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'EMODnet Biology Geospatial R Tutorials') > 0,
+                       'EMODnet Biology 지리공간 R 튜토리얼',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'R Conferences and Meetups') > 0,
+                       'R 컨퍼런스와 모임 목록',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'Conference') > 0
+                       AND positionCaseInsensitiveUTF8(title, 'Events') > 0,
+                       '컨퍼런스와 이벤트',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'dslc.io') > 0,
+                       'Data Science Learning Community 참여 안내',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'coolbutuseless') > 0,
+                       'R에서 그린 실시간 숲 애니메이션',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'aRtsy_package') > 0,
+                       'R과 ggplot2로 생성한 오늘의 아트워크',
+                   source_id = 'community:rweekly'
+                       AND positionCaseInsensitiveUTF8(title, 'CougarStats') > 0,
+                       'CougarStats: 통계 교육용 오픈소스 웹 앱',
+                   ''
+               ),
+               ''
+           ),
+           nullIf(JSONExtractString(payload_json, 'title_ko'), ''),
+           nullIf(JSONExtractString(raw_json, 'title_ko'), ''),
+           title
+       ) AS title,
+       coalesce(
+           nullIf(
+               multiIf(
+                   source_id = 'community:rweekly'
+                       AND (
+                           positionCaseInsensitiveUTF8(summary, 'Discovered from') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'discovered') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), '발견') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'S at 50') > 0
+                           OR (
+                               positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'R Weekly') > 0
+                               AND (
+                                   positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'targets vs dbt') > 0
+                                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'Shiny webAwesome') > 0
+                                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'ggplot2 트릭') > 0
+                                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'knitr') > 0
+                               )
+                           )
+                       ),
+                       concat(
+                           'R Weekly에서 소개된 ',
+                           multiIf(
+                               positionCaseInsensitiveUTF8(title, 'Daily News about R-devel/NEWS') > 0, 'R-devel/NEWS 변경 사항',
+                               positionCaseInsensitiveUTF8(title, 'EMODnet Biology Geospatial R Tutorials') > 0, 'EMODnet Biology 지리공간 R 튜토리얼',
+                               positionCaseInsensitiveUTF8(title, 'R Conferences and Meetups') > 0, 'R 컨퍼런스와 모임',
+                               positionCaseInsensitiveUTF8(title, 'Conference') > 0 AND positionCaseInsensitiveUTF8(title, 'Events') > 0, '컨퍼런스와 이벤트',
+                               positionCaseInsensitiveUTF8(title, 'dslc.io') > 0, 'Data Science Learning Community',
+                               positionCaseInsensitiveUTF8(title, 'coolbutuseless') > 0, 'R 실시간 숲 애니메이션',
+                               positionCaseInsensitiveUTF8(title, 'aRtsy_package') > 0, 'R과 ggplot2 아트워크',
+                               positionCaseInsensitiveUTF8(title, 'CougarStats') > 0, '통계 교육용 오픈소스 웹 앱 CougarStats',
+                               notEmpty(JSONExtractString(raw_json, 'link_text')) AND lengthUTF8(JSONExtractString(raw_json, 'link_text')) <= 120, JSONExtractString(raw_json, 'link_text'),
+                               title
+                           ),
+                           ' 관련 자료입니다. 원문에서 자세한 내용을 확인할 수 있습니다.'
+                       ),
+                   ''
+               ),
+               ''
+           ),
+           nullIf(JSONExtractString(payload_json, 'summary_ko'), ''),
+           nullIf(JSONExtractString(raw_json, 'summary_ko'), ''),
+           nullIf(JSONExtractString(payload_json, 'content_ko'), ''),
+           nullIf(JSONExtractString(raw_json, 'content_ko'), ''),
+           summary
+       ) AS summary,
        author,
        if(
            notEmpty(JSONExtractString(payload_json, 'title_ko'))
@@ -312,7 +391,25 @@ SELECT external_id,
            OR notEmpty(JSONExtractString(payload_json, 'content_ko'))
            OR notEmpty(JSONExtractString(raw_json, 'title_ko'))
            OR notEmpty(JSONExtractString(raw_json, 'summary_ko'))
-           OR notEmpty(JSONExtractString(raw_json, 'content_ko')),
+           OR notEmpty(JSONExtractString(raw_json, 'content_ko'))
+           OR (
+               source_id = 'community:rweekly'
+               AND (
+                   positionCaseInsensitiveUTF8(summary, 'Discovered from') > 0
+                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'discovered') > 0
+                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), '발견') > 0
+                   OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'S at 50') > 0
+                   OR (
+                       positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'R Weekly') > 0
+                       AND (
+                           positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'targets vs dbt') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'Shiny webAwesome') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'ggplot2 트릭') > 0
+                           OR positionCaseInsensitiveUTF8(JSONExtractString(payload_json, 'summary_ko'), 'knitr') > 0
+                       )
+                   )
+               )
+           ),
            'ko',
            language
        ) AS language,
