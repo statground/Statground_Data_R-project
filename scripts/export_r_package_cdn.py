@@ -188,6 +188,11 @@ def main() -> int:
         if not uuid:
             continue
         news_title, news_summary = package_news_display_fields(row)
+        payload_json = text(row.get("payload_json"))
+        raw_json = text(row.get("raw_json"))
+        if text(row.get("source_id")) == "official:r-mail:r-packages" and news_summary:
+            payload_json = package_news_json_with_korean(payload_json, news_title, news_summary)
+            raw_json = package_news_json_with_korean(raw_json, news_title, news_summary)
         published_at = first_text(text(row.get("published_at_text")), text(row.get("collected_at_text")))
         year, month = published_year_month(published_at)
         rel_path = f"packages/{language}/news/{year}/{month}/{uuid}.json"
@@ -227,8 +232,8 @@ def main() -> int:
                 "author": item["author"],
                 "language": language,
                 "tags_json": text(row.get("tags_json")),
-                "raw_json": text(row.get("raw_json")),
-                "payload_json": text(row.get("payload_json")),
+                "raw_json": raw_json,
+                "payload_json": payload_json,
                 "published_at": published_at,
                 "collected_at": text(row.get("collected_at_text")),
             },
@@ -330,6 +335,16 @@ def parse_json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def package_news_json_with_korean(value: str, title: str, summary: str) -> str:
+    row = parse_json_object(value)
+    if not row:
+        row = {}
+    row["title_ko"] = title
+    row["summary_ko"] = summary
+    row["content_ko"] = summary
+    return json.dumps(row, ensure_ascii=False, separators=(",", ":"))
 
 
 def looks_korean(value: str) -> bool:
