@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,23 +77,12 @@ coalesce(
 
 PACKAGE_NEWS_SUMMARY_SQL = r"""
 coalesce(
+    nullIf(JSONExtractString(payload_json, 'summary_ko'), ''),
+    nullIf(JSONExtractString(raw_json, 'summary_ko'), ''),
+    nullIf(JSONExtractString(payload_json, 'content_ko'), ''),
+    nullIf(JSONExtractString(raw_json, 'content_ko'), ''),
     nullIf(
         multiIf(
-            source_id = 'official:r-mail:r-packages'
-                AND match(canonical_url, '/pipermail/r-packages/[0-9]{4}/[0-9]+[.]html')
-                AND positionCaseInsensitiveUTF8(title, '신규 CRAN 패키지 공지') > 0,
-                concat(
-                    'R-packages 메일링 리스트에 올라온 ',
-                    replaceRegexpOne(title, '\\s+신규 CRAN 패키지 공지$', ''),
-                    ' 신규 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
-                ),
-            source_id = 'official:r-mail:r-packages'
-                AND match(canonical_url, '/pipermail/r-packages/[0-9]{4}/[0-9]+[.]html'),
-                concat(
-                    'R-packages 메일링 리스트에 올라온 ',
-                    replaceRegexpOne(title, '\\s+CRAN 패키지 공지$', ''),
-                    ' 관련 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
-                ),
             source_id = 'official:bioconductor:release-announcements'
                 AND notEmpty(extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)')),
                 concat(
@@ -106,48 +96,6 @@ coalesce(
                     '에서 확인된 ',
                     replaceRegexpOne(replaceRegexpOne(title, '^\\[[^\\]]+\\]\\s+', ''), '\\s+R-universe 업데이트$', ''),
                     ' 패키지 업데이트입니다. 빌드 결과와 패키지 설명은 원문 링크에서 확인할 수 있습니다.'
-                ),
-            ''
-        ),
-        ''
-    ),
-    nullIf(JSONExtractString(payload_json, 'summary_ko'), ''),
-    nullIf(JSONExtractString(raw_json, 'summary_ko'), ''),
-    nullIf(JSONExtractString(payload_json, 'content_ko'), ''),
-    nullIf(JSONExtractString(raw_json, 'content_ko'), ''),
-    nullIf(
-        multiIf(
-            source_id = 'official:r-mail:r-packages'
-                AND startsWith(title, '[R-pkgs]')
-                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)')),
-                concat(
-                    'R-packages 메일링 리스트에 올라온 ',
-                    extract(title, '^\\[R-pkgs\\]\\s+New package:\\s*([^\\s]+)'),
-                    ' 신규 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
-                ),
-            source_id = 'official:r-mail:r-packages'
-                AND startsWith(title, '[R-pkgs]')
-                AND notEmpty(extract(title, '^\\[R-pkgs\\]\\s+([^:]+)')),
-                concat(
-                    'R-packages 메일링 리스트에 올라온 ',
-                    extract(title, '^\\[R-pkgs\\]\\s+([^:]+)'),
-                    ' 관련 CRAN 패키지 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.'
-                ),
-            startsWith(source_id, 'community:runiverse:')
-                AND notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)')),
-                concat(
-                    if(positionCaseInsensitiveUTF8(source_id, 'ropensci') > 0, 'rOpenSci R-universe', source_name),
-                    '에서 확인된 ',
-                    extract(title, '^\\[[^\\]]+\\]\\s+([^\\s]+)'),
-                    if(notEmpty(extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), concat(' ', extract(title, '^\\[[^\\]]+\\]\\s+[^\\s]+\\s+([^\\s]+)')), ''),
-                    ' 패키지 업데이트입니다. 빌드 결과와 패키지 설명은 원문 링크에서 확인할 수 있습니다.'
-                ),
-            source_id = 'official:bioconductor:release-announcements'
-                AND notEmpty(extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)')),
-                concat(
-                    'Bioconductor ',
-                    extract(concat(title, ' ', canonical_url), '(?i)Bioconductor[^0-9]*([0-9]+(?:\\.[0-9]+)?)'),
-                    ' 릴리스 공지입니다. 원문에는 새 패키지, 기존 패키지 NEWS, deprecated/defunct 패키지 등 릴리스 변경 사항이 정리되어 있습니다.'
                 ),
             ''
         ),
@@ -239,6 +187,7 @@ def main() -> int:
         uuid = normalize_uuid(row.get("item_uuid"))
         if not uuid:
             continue
+        news_title, news_summary = package_news_display_fields(row)
         published_at = first_text(text(row.get("published_at_text")), text(row.get("collected_at_text")))
         year, month = published_year_month(published_at)
         rel_path = f"packages/{language}/news/{year}/{month}/{uuid}.json"
@@ -255,8 +204,8 @@ def main() -> int:
             "source_name": text(row.get("source_name")),
             "source_type": text(row.get("source_type")),
             "platform": text(row.get("platform")),
-            "title": text(row.get("title")),
-            "summary": text(row.get("summary")),
+            "title": news_title,
+            "summary": news_summary,
             "author": text(row.get("author")),
             "canonical_url": text(row.get("canonical_url")),
         }
@@ -339,6 +288,151 @@ def main() -> int:
 
 def package_detail_path(language: str, package_name: str) -> str:
     return f"packages/{language}/details/{quote(package_name.lower(), safe='._-')}.json"
+
+
+def package_news_display_fields(row: dict[str, Any]) -> tuple[str, str]:
+    title = text(row.get("title"))
+    summary = text(row.get("summary"))
+    if text(row.get("source_id")) != "official:r-mail:r-packages":
+        return title, summary
+    payload = parse_json_object(row.get("payload_json"))
+    raw = parse_json_object(row.get("raw_json"))
+    nested_raw = parse_json_object(payload.get("raw_json")) if payload else {}
+    raw_title = first_text(
+        text(raw.get("target_title")),
+        text(nested_raw.get("target_title")),
+        text(payload.get("title")),
+        title,
+    )
+    body = first_text(
+        text(raw.get("target_content_text")),
+        text(nested_raw.get("target_content_text")),
+        text(raw.get("target_abstract")),
+        text(nested_raw.get("target_abstract")),
+        text(payload.get("summary")),
+        summary,
+    )
+    package, version, is_new_package = r_packages_subject_parts(raw_title)
+    summary_ko = r_packages_korean_summary(raw_title, body, package, version, is_new_package)
+    if summary_ko and (not looks_korean(summary) or is_weak_package_news_summary(summary)):
+        summary = summary_ko
+    return title, summary
+
+
+def parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    raw = text(value)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def looks_korean(value: str) -> bool:
+    return bool(re.search(r"[가-힣]", value or ""))
+
+
+def is_weak_package_news_summary(value: str) -> bool:
+    lowered = (value or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "discovered from",
+            "원문 링크에서 확인",
+            "원문에는 패키지 배포 배경",
+            "r-packages 메일링 리스트에 올라온",
+        )
+    )
+
+
+def r_packages_subject_parts(title: str | None) -> tuple[str, str, bool]:
+    title_text = re.sub(r"\s+", " ", str(title or "")).strip()
+    is_new_package = False
+    package = ""
+    match = re.search(r"^\[R-pkgs\]\s+New package:\s*([^\s,;:]+)", title_text, re.IGNORECASE)
+    if match:
+        is_new_package = True
+        package = match.group(1).strip()
+    if not package:
+        match = re.search(r"^\[R-pkgs\]\s+([^:]+)", title_text)
+        if match:
+            package = match.group(1).strip()
+            package = re.sub(r"\bnew\s+version\b.*$", "", package, flags=re.IGNORECASE).strip()
+            package = re.sub(r"\b(?:version|v)\s*[0-9][A-Za-z0-9._-]*\b", "", package, flags=re.IGNORECASE).strip()
+    if not package:
+        package = re.sub(r"\s+(?:신규\s+)?CRAN\s+패키지\s+공지$", "", title_text).strip()
+    version = ""
+    match = re.search(r"(?:version|v)\s*([0-9][A-Za-z0-9._-]*)", title_text, re.IGNORECASE)
+    if match:
+        version = match.group(1)
+    return package, version, is_new_package
+
+
+def r_packages_korean_summary(
+    title: str | None,
+    content_text: str | None,
+    package: str,
+    version: str,
+    is_new_package: bool,
+) -> str:
+    message = r_packages_clean_message_text(content_text)
+    if not message:
+        return ""
+    lower = message.lower()
+    pkg = package or "해당 패키지"
+    subject = " ".join(part for part in (pkg, version) if part).strip() or pkg
+    feature_parts: list[str] = []
+    if "terra package" in lower or "supersedes raster" in lower:
+        feature_parts.append("terra 기반 전환")
+    if "multi-core" in lower or "distributed computing" in lower:
+        feature_parts.append("parallel 패키지를 통한 멀티코어/분산 계산 지원")
+    if "new functions" in lower:
+        feature_parts.append("새 함수 추가")
+    if "improved documentation" in lower:
+        feature_parts.append("문서 개선")
+    if "pkgdown" in lower or "new webpage" in lower or "project website" in lower:
+        feature_parts.append("pkgdown 기반 웹사이트 정비")
+    if "graphical logo" in lower:
+        feature_parts.append("새 로고")
+    if "doi" in lower and "cran" in lower:
+        feature_parts.append("CRAN DOI 반영")
+    feature_sentence = ""
+    if feature_parts:
+        feature_sentence = " 주요 내용은 " + ", ".join(dict.fromkeys(feature_parts)) + "입니다."
+    if "merge gridded datasets" in lower and "random forest" in lower:
+        return (
+            f"{pkg}는 Random Forest를 핵심 공간 예측 알고리즘으로 사용해 격자형 자료와 현장 관측값을 결합하는 R 패키지입니다. "
+            f"{subject}가 CRAN에 공개되었습니다.{feature_sentence or ' 패키지 구조와 계산 성능을 개선한 변경 사항을 담고 있습니다.'}"
+        )
+    if "convex optimization" in lower and "cvxr" in lower:
+        return (
+            f"{subject}가 CRAN에 공개되어 R에서 convex optimization을 다루는 CVXR 기능을 새 구현으로 제공합니다. "
+            "S7 class 기반 재작성, CVXPY 1.8.1과의 기능 대응, open source solver 지원, DPP/DGP/DQCP 지원과 시각화 기능을 포함합니다."
+        )
+    if "shiny application" in lower and "association" in lower:
+        return (
+            f"{pkg}는 다변량 데이터의 association 탐색을 위한 Shiny 애플리케이션을 제공하는 신규 CRAN 패키지입니다. "
+            "정량·정성 변수에 맞는 association measure를 자동 선택하고, correlation network와 이변량 시각화를 통해 탐색적 분석을 지원합니다."
+        )
+    if is_new_package:
+        return f"{pkg}가 신규 CRAN 패키지로 공개되었습니다.{feature_sentence or ' 본문에는 패키지의 분석 목적, 제공 기능, 관련 문서와 저장소 정보가 정리되어 있습니다.'}"
+    if "released" in lower or "available on cran" in lower:
+        return f"{subject}가 CRAN에 공개되었습니다.{feature_sentence or ' 본문에는 이번 릴리스의 주요 변경 사항과 참고 문서가 정리되어 있습니다.'}"
+    return ""
+
+
+def r_packages_clean_message_text(content_text: str | None) -> str:
+    message = str(content_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for marker in ("[[alternative HTML version deleted]]", "\n-- \n", "\n--\n"):
+        index = message.find(marker)
+        if index > 0:
+            message = message[:index]
+    message = re.sub(r"https?://\S+", " ", message)
+    return re.sub(r"\s+", " ", message).strip()
 
 
 def package_profile_from_row(row: dict[str, Any]) -> dict[str, Any]:

@@ -480,13 +480,16 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 	content := stringAny(row["content"])
 	evidence := communitySourceTranslationEvidence(row)
 	changed := false
-	needsTitle := strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && !looksKorean(title, 0.20)
-	needsSummary := strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && !looksKorean(summary, 0.25)
+	titleKo := strings.TrimSpace(stringAny(row["title_ko"]))
+	summaryKo := strings.TrimSpace(stringAny(row["summary_ko"]))
+	contentKo := strings.TrimSpace(stringAny(row["content_ko"]))
+	needsTitle := titleKo == "" && strings.TrimSpace(title) != "" && !looksKorean(title, 0.20)
+	needsSummary := (summaryKo == "" || isWeakCommunitySourceKoreanText(row, summaryKo)) && strings.TrimSpace(summary) != "" && !looksKorean(summary, 0.25)
 	if strings.TrimSpace(stringAny(row["title_ko"])) == "" && strings.TrimSpace(title) != "" && looksKorean(title, 0.20) {
 		row["title_ko"] = title
 		changed = true
 	}
-	if strings.TrimSpace(stringAny(row["summary_ko"])) == "" && strings.TrimSpace(summary) != "" && looksKorean(summary, 0.25) {
+	if summaryKo == "" && strings.TrimSpace(summary) != "" && looksKorean(summary, 0.25) {
 		row["summary_ko"] = summary
 		changed = true
 	}
@@ -541,7 +544,7 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 			changed = true
 		}
 	}
-	if strings.TrimSpace(stringAny(row["content_ko"])) == "" && strings.TrimSpace(content) != "" && !looksKorean(content, 0.25) {
+	if (contentKo == "" || isWeakCommunitySourceKoreanText(row, contentKo)) && strings.TrimSpace(content) != "" && !looksKorean(content, 0.25) {
 		translatedContent, err := ai.chat(communitySourceContentPrompt(title, content, evidence), model)
 		if err != nil {
 			return changed, err
@@ -556,7 +559,9 @@ func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any)
 			changed = true
 		}
 	}
-	if strings.TrimSpace(stringAny(row["content_ko"])) == "" && strings.TrimSpace(stringAny(row["summary_ko"])) != "" {
+	if (strings.TrimSpace(stringAny(row["content_ko"])) == "" ||
+		isWeakCommunitySourceKoreanText(row, stringAny(row["content_ko"]))) &&
+		strings.TrimSpace(stringAny(row["summary_ko"])) != "" {
 		row["content_ko"] = safeHTML(stringAny(row["summary_ko"]))
 		changed = true
 	}
@@ -620,6 +625,30 @@ func stringField(row map[string]any, key string) string {
 		return text
 	}
 	return ""
+}
+
+func isWeakCommunitySourceKoreanText(row map[string]any, value string) bool {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"discovered from",
+		"원문 링크에서 확인",
+		"원문에는 패키지 배포 배경",
+		"빌드 결과와 패키지 설명은 원문",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	sourceID := strings.ToLower(strings.TrimSpace(stringAny(row["source_id"])))
+	if sourceID == "official:r-mail:r-packages" {
+		return strings.Contains(text, "R-packages 메일링 리스트에 올라온") &&
+			(strings.Contains(text, "관련 공지입니다") || strings.Contains(text, "신규 CRAN 패키지 공지입니다"))
+	}
+	return false
 }
 
 func preserveCommunityAnniversaryNumbers(evidence, translated string) string {

@@ -1340,7 +1340,7 @@ def r_packages_pipermail_metadata(soup: BeautifulSoup, page_url: str, content_te
         content_text = compact_multiline_text(pre.get_text("\n", strip=True))
     content_text = (content_text or "")[:max_chars] if max_chars > 0 else content_text
     summary = r_packages_message_summary(content_text)
-    title_ko, summary_ko = r_packages_korean_display(title)
+    title_ko, summary_ko = r_packages_korean_display(title, content_text)
     return {
         "target_title": title,
         "target_title_ko": title_ko,
@@ -1364,21 +1364,100 @@ def r_packages_message_summary(content_text: str | None) -> str:
     return truncate_text(text, 1000)
 
 
-def r_packages_korean_display(title: str | None) -> tuple[str, str]:
+def r_packages_korean_display(title: str | None, content_text: str | None = None) -> tuple[str, str]:
     title_text = compact_text(title or "")
+    package, version, is_new_package = r_packages_subject_parts(title_text)
+    subject = compact_text(" ".join(part for part in (package, version) if part)) or "R 패키지"
+    title_ko = f"{subject} 신규 CRAN 패키지 공지" if is_new_package else f"{subject} CRAN 패키지 공지"
+    return title_ko, r_packages_korean_summary(title_text, content_text, package, version, is_new_package)
+
+
+def r_packages_subject_parts(title: str | None) -> tuple[str, str, bool]:
+    title_text = compact_text(title or "")
+    is_new_package = False
     package = ""
-    match = re.search(r"^\[R-pkgs\]\s+([^:]+)", title_text)
+    match = re.search(r"^\[R-pkgs\]\s+New package:\s*([^\s,;:]+)", title_text, re.IGNORECASE)
     if match:
+        is_new_package = True
         package = compact_text(match.group(1))
+    if not package:
+        match = re.search(r"^\[R-pkgs\]\s+([^:]+)", title_text)
+        if match:
+            package = compact_text(match.group(1))
+            package = re.sub(r"\bnew\s+version\b.*$", "", package, flags=re.IGNORECASE).strip()
+            package = re.sub(r"\b(?:version|v)\s*[0-9][A-Za-z0-9._-]*\b", "", package, flags=re.IGNORECASE).strip()
     version = ""
     match = re.search(r"(?:version|v)\s*([0-9][A-Za-z0-9._-]*)", title_text, re.IGNORECASE)
     if match:
         version = match.group(1)
-    subject = compact_text(" ".join(part for part in (package, version) if part)) or "R 패키지"
-    return (
-        f"{subject} CRAN 패키지 공지",
-        f"R-packages 메일링 리스트에 올라온 {subject} 관련 공지입니다. 원문에는 패키지 배포 배경과 주요 변경 사항이 정리되어 있습니다.",
-    )
+    return package, version, is_new_package
+
+
+def r_packages_korean_summary(
+    title: str | None,
+    content_text: str | None,
+    package: str,
+    version: str,
+    is_new_package: bool,
+) -> str:
+    text = r_packages_clean_message_text(content_text)
+    if not text:
+        return ""
+    lower = text.lower()
+    pkg = package or "해당 패키지"
+    subject = compact_text(" ".join(part for part in (pkg, version) if part))
+    feature_parts: list[str] = []
+    if "terra package" in lower or "supersedes raster" in lower:
+        feature_parts.append("terra 기반 전환")
+    if "multi-core" in lower or "distributed computing" in lower:
+        feature_parts.append("parallel 패키지를 통한 멀티코어/분산 계산 지원")
+    if "new functions" in lower:
+        feature_parts.append("새 함수 추가")
+    if "improved documentation" in lower:
+        feature_parts.append("문서 개선")
+    if "pkgdown" in lower or "new webpage" in lower or "project website" in lower:
+        feature_parts.append("pkgdown 기반 웹사이트 정비")
+    if "graphical logo" in lower:
+        feature_parts.append("새 로고")
+    if "doi" in lower and "cran" in lower:
+        feature_parts.append("CRAN DOI 반영")
+    feature_sentence = ""
+    if feature_parts:
+        feature_sentence = " 주요 내용은 " + ", ".join(dict.fromkeys(feature_parts)) + "입니다."
+
+    if "merge gridded datasets" in lower and "random forest" in lower:
+        release_sentence = feature_sentence or " 패키지 구조와 계산 성능을 개선한 변경 사항을 담고 있습니다."
+        return (
+            f"{pkg}는 Random Forest를 핵심 공간 예측 알고리즘으로 사용해 격자형 자료와 현장 관측값을 결합하는 R 패키지입니다."
+            f" {subject}가 CRAN에 공개되었습니다.{release_sentence}"
+        )
+    if "convex optimization" in lower and "cvxr" in lower:
+        return (
+            f"{subject}가 CRAN에 공개되어 R에서 convex optimization을 다루는 CVXR 기능을 새 구현으로 제공합니다."
+            " S7 class 기반 재작성, CVXPY 1.8.1과의 기능 대응, open source solver 지원, DPP/DGP/DQCP 지원과 시각화 기능을 포함합니다."
+        )
+    if "shiny application" in lower and "association" in lower:
+        return (
+            f"{pkg}는 다변량 데이터의 association 탐색을 위한 Shiny 애플리케이션을 제공하는 신규 CRAN 패키지입니다."
+            " 정량·정성 변수에 맞는 association measure를 자동 선택하고, correlation network와 이변량 시각화를 통해 탐색적 분석을 지원합니다."
+        )
+    if is_new_package:
+        return f"{pkg}가 신규 CRAN 패키지로 공개되었습니다.{feature_sentence or ' 본문에는 패키지의 분석 목적, 제공 기능, 관련 문서와 저장소 정보가 정리되어 있습니다.'}"
+    if "released" in lower or "available on cran" in lower:
+        return f"{subject}가 CRAN에 공개되었습니다.{feature_sentence or ' 본문에는 이번 릴리스의 주요 변경 사항과 참고 문서가 정리되어 있습니다.'}"
+    return ""
+
+
+def r_packages_clean_message_text(content_text: str | None) -> str:
+    text = compact_multiline_text(content_text or "")
+    if not text:
+        return ""
+    for marker in ("[[alternative HTML version deleted]]", "\n-- \n", "\n--\n"):
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[:idx].strip()
+    text = re.sub(r"https?://\S+", " ", text)
+    return compact_text(text)
 
 
 def rss_package_display_metadata(source_id: str, source_name: str, title: str, summary: str | None) -> dict[str, str]:
