@@ -321,6 +321,7 @@ jobs:
           KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
           R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
+          R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || 'community:stackoverflow:r,community:posit:latest-r-filtered,reddit:r/rstats,reddit:r/rprogramming' }}
           R_COMMUNITY_TRANSLATE_ENABLED: ${{ vars.R_COMMUNITY_TRANSLATE_ENABLED || 'true' }}
           R_COMMUNITY_TRANSLATION_LIMIT: ${{ vars.R_COMMUNITY_TRANSLATION_LIMIT || vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
           R_COMMUNITY_TRANSLATION_MODEL: ${{ vars.R_COMMUNITY_TRANSLATION_MODEL || vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}

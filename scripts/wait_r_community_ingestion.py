@@ -53,6 +53,10 @@ PUBMED_DIGEST_REGEX = (
 PUBLISHED_RE = re.compile(r"\bpublished=(\d+)\b")
 
 
+class ClickHouseQueryError(RuntimeError):
+    """Retryable ClickHouse visibility-check failure."""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -82,6 +86,7 @@ def main() -> int:
 def add_wait_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--attempts", type=int, default=36)
     parser.add_argument("--sleep", type=float, default=10)
+    parser.add_argument("--query-timeout", type=float, default=45)
 
 
 def wait_source(args: argparse.Namespace) -> int:
@@ -98,7 +103,11 @@ def wait_source(args: argparse.Namespace) -> int:
     cutoff_sql = f"parseDateTime64BestEffort({quote(started_at)}, 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
     last_failures: list[str] = []
     for attempt in range(1, max(1, args.attempts) + 1):
-        summary, failures = source_visibility(cutoff_sql, required, args.max_source_age_days)
+        try:
+            summary, failures = source_visibility(cutoff_sql, required, args.max_source_age_days, args.query_timeout)
+        except ClickHouseQueryError as exc:
+            summary = {"clickhouse_query_error": str(exc)}
+            failures = [str(exc)]
         print(
             json.dumps(
                 {
@@ -126,8 +135,15 @@ def wait_digest(args: argparse.Namespace) -> int:
     source_types = tuple(split_csv(args.source_types) or DEFAULT_DIGEST_SOURCE_TYPES)
     excluded = tuple(split_csv(args.exclude_sources) + list(args.exclude_source or []))
     last_lag: list[dict[str, str]] = []
+    last_error = ""
     for attempt in range(1, max(1, args.attempts) + 1):
-        lag = digest_lag(source_types, excluded, args.since_days)
+        query_error = ""
+        try:
+            lag = digest_lag(source_types, excluded, args.since_days, args.query_timeout)
+        except ClickHouseQueryError as exc:
+            lag = []
+            query_error = str(exc)
+            last_error = query_error
         print(
             json.dumps(
                 {
@@ -136,11 +152,18 @@ def wait_digest(args: argparse.Namespace) -> int:
                     "published": published,
                     "lagging_sources": lag[:20],
                     "lagging_source_count": len(lag),
+                    "query_error": query_error,
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
+        if query_error:
+            if attempt < args.attempts:
+                time.sleep(max(0, args.sleep))
+                continue
+            print(f"R Community daily digest visibility check did not complete: {query_error}", file=sys.stderr)
+            return 1
         if not lag:
             return 0
         last_lag = lag
@@ -150,11 +173,13 @@ def wait_digest(args: argparse.Namespace) -> int:
         break
 
     reason = "community-digest published no events" if published <= 0 else "digest rows did not become visible"
+    if last_error:
+        reason = last_error
     print(f"R Community daily digest lag remains before CDN export ({reason}): {json.dumps(last_lag[:10], ensure_ascii=False)}", file=sys.stderr)
     return 1
 
 
-def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age_days: float) -> tuple[dict[str, Any], list[str]]:
+def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age_days: float, query_timeout: float) -> tuple[dict[str, Any], list[str]]:
     source_rows = {
         row.get("source_id", ""): row
         for row in query_json_each_row(
@@ -171,7 +196,8 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
               AND notEmpty(canonical_url)
             GROUP BY source_id
             FORMAT JSONEachRow
-            """
+            """,
+            query_timeout,
         )
     }
     event_rows = {
@@ -188,7 +214,8 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
               AND JSONExtractString(payload, 'source_id') IN ({quote_list(required)})
             GROUP BY source_id
             FORMAT JSONEachRow
-            """
+            """,
+            query_timeout,
         )
     }
 
@@ -221,7 +248,7 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
     return summary, failures
 
 
-def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ...], since_days: int) -> list[dict[str, str]]:
+def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ...], since_days: int, query_timeout: float) -> list[dict[str, str]]:
     since_where = ""
     if since_days >= 0:
         cutoff_date = (datetime.now(KST) - timedelta(days=since_days)).strftime("%Y-%m-%d")
@@ -268,7 +295,8 @@ def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ..
         WHERE ifNull(digest_latest.latest_digest_date, toDate('1970-01-01')) < source_latest.latest_source_date
         ORDER BY source_latest.latest_source_date DESC, source_latest.source_id ASC
         FORMAT JSONEachRow
-        """
+        """,
+        query_timeout,
     )
     return [{key: str(value) for key, value in row.items()} for row in rows]
 
@@ -286,8 +314,8 @@ def pubmed_reddit_where(prefix: str = "") -> str:
     """
 
 
-def query_json_each_row(sql: str) -> list[dict[str, Any]]:
-    body = clickhouse_request(sql).strip()
+def query_json_each_row(sql: str, query_timeout: float) -> list[dict[str, Any]]:
+    body = clickhouse_request(sql, query_timeout).strip()
     if not body:
         return []
     rows: list[dict[str, Any]] = []
@@ -297,8 +325,8 @@ def query_json_each_row(sql: str) -> list[dict[str, Any]]:
     return rows
 
 
-def clickhouse_request(sql: str) -> str:
-    request = urllib.request.Request(clickhouse_url(), data=sql.encode("utf-8"), method="POST")
+def clickhouse_request(sql: str, query_timeout: float) -> str:
+    request = urllib.request.Request(clickhouse_url(query_timeout), data=sql.encode("utf-8"), method="POST")
     user = first_env("CH_USER", "CLICKHOUSE_USER")
     password = first_env("CH_PASSWORD", "CLICKHOUSE_PASSWORD")
     if not user:
@@ -306,20 +334,21 @@ def clickhouse_request(sql: str) -> str:
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=max(1, query_timeout)) as response:
             return response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read(300).decode("utf-8", errors="replace")
-        raise SystemExit(f"ClickHouse R Community ingestion check failed: HTTP {exc.code}: {redact_detail(detail)}") from exc
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse R Community ingestion check failed: {exc.__class__.__name__}") from exc
+        raise ClickHouseQueryError(f"ClickHouse R Community ingestion check failed: HTTP {exc.code}: {redact_detail(detail)}") from exc
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        raise ClickHouseQueryError(f"ClickHouse R Community ingestion check failed: {exc.__class__.__name__}") from exc
 
 
-def clickhouse_url() -> str:
+def clickhouse_url(query_timeout: float) -> str:
     try:
-        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time="30")
+        timeout = str(max(1, int(query_timeout)))
+        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time=timeout)
     except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
+        raise ClickHouseQueryError(str(exc)) from exc
 
 
 def load_json(path: Path) -> dict[str, Any]:

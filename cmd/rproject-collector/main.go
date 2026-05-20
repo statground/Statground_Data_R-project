@@ -378,6 +378,7 @@ func runCommunity(ctx context.Context, args []string) error {
 	translationModel := fs.String("translation-model", envString("R_COMMUNITY_TRANSLATION_MODEL", envString("R_COMMUNITY_DIGEST_MODEL", "google/gemini-2.5-flash-lite")), "AI model for R Community source item Korean translation")
 	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
 	fs.Parse(args)
+	requiredSources := splitCSV(envString("R_COMMUNITY_REQUIRED_SOURCE_IDS", "community:stackoverflow:r,community:posit:latest-r-filtered,reddit:r/rstats,reddit:r/rprogramming"))
 
 	var ai *aiClient
 	translated := 0
@@ -408,7 +409,7 @@ func runCommunity(ctx context.Context, args []string) error {
 		}
 	}
 
-	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, enrich)
+	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, requiredSources, enrich)
 	if err != nil {
 		return err
 	}
@@ -422,36 +423,84 @@ func runCommunity(ctx context.Context, args []string) error {
 	if len(translationErrors) > 0 {
 		fmt.Printf("translation_errors=%d first_error=%s\n", len(translationErrors), translationErrors[0])
 	}
-	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s\n", len(events), translated, *topic, *jsonlPath)
+	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), *limit)
 	return nil
 }
 
-func readCommunityJSONLEvents(path string, limit int, enrich func(map[string]any) error) ([]genericEvent, error) {
+type communityJSONLRow struct {
+	lineNo int
+	row    map[string]any
+}
+
+func readCommunityJSONLEvents(path string, limit int, requiredSourceIDs []string, enrich func(map[string]any) error) ([]genericEvent, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	events := make([]genericEvent, 0)
+	rows := make([]communityJSONLRow, 0)
 	for lineNo, rawLine := range bytes.Split(body, []byte("\n")) {
 		line := bytes.TrimSpace(rawLine)
 		if len(line) == 0 {
 			continue
 		}
-		if limit > 0 && len(events) >= limit {
-			break
-		}
 		var row map[string]any
 		if err := json.Unmarshal(line, &row); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
 		}
+		rows = append(rows, communityJSONLRow{lineNo: lineNo + 1, row: row})
+	}
+	rows = selectCommunityJSONLRows(rows, limit, requiredSourceIDs)
+	events := make([]genericEvent, 0, len(rows))
+	for _, item := range rows {
 		if enrich != nil {
-			if err := enrich(row); err != nil {
-				return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+			if err := enrich(item.row); err != nil {
+				return nil, fmt.Errorf("%s:%d: %w", path, item.lineNo, err)
 			}
 		}
-		events = append(events, communityRowEvent(row))
+		events = append(events, communityRowEvent(item.row))
 	}
 	return events, nil
+}
+
+func selectCommunityJSONLRows(rows []communityJSONLRow, limit int, requiredSourceIDs []string) []communityJSONLRow {
+	if limit <= 0 || len(rows) <= limit {
+		return rows
+	}
+	required := make(map[string]bool, len(requiredSourceIDs))
+	for _, sourceID := range requiredSourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID != "" {
+			required[sourceID] = true
+		}
+	}
+	if len(required) == 0 {
+		return rows[:limit]
+	}
+	selected := make([]bool, len(rows))
+	selectedCount := 0
+	for idx, item := range rows {
+		if required[strings.TrimSpace(stringAny(item.row["source_id"]))] {
+			selected[idx] = true
+			selectedCount++
+		}
+	}
+	for idx := range rows {
+		if selected[idx] {
+			continue
+		}
+		if selectedCount >= limit {
+			break
+		}
+		selected[idx] = true
+		selectedCount++
+	}
+	out := make([]communityJSONLRow, 0, selectedCount)
+	for idx, item := range rows {
+		if selected[idx] {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func communityRowEvent(row map[string]any) genericEvent {
