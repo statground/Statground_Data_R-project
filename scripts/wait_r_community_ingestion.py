@@ -64,6 +64,7 @@ def main() -> int:
     source = subparsers.add_parser("source", help="wait for required source rows after collection")
     source.add_argument("--report", default="data/collected/r/latest_report.json")
     source.add_argument("--required-source", action="append", default=[])
+    source.add_argument("--required-sources", default="")
     source.add_argument("--max-source-age-days", type=float, default=8)
     add_wait_args(source)
 
@@ -95,7 +96,7 @@ def wait_source(args: argparse.Namespace) -> int:
     if not started_at:
         print("R Community report has no started_at; cannot verify source ingestion.", file=sys.stderr)
         return 1
-    required = tuple(args.required_source or DEFAULT_REQUIRED_SOURCE_IDS)
+    required = merge_required_sources(DEFAULT_REQUIRED_SOURCE_IDS, args.required_sources, args.required_source)
     if not required:
         print("No required R Community source ids were configured; cannot verify source ingestion.", file=sys.stderr)
         return 1
@@ -378,6 +379,21 @@ def parse_kst_datetime(value: str) -> datetime | None:
 
 def split_csv(value: str) -> list[str]:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def merge_required_sources(defaults: tuple[str, ...], csv_value: str, explicit: list[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    values.extend(defaults)
+    values.extend(split_csv(csv_value))
+    values.extend(explicit)
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return tuple(out)
 
 
 def quote(value: str) -> str:

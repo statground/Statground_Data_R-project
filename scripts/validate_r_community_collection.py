@@ -30,10 +30,11 @@ def main() -> int:
     parser.add_argument("--jsonl", default="data/collected/r/latest.jsonl")
     parser.add_argument("--report", default="data/collected/r/latest_report.json")
     parser.add_argument("--required-source", action="append", default=[])
+    parser.add_argument("--required-sources", default="")
     parser.add_argument("--max-source-age-days", type=float, default=8)
     args = parser.parse_args()
 
-    required = tuple(args.required_source or DEFAULT_REQUIRED_SOURCE_IDS)
+    required = merge_required_sources(DEFAULT_REQUIRED_SOURCE_IDS, args.required_sources, args.required_source)
     config = load_json_or_yaml(Path(args.config))
     report = load_json(Path(args.report))
     rows = load_jsonl(Path(args.jsonl))
@@ -123,6 +124,25 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{path}:{line_no}: invalid JSONL: {exc}") from exc
     return rows
+
+
+def merge_required_sources(defaults: tuple[str, ...], csv_value: str, explicit: list[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    values.extend(defaults)
+    values.extend(split_csv(csv_value))
+    values.extend(explicit)
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return tuple(out)
+
+
+def split_csv(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
 
 
 def reddit_source_map(config: dict[str, Any]) -> dict[str, str]:

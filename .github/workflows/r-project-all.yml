@@ -303,11 +303,14 @@ jobs:
           PY
 
       - name: Validate R Community collection report
+        env:
+          R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || '' }}
         run: |
           python scripts/validate_r_community_collection.py \
             --config config/r_sources.yaml \
             --jsonl data/collected/r/latest.jsonl \
-            --report data/collected/r/latest_report.json
+            --report data/collected/r/latest_report.json \
+            --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS"
 
       - name: Publish R Community events to Kafka
         env:
@@ -346,9 +349,11 @@ jobs:
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || '' }}
         run: |
           python scripts/wait_r_community_ingestion.py source \
             --report data/collected/r/latest_report.json \
+            --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS" \
             --attempts 36 \
             --sleep 10
 

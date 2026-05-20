@@ -84,6 +84,12 @@ var (
 		"https://ropensci.org/blog/",
 		"https://www.r-consortium.org/news/blogs",
 	}
+	defaultCommunityRequiredSourceIDs = []string{
+		"community:stackoverflow:r",
+		"community:posit:latest-r-filtered",
+		"reddit:r/rstats",
+		"reddit:r/rprogramming",
+	}
 )
 
 var boardAllowedTags = map[string]bool{
@@ -378,7 +384,7 @@ func runCommunity(ctx context.Context, args []string) error {
 	translationModel := fs.String("translation-model", envString("R_COMMUNITY_TRANSLATION_MODEL", envString("R_COMMUNITY_DIGEST_MODEL", "google/gemini-2.5-flash-lite")), "AI model for R Community source item Korean translation")
 	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
 	fs.Parse(args)
-	requiredSources := splitCSV(envString("R_COMMUNITY_REQUIRED_SOURCE_IDS", "community:stackoverflow:r,community:posit:latest-r-filtered,reddit:r/rstats,reddit:r/rprogramming"))
+	requiredSources := mergeStringSlices(defaultCommunityRequiredSourceIDs, splitCSV(envString("R_COMMUNITY_REQUIRED_SOURCE_IDS", "")))
 
 	var ai *aiClient
 	translated := 0
@@ -413,6 +419,10 @@ func runCommunity(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateRequiredCommunityEvents(events, requiredSources); err != nil {
+		return err
+	}
+	sourceCounts := communityEventSourceCounts(events)
 	pub := newPublisher(*topic, "statground-rcommunity-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
 		return err
@@ -423,7 +433,7 @@ func runCommunity(ctx context.Context, args []string) error {
 	if len(translationErrors) > 0 {
 		fmt.Printf("translation_errors=%d first_error=%s\n", len(translationErrors), translationErrors[0])
 	}
-	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), *limit)
+	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s required_counts=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), communityRequiredCountsString(sourceCounts, requiredSources), *limit)
 	return nil
 }
 
@@ -518,6 +528,47 @@ func communityRowEvent(row map[string]any) genericEvent {
 	source := firstNonEmpty(stringAny(row["source_id"]), stringAny(row["source_name"]), "r_community_sources_jsonl")
 	observedAt := firstNonEmpty(stringAny(row["published_at"]), stringAny(row["collected_at"]))
 	return newGenericEvent("r.community.item.v1", source, sourceURL, "R-Community", "", "", observedAt, payload)
+}
+
+func validateRequiredCommunityEvents(events []genericEvent, requiredSourceIDs []string) error {
+	counts := communityEventSourceCounts(events)
+	missing := make([]string, 0)
+	for _, sourceID := range requiredSourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID != "" && counts[sourceID] == 0 {
+			missing = append(missing, sourceID)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("R Community required source rows were not selected for publish: %s", strings.Join(missing, ","))
+	}
+	return nil
+}
+
+func communityEventSourceCounts(events []genericEvent) map[string]int {
+	counts := make(map[string]int)
+	for _, event := range events {
+		sourceID := strings.TrimSpace(event.Source)
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(event.Payload), &payload); err == nil {
+			sourceID = firstNonEmpty(stringAny(payload["source_id"]), sourceID)
+		}
+		if sourceID != "" {
+			counts[sourceID]++
+		}
+	}
+	return counts
+}
+
+func communityRequiredCountsString(counts map[string]int, requiredSourceIDs []string) string {
+	parts := make([]string, 0, len(requiredSourceIDs))
+	for _, sourceID := range requiredSourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID != "" {
+			parts = append(parts, fmt.Sprintf("%s=%d", sourceID, counts[sourceID]))
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func translateCommunitySourceRow(ai *aiClient, model string, row map[string]any) (bool, error) {
@@ -7732,6 +7783,21 @@ func splitCSV(value string) []string {
 	return out
 }
 
+func mergeStringSlices(groups ...[]string) []string {
+	out := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, group := range groups {
+		for _, value := range group {
+			value = strings.TrimSpace(value)
+			if value != "" && !seen[value] {
+				seen[value] = true
+				out = append(out, value)
+			}
+		}
+	}
+	return out
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -7871,7 +7937,19 @@ func mustJSON(value any) string {
 }
 
 func eventKey(event genericEvent) string {
-	return strings.Join([]string{event.Repository, event.PackageName, event.PackageVersion, event.EventType}, ":")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(event.Payload), &payload); err == nil {
+		payloadKey := firstNonEmpty(
+			stringAny(payload["external_id"]),
+			stringAny(payload["digest_id"]),
+			stringAny(payload["uuid"]),
+			stringAny(payload["row_external_id"]),
+		)
+		if payloadKey != "" {
+			return strings.Join([]string{event.Repository, event.Source, event.EventType, payloadKey}, ":")
+		}
+	}
+	return strings.Join([]string{event.Repository, event.Source, event.PackageName, event.PackageVersion, event.EventType, event.EventID}, ":")
 }
 
 func absoluteURL(base, raw string) string {
