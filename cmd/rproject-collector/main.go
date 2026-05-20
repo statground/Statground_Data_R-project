@@ -972,6 +972,20 @@ func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([
 	if len(quoted) == 0 {
 		return nil, errors.New("R_COMMUNITY_DIGEST_SOURCE_TYPES resolved to an empty set")
 	}
+	excludedIDs := splitCSV(envString("R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS", "mastodon:group:rstats"))
+	excludedWhere := ""
+	if len(excludedIDs) > 0 {
+		quotedExcluded := make([]string, 0, len(excludedIDs))
+		for _, value := range excludedIDs {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				quotedExcluded = append(quotedExcluded, clickHouseQuoteString(value))
+			}
+		}
+		if len(quotedExcluded) > 0 {
+			excludedWhere = fmt.Sprintf(" AND source_id NOT IN (%s)", strings.Join(quotedExcluded, ","))
+		}
+	}
 	sinceWhere := ""
 	if sinceDays >= 0 {
 		cutoffDate := nowKST().AddDate(0, 0, -sinceDays).Format("2006-01-02")
@@ -1019,8 +1033,9 @@ WHERE source_type IN (%s)
   AND notEmpty(canonical_url)
   %s
   %s
+  %s
 ORDER BY digest_date DESC, source_type ASC, source_id ASC, published_at_text DESC, collected_at_text DESC, title ASC
-FORMAT JSONEachRow`, strings.Join(quoted, ","), sinceWhere, pubMedRedditWhere)
+FORMAT JSONEachRow`, strings.Join(quoted, ","), excludedWhere, sinceWhere, pubMedRedditWhere)
 	return cfg.queryJSONEachRow(query)
 }
 

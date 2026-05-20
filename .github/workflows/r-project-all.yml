@@ -346,98 +346,10 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
         run: |
-          item_count=$(python - <<'PY'
-          import json
-          from pathlib import Path
-          report = json.loads(Path("data/collected/r/latest_report.json").read_text(encoding="utf-8"))
-          print(int(report.get("item_count") or 0))
-          PY
-          )
-          if [[ "$item_count" -eq 0 ]]; then
-            echo "No R Community rows were collected; skip ingestion wait."
-            exit 0
-          fi
-          started_at=$(python - <<'PY'
-          import json
-          from pathlib import Path
-          report = json.loads(Path("data/collected/r/latest_report.json").read_text(encoding="utf-8"))
-          print(str(report.get("started_at") or ""))
-          PY
-          )
-          if [[ -z "$started_at" ]]; then
-            echo "latest_report.json has no started_at; skip ingestion wait."
-            exit 0
-          fi
-          cutoff_sql="parseDateTime64BestEffort('${started_at}', 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
-          last_status=""
-          for attempt in {1..36}; do
-            status_tsv=$(CUTOFF_SQL="$cutoff_sql" python - <<'PY'
-          import base64
-          import os
-          import sys
-          import urllib.error
-          import urllib.request
-
-          sys.path.insert(0, "scripts")
-          from clickhouse_http import build_clickhouse_url
-
-          user = os.environ.get("CH_USER", "").strip()
-          password = os.environ.get("CH_PASSWORD", "")
-          cutoff_sql = os.environ.get("CUTOFF_SQL", "")
-          if not user or not cutoff_sql:
-              print("0\t0\t0\t0\t0\t0\tmissing-clickhouse-credentials")
-              raise SystemExit(0)
-          sql = f"""
-          SELECT
-              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND ingested_at >= {cutoff_sql}) AS raw_events,
-              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE ingested_at >= {cutoff_sql}) AS raw_items,
-              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE ingested_at >= {cutoff_sql}) AS latest_items,
-              (SELECT count() FROM Data_R_Community_Raw.r_community_event_raw WHERE event_type = 'r.community.item.v1' AND collected_at >= {cutoff_sql}) AS collected_raw_events,
-              (SELECT count() FROM Data_R_Community_Raw.r_community_item_raw WHERE collected_at >= {cutoff_sql}) AS collected_raw_items,
-              (SELECT count() FROM Data_R_Community_Service.v_r_community_latest WHERE collected_at >= {cutoff_sql}) AS collected_latest_items,
-              ifNull((SELECT anyHeavy(left(error_message, 120)) FROM Data_R_Community_Log.kafka_ingest_error WHERE ingested_at >= {cutoff_sql}), '') AS ingest_error
-          FORMAT TSV
-          """
-          try:
-              url = build_clickhouse_url(os.environ, default_format="TSV", max_execution_time="20")
-              request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
-              request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
-              request.add_header("Content-Type", "text/plain; charset=utf-8")
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  print(response.read().decode("utf-8", errors="replace").strip() or "0\t0\t0\t0\t0\t0\t")
-          except urllib.error.HTTPError as exc:
-              detail = exc.read().decode("utf-8", errors="replace").strip().replace("\n", " ")[:160]
-              print(f"0\t0\t0\t0\t0\t0\tclickhouse-http-{exc.code}:{detail}")
-          except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
-              print(f"0\t0\t0\t0\t0\t0\tclickhouse-query-error:{str(exc).replace(chr(10), ' ')[:160]}")
-          PY
-          )
-            status_tsv=${status_tsv:-$'0\t0\t0\t0\t0\t0\tempty-status'}
-            last_status="$status_tsv"
-            IFS=$'\t' read -r raw_events raw_items latest_items collected_raw_events collected_raw_items collected_latest_items ingest_error <<< "$status_tsv"
-            raw_events=${raw_events:-0}
-            raw_items=${raw_items:-0}
-            latest_items=${latest_items:-0}
-            collected_raw_events=${collected_raw_events:-0}
-            collected_raw_items=${collected_raw_items:-0}
-            collected_latest_items=${collected_latest_items:-0}
-            [[ "$raw_events" =~ ^[0-9]+$ ]] || raw_events=0
-            [[ "$raw_items" =~ ^[0-9]+$ ]] || raw_items=0
-            [[ "$latest_items" =~ ^[0-9]+$ ]] || latest_items=0
-            [[ "$collected_raw_events" =~ ^[0-9]+$ ]] || collected_raw_events=0
-            [[ "$collected_raw_items" =~ ^[0-9]+$ ]] || collected_raw_items=0
-            [[ "$collected_latest_items" =~ ^[0-9]+$ ]] || collected_latest_items=0
-            echo "R Community ClickHouse rows ingested after collection start: latest=${latest_items}/${item_count}, raw_items=${raw_items}, raw_events=${raw_events}; collected_after_start latest=${collected_latest_items}, raw_items=${collected_raw_items}, raw_events=${collected_raw_events} (attempt ${attempt}/36)"
-            if [[ -n "${ingest_error:-}" ]]; then
-              echo "Recent R Community ingestion diagnostic: ${ingest_error}" >&2
-            fi
-            if [[ "$latest_items" -gt 0 ]]; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "R Community ClickHouse ingestion did not become visible before digest generation. last_status=${last_status}" >&2
-          exit 1
+          python scripts/wait_r_community_ingestion.py source \
+            --report data/collected/r/latest_report.json \
+            --attempts 36 \
+            --sleep 10
 
       - name: Generate R Community daily digests
         env:
@@ -452,6 +364,7 @@ jobs:
           R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
+          R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS: ${{ vars.R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS || 'mastodon:group:rstats' }}
           R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST: ${{ vars.R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST || '80' }}
           R_COMMUNITY_DIGEST_MODEL: ${{ vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
@@ -469,7 +382,27 @@ jobs:
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST" \
-            --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY"
+            --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY" \
+            | tee /tmp/r_community_digest.out
+
+      - name: Wait for R Community daily digest visibility
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
+          R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
+          R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS: ${{ vars.R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS || 'mastodon:group:rstats' }}
+        run: |
+          python scripts/wait_r_community_ingestion.py digest \
+            --digest-output /tmp/r_community_digest.out \
+            --source-types "$R_COMMUNITY_DIGEST_SOURCE_TYPES" \
+            --exclude-sources "$R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS" \
+            --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
+            --attempts 36 \
+            --sleep 10
 
       - name: Validate Web-R CDN2 publish settings
         env:
