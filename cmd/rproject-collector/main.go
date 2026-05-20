@@ -947,6 +947,7 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	missingOnly := fs.Bool("missing-only", envBool("R_COMMUNITY_DIGEST_MISSING_ONLY", false), "only publish or insert digest groups not already present in the latest digest view")
 	latestPerSource := fs.Bool("latest-per-source", envBool("R_COMMUNITY_DIGEST_LATEST_PER_SOURCE", true), "publish at most the newest missing digest group per source in one run")
 	planOutput := fs.String("plan-output", envString("R_COMMUNITY_DIGEST_PLAN_OUTPUT", ""), "write planned digest ids to this JSON file for visibility wait")
+	publishKafka := fs.Bool("publish-kafka", envBool("R_COMMUNITY_DIGEST_PUBLISH_KAFKA", true), "publish digest events to Kafka after optional direct ClickHouse insert")
 	fs.Parse(args)
 
 	cfg, err := newClickHouseQueryConfig()
@@ -965,6 +966,9 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Printf("inserted=%d table=Data_R_Community_Service.r_community_daily_digest\n", len(records))
+	}
+	if !*publishKafka {
+		fmt.Printf("published=0 topic=%s skipped=true\n", *topic)
 		return nil
 	}
 	events := communityDigestEvents(records)
@@ -1888,7 +1892,7 @@ func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig
 		return nil
 	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO Data_R_Community_Service.r_community_daily_digest FORMAT JSONEachRow\n")
+	b.WriteString("INSERT INTO Data_R_Community_Service.r_community_daily_digest SETTINGS insert_distributed_sync = 1 FORMAT JSONEachRow\n")
 	now := nowKST()
 	for _, record := range records {
 		itemsJSON, _ := json.Marshal(record.Items)

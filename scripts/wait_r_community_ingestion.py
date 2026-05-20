@@ -50,7 +50,7 @@ PUBMED_DIGEST_REGEX = (
     "systematic review|scoping review|search strateg|evidence synthesis|"
     "biomedical literature|medical librarian|clinical literature|database search"
 )
-PUBLISHED_RE = re.compile(r"\bpublished=(\d+)\b")
+DIGEST_WRITE_RE = re.compile(r"\b(?:published|inserted)=(\d+)\b")
 
 
 class ClickHouseQueryError(RuntimeError):
@@ -133,7 +133,7 @@ def wait_source(args: argparse.Namespace) -> int:
 
 
 def wait_digest(args: argparse.Namespace) -> int:
-    published = parse_published_count(Path(args.digest_output))
+    published = parse_digest_write_count(Path(args.digest_output))
     planned = load_digest_plan(Path(args.plan))
     planned_ids = digest_plan_ids(planned)
     if not planned_ids:
@@ -440,14 +440,14 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(fp)
 
 
-def parse_published_count(path: Path) -> int:
+def parse_digest_write_count(path: Path) -> int:
     if not path.exists():
         return 0
     text = path.read_text(encoding="utf-8", errors="replace")
-    matches = PUBLISHED_RE.findall(text)
+    matches = DIGEST_WRITE_RE.findall(text)
     if not matches:
         return 0
-    return int(matches[-1])
+    return max(int(match) for match in matches)
 
 
 def parse_kst_datetime(value: str) -> datetime | None:

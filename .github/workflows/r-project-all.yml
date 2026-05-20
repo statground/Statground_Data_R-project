@@ -375,6 +375,8 @@ jobs:
           R_COMMUNITY_DIGEST_MODEL: ${{ vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
           R_COMMUNITY_DIGEST_LATEST_PER_SOURCE: ${{ vars.R_COMMUNITY_DIGEST_LATEST_PER_SOURCE || 'true' }}
+          R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE: ${{ vars.R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE || 'true' }}
+          R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'true' }}
           R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -392,6 +394,8 @@ jobs:
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST" \
             --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY" \
             --latest-per-source="$R_COMMUNITY_DIGEST_LATEST_PER_SOURCE" \
+            --insert-clickhouse="$R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE" \
+            --publish-kafka="$R_COMMUNITY_DIGEST_PUBLISH_KAFKA" \
             --plan-output "$R_COMMUNITY_DIGEST_PLAN_OUTPUT" \
             | tee /tmp/r_community_digest.out
 
