@@ -357,7 +357,10 @@ class RSourceCollector:
         return result
 
     def collect_reddit_subreddit(self, source: dict[str, Any]) -> None:
-        subreddit = source["subreddit"].strip().lstrip("r/")
+        configured_subreddit = str(source["subreddit"]).strip()
+        subreddit = normalize_subreddit_name(configured_subreddit)
+        if not subreddit:
+            raise CollectorError("reddit_subreddit requires a subreddit name")
         limit = int(source.get("limit", source.get("max_items", 100)))
         source_id = source.get("id") or f"reddit:r/{subreddit}"
         source_url = f"https://www.reddit.com/r/{subreddit}/"
@@ -383,6 +386,9 @@ class RSourceCollector:
                     # Reddit Atom entries may include HTML tables; keep plain text only.
                     item.platform = "reddit"
                     item.tags.append(f"r/{subreddit}")
+                    item.raw["configured_subreddit"] = configured_subreddit
+                    item.raw["normalized_subreddit"] = subreddit
+                    item.raw["subreddit"] = subreddit
                     self.add_item(item)
                     collected += 1
                 if collected:
@@ -433,6 +439,8 @@ class RSourceCollector:
                 tags=[f"r/{subreddit}", "reddit"],
                 raw={
                     "collector": "reddit_json_noauth",
+                    "configured_subreddit": source.get("subreddit"),
+                    "normalized_subreddit": subreddit,
                     "subreddit": subreddit,
                     "reddit_id": post.get("id"),
                     "name": post.get("name"),
@@ -1596,6 +1604,23 @@ def extract_feed_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
         if href:
             feed_urls.append(canonicalize_url(urljoin(base_url, href)))
     return sorted({url for url in feed_urls if url})
+
+
+def normalize_subreddit_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        parts = [part for part in parsed.path.split("/") if part]
+        for index, part in enumerate(parts):
+            if part.lower() == "r" and index+1 < len(parts):
+                return parts[index+1].strip()
+        return ""
+    raw = raw.strip("/")
+    if raw.lower().startswith("r/"):
+        raw = raw[2:]
+    return raw.strip("/")
 
 
 def canonicalize_url(url: str | None) -> str:

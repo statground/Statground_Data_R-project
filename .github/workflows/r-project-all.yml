@@ -302,6 +302,13 @@ jobs:
           }, ensure_ascii=False, indent=2))
           PY
 
+      - name: Validate R Community collection report
+        run: |
+          python scripts/validate_r_community_collection.py \
+            --config config/r_sources.yaml \
+            --jsonl data/collected/r/latest.jsonl \
+            --report data/collected/r/latest_report.json
+
       - name: Publish R Community events to Kafka
         env:
           KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
