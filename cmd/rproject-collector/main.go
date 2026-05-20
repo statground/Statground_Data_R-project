@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -163,6 +164,25 @@ type communityDigestRecord struct {
 	Status           string
 	GeneratedAt      string
 	PayloadHash      string
+}
+
+type communityDigestPlan struct {
+	GeneratedAt string                      `json:"generated_at"`
+	RecordCount int                         `json:"record_count"`
+	DigestIDs   []string                    `json:"digest_ids"`
+	Records     []communityDigestPlanRecord `json:"records"`
+}
+
+type communityDigestPlanRecord struct {
+	DigestID   string `json:"digest_id"`
+	DigestUUID string `json:"digest_uuid"`
+	DigestDate string `json:"digest_date"`
+	SourceType string `json:"source_type"`
+	SourceID   string `json:"source_id"`
+	SourceName string `json:"source_name"`
+	Platform   string `json:"platform"`
+	ItemCount  int    `json:"item_count"`
+	Status     string `json:"generation_status"`
 }
 
 type publisher struct {
@@ -925,14 +945,19 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	model := fs.String("model", envString("R_COMMUNITY_DIGEST_MODEL", envString("MASTODON_TRANSLATION_MODEL", envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.5-flash-lite"))), "AI model for Korean daily digest")
 	allowFallback := fs.Bool("allow-fallback", envBool("R_COMMUNITY_DIGEST_ALLOW_FALLBACK", false), "allow deterministic non-AI digest when no AI provider is configured")
 	missingOnly := fs.Bool("missing-only", envBool("R_COMMUNITY_DIGEST_MISSING_ONLY", false), "only publish or insert digest groups not already present in the latest digest view")
+	latestPerSource := fs.Bool("latest-per-source", envBool("R_COMMUNITY_DIGEST_LATEST_PER_SOURCE", true), "publish at most the newest missing digest group per source in one run")
+	planOutput := fs.String("plan-output", envString("R_COMMUNITY_DIGEST_PLAN_OUTPUT", ""), "write planned digest ids to this JSON file for visibility wait")
 	fs.Parse(args)
 
 	cfg, err := newClickHouseQueryConfig()
 	if err != nil {
 		return err
 	}
-	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback, *missingOnly)
+	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback, *missingOnly, *latestPerSource)
 	if err != nil {
+		return err
+	}
+	if err := writeCommunityDigestPlan(*planOutput, records); err != nil {
 		return err
 	}
 	if *insertClickHouse {
@@ -954,7 +979,7 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	return nil
 }
 
-func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, sinceDays, groupLimit, itemLimit int, model string, allowFallback bool, missingOnly bool) ([]communityDigestRecord, error) {
+func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, sinceDays, groupLimit, itemLimit int, model string, allowFallback bool, missingOnly bool, latestPerSource bool) ([]communityDigestRecord, error) {
 	rows, err := fetchCommunityDigestSourceRows(cfg, sinceDays)
 	if err != nil {
 		return nil, err
@@ -967,6 +992,11 @@ func buildCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig,
 			return nil, err
 		}
 		fmt.Printf("missing_only_before=%d missing_only_after=%d\n", before, len(records))
+	}
+	if latestPerSource {
+		before := len(records)
+		records = filterLatestCommunityDigestRecordsPerSource(records)
+		fmt.Printf("latest_per_source_before=%d latest_per_source_after=%d\n", before, len(records))
 	}
 	if groupLimit > 0 && len(records) > groupLimit {
 		records = records[:groupLimit]
@@ -1058,6 +1088,61 @@ SELECT digest_id
 		missing = append(missing, record)
 	}
 	return missing, nil
+}
+
+func filterLatestCommunityDigestRecordsPerSource(records []communityDigestRecord) []communityDigestRecord {
+	out := make([]communityDigestRecord, 0, len(records))
+	seen := make(map[string]bool)
+	for _, record := range records {
+		key := strings.Join([]string{record.SourceType, record.SourceID, record.SourceName, record.Platform}, "\x00")
+		if key == "\x00\x00\x00" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, record)
+	}
+	return out
+}
+
+func writeCommunityDigestPlan(path string, records []communityDigestRecord) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	plan := communityDigestPlan{
+		GeneratedAt: nowKST().Format(time.RFC3339),
+		RecordCount: len(records),
+		DigestIDs:   make([]string, 0, len(records)),
+		Records:     make([]communityDigestPlanRecord, 0, len(records)),
+	}
+	for _, record := range records {
+		plan.DigestIDs = append(plan.DigestIDs, record.DigestID)
+		plan.Records = append(plan.Records, communityDigestPlanRecord{
+			DigestID:   record.DigestID,
+			DigestUUID: record.DigestUUID,
+			DigestDate: record.DigestDate,
+			SourceType: record.SourceType,
+			SourceID:   record.SourceID,
+			SourceName: record.SourceName,
+			Platform:   record.Platform,
+			ItemCount:  record.ItemCount,
+			Status:     record.Status,
+		})
+	}
+	body, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("digest_plan=%s planned=%d\n", path, len(records))
+	return nil
 }
 
 func fetchCommunityDigestSourceRows(cfg clickHouseQueryConfig, sinceDays int) ([]map[string]any, error) {

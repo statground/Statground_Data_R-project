@@ -70,6 +70,7 @@ def main() -> int:
 
     digest = subparsers.add_parser("digest", help="wait for daily digest rows before CDN export")
     digest.add_argument("--digest-output", default="/tmp/r_community_digest.out")
+    digest.add_argument("--plan", default="/tmp/r_community_digest_plan.json")
     digest.add_argument("--source-types", default=",".join(DEFAULT_DIGEST_SOURCE_TYPES))
     digest.add_argument("--exclude-sources", default=",".join(DEFAULT_EXCLUDED_DIGEST_SOURCE_IDS))
     digest.add_argument("--exclude-source", action="append", default=[])
@@ -133,16 +134,38 @@ def wait_source(args: argparse.Namespace) -> int:
 
 def wait_digest(args: argparse.Namespace) -> int:
     published = parse_published_count(Path(args.digest_output))
-    source_types = tuple(split_csv(args.source_types) or DEFAULT_DIGEST_SOURCE_TYPES)
-    excluded = tuple(split_csv(args.exclude_sources) + list(args.exclude_source or []))
-    last_lag: list[dict[str, str]] = []
+    planned = load_digest_plan(Path(args.plan))
+    planned_ids = digest_plan_ids(planned)
+    if not planned_ids:
+        print(
+            json.dumps(
+                {
+                    "mode": "digest",
+                    "attempt": 1,
+                    "published": published,
+                    "planned_digest_count": 0,
+                    "visible_digest_count": 0,
+                    "missing_digest_count": 0,
+                    "query_error": "",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        if published <= 0:
+            return 0
+        print("R Community daily digest publish reported events, but digest plan had no digest_id values.", file=sys.stderr)
+        return 1
+
+    last_missing: list[str] = []
     last_error = ""
     for attempt in range(1, max(1, args.attempts) + 1):
         query_error = ""
         try:
-            lag = digest_lag(source_types, excluded, args.since_days, args.query_timeout)
+            visible, missing = digest_plan_visibility(planned_ids, args.query_timeout)
         except ClickHouseQueryError as exc:
-            lag = []
+            visible = {}
+            missing = planned_ids
             query_error = str(exc)
             last_error = query_error
         print(
@@ -151,8 +174,10 @@ def wait_digest(args: argparse.Namespace) -> int:
                     "mode": "digest",
                     "attempt": attempt,
                     "published": published,
-                    "lagging_sources": lag[:20],
-                    "lagging_source_count": len(lag),
+                    "planned_digest_count": len(planned_ids),
+                    "visible_digest_count": len(visible),
+                    "missing_digest_ids": missing[:20],
+                    "missing_digest_count": len(missing),
                     "query_error": query_error,
                 },
                 ensure_ascii=False,
@@ -165,9 +190,9 @@ def wait_digest(args: argparse.Namespace) -> int:
                 continue
             print(f"R Community daily digest visibility check did not complete: {query_error}", file=sys.stderr)
             return 1
-        if not lag:
+        if not missing:
             return 0
-        last_lag = lag
+        last_missing = missing
         if attempt < args.attempts and published > 0:
             time.sleep(max(0, args.sleep))
             continue
@@ -176,8 +201,66 @@ def wait_digest(args: argparse.Namespace) -> int:
     reason = "community-digest published no events" if published <= 0 else "digest rows did not become visible"
     if last_error:
         reason = last_error
-    print(f"R Community daily digest lag remains before CDN export ({reason}): {json.dumps(last_lag[:10], ensure_ascii=False)}", file=sys.stderr)
+    print(f"R Community planned daily digest rows did not become visible before CDN export ({reason}): {json.dumps(last_missing[:10], ensure_ascii=False)}", file=sys.stderr)
     return 1
+
+
+def load_digest_plan(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as fp:
+        data = json.load(fp)
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def digest_plan_ids(plan: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    raw_ids = plan.get("digest_ids")
+    if isinstance(raw_ids, list):
+        values.extend(raw_ids)
+    raw_records = plan.get("records")
+    if isinstance(raw_records, list):
+        for record in raw_records:
+            if isinstance(record, dict):
+                values.append(record.get("digest_id"))
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        digest_id = str(value or "").strip()
+        if digest_id and digest_id not in seen:
+            seen.add(digest_id)
+            out.append(digest_id)
+    return out
+
+
+def digest_plan_visibility(digest_ids: list[str], query_timeout: float) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    visible: dict[str, dict[str, Any]] = {}
+    chunk_size = 200
+    for start in range(0, len(digest_ids), chunk_size):
+        chunk = digest_ids[start:start + chunk_size]
+        for row in query_json_each_row(
+            f"""
+            SELECT
+                digest_id,
+                toString(digest_date) AS digest_date,
+                source_id,
+                source_name,
+                generation_status,
+                notEmpty(summary) AS has_summary
+            FROM Data_R_Community_Service.v_r_community_daily_digest_latest
+            WHERE digest_id IN ({quote_list(chunk)})
+              AND notEmpty(summary)
+            FORMAT JSONEachRow
+            """,
+            query_timeout,
+        ):
+            digest_id = str(row.get("digest_id") or "")
+            if digest_id:
+                visible[digest_id] = row
+    missing = [digest_id for digest_id in digest_ids if digest_id not in visible]
+    return visible, missing
 
 
 def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age_days: float, query_timeout: float) -> tuple[dict[str, Any], list[str]]:

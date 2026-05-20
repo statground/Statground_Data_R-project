@@ -374,6 +374,8 @@ jobs:
           R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST: ${{ vars.R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST || '80' }}
           R_COMMUNITY_DIGEST_MODEL: ${{ vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
+          R_COMMUNITY_DIGEST_LATEST_PER_SOURCE: ${{ vars.R_COMMUNITY_DIGEST_LATEST_PER_SOURCE || 'true' }}
+          R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -389,6 +391,8 @@ jobs:
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST" \
             --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY" \
+            --latest-per-source="$R_COMMUNITY_DIGEST_LATEST_PER_SOURCE" \
+            --plan-output "$R_COMMUNITY_DIGEST_PLAN_OUTPUT" \
             | tee /tmp/r_community_digest.out
 
       - name: Wait for R Community daily digest visibility
@@ -401,9 +405,11 @@ jobs:
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
           R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS: ${{ vars.R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS || 'mastodon:group:rstats' }}
+          R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
         run: |
           python scripts/wait_r_community_ingestion.py digest \
             --digest-output /tmp/r_community_digest.out \
+            --plan "$R_COMMUNITY_DIGEST_PLAN_OUTPUT" \
             --source-types "$R_COMMUNITY_DIGEST_SOURCE_TYPES" \
             --exclude-sources "$R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS" \
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
