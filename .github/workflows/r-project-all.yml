@@ -226,6 +226,10 @@ jobs:
           MAX_PAGES_FROM_HOME: ${{ vars.RBLOGGER_MAX_PAGES_FROM_HOME || '1' }}
           MAX_URLS: ${{ vars.RBLOGGER_MAX_URLS || '10' }}
           STALE_TRANSLATION_LIMIT: ${{ vars.RBLOGGER_STALE_TRANSLATION_LIMIT || '5' }}
+          RBLOGGER_FAIL_ON_LIST_ERROR: ${{ vars.RBLOGGER_FAIL_ON_LIST_ERROR || 'false' }}
+          RBLOGGER_HTTP_ATTEMPTS: ${{ vars.RBLOGGER_HTTP_ATTEMPTS || '4' }}
+          RBLOGGER_HTTP_RETRY_DELAY_SEC: ${{ vars.RBLOGGER_HTTP_RETRY_DELAY_SEC || '2' }}
+          RBLOGGER_HTTP_TIMEOUT: ${{ vars.RBLOGGER_HTTP_TIMEOUT || '30' }}
           SLEEP_SEC: ${{ vars.RBLOGGER_SLEEP_SEC || '0.5' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}

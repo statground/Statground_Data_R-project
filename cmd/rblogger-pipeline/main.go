@@ -60,6 +60,7 @@ type Config struct {
 	Sleep                 time.Duration `json:"sleep"`
 	TranslateEnabled      bool          `json:"translate_enabled"`
 	StaleTranslationLimit int           `json:"stale_translation_limit"`
+	FailOnListError       bool          `json:"fail_on_list_error"`
 	FailOnCrawlError      bool          `json:"fail_on_crawl_error"`
 	FailOnTranslationErr  bool          `json:"fail_on_translation_error"`
 	RbloggerHomeURL       string        `json:"rblogger_home_url"`
@@ -199,19 +200,28 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		}, nil
 	}
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpTimeout := time.Duration(maxInt(10, envInt("RBLOGGER_HTTP_TIMEOUT", envInt("HTTP_TIMEOUT", 30)))) * time.Second
+	httpClient := &http.Client{Timeout: httpTimeout}
+	listErrors := make([]string, 0)
 	urls, err := collectFrontURLs(httpClient, cfg)
 	if err != nil {
-		return nil, err
+		listErrors = append(listErrors, fmt.Sprintf("front_urls: %v", err))
+		if cfg.FailOnListError {
+			return nil, err
+		}
+		urls = []string{}
 	}
 	urlHashes := make([]string, 0, len(urls))
 	for _, listingURL := range urls {
 		urlHashes = append(urlHashes, hashString(canonicalizeURL(listingURL)))
 	}
 	clickHouse := NewClickHouseReader(cfg.ClickHouse)
-	knownHashes, err := clickHouse.KnownURLHashes(ctx, urlHashes)
-	if err != nil {
-		return nil, err
+	knownHashes := make(map[string]bool)
+	if len(urlHashes) > 0 {
+		knownHashes, err = clickHouse.KnownURLHashes(ctx, urlHashes)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	events := make([]KafkaEvent, 0, len(urls)*3+2)
@@ -348,6 +358,7 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 			"published_board":    publishedBoard,
 			"stale_candidates":   staleCandidates,
 			"stale_published":    stalePublished,
+			"list_errors":        firstN(listErrors, 20),
 			"crawl_errors":       firstN(crawlErrors, 50),
 			"translation_errors": firstN(translationErrors, 50),
 			"stale_errors":       firstN(staleErrors, 50),
@@ -361,7 +372,7 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		return nil, err
 	}
 
-	ok := (!cfg.FailOnCrawlError || len(crawlErrors) == 0) && (!cfg.FailOnTranslationErr || len(translationErrors) == 0)
+	ok := (!cfg.FailOnListError || len(listErrors) == 0) && (!cfg.FailOnCrawlError || len(crawlErrors) == 0) && (!cfg.FailOnTranslationErr || len(translationErrors) == 0)
 	return map[string]any{
 		"ok":                 ok,
 		"collected_urls":     len(urls),
@@ -372,6 +383,7 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		"stale_candidates":   staleCandidates,
 		"stale_published":    stalePublished,
 		"kafka_events":       len(events),
+		"list_errors":        listErrors,
 		"crawl_errors":       crawlErrors,
 		"translation_errors": translationErrors,
 		"stale_errors":       staleErrors,
@@ -522,6 +534,7 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		Sleep:                envFloatDuration("SLEEP_SEC", 1.0),
 		TranslateEnabled:     translateEnabled,
 		StaleTranslationLimit: staleLimit,
+		FailOnListError:      envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
 		FailOnCrawlError:     envBool("FAIL_ON_CRAWL_ERROR", false),
 		FailOnTranslationErr: envBool("FAIL_ON_TRANSLATION_ERROR", false),
 		RbloggerHomeURL:      envString("RBLOGGER_HOME_URL", defaultHomeURL),
@@ -541,6 +554,7 @@ func (c Config) publicLogConfig() map[string]any {
 		"max_urls":                  c.MaxURLs,
 		"sleep":                     c.Sleep.String(),
 		"translate_enabled":         c.TranslateEnabled,
+		"fail_on_list_error":        c.FailOnListError,
 		"fail_on_crawl_error":       c.FailOnCrawlError,
 		"fail_on_translation_error": c.FailOnTranslationErr,
 		"rblogger_home_url":         c.RbloggerHomeURL,
@@ -1263,6 +1277,10 @@ func collectFrontURLs(client *http.Client, cfg Config) ([]string, error) {
 		}
 		pageHTML, err := fetchText(client, listURL)
 		if err != nil {
+			if len(out) > 0 {
+				fmt.Printf("[rblogger] list_partial url=%s err=%s\n", listURL, err)
+				break
+			}
 			return nil, err
 		}
 		matches := h3LinkRE.FindAllStringSubmatch(pageHTML, -1)
@@ -1496,12 +1514,41 @@ func htmlFragmentBlank(s string) bool {
 	return strings.TrimSpace(htmlToText(s)) == ""
 }
 
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
 func fetchText(client *http.Client, rawURL string) (string, error) {
 	text, _, err := fetchTextWithFinalURL(client, rawURL)
 	return text, err
 }
 
 func fetchTextWithFinalURL(client *http.Client, rawURL string) (string, string, error) {
+	attempts := maxInt(1, envInt("RBLOGGER_HTTP_ATTEMPTS", envInt("HTTP_ATTEMPTS", 4)))
+	delay := envFloatDuration("RBLOGGER_HTTP_RETRY_DELAY_SEC", 2.0)
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		text, finalURL, err := fetchTextWithFinalURLOnce(client, rawURL)
+		if err == nil {
+			return text, finalURL, nil
+		}
+		lastErr = err
+		if attempt >= attempts || !retryableFetchError(err) {
+			break
+		}
+		sleep := delay + time.Duration(mrand.Int63n(int64(maxDuration(delay, 250*time.Millisecond))))
+		fmt.Printf("[rblogger] transient_http_error url=%s attempt=%d/%d err=%s retry_in=%s\n", rawURL, attempt, attempts, err, sleep)
+		time.Sleep(sleep)
+	}
+	return "", "", lastErr
+}
+
+func fetchTextWithFinalURLOnce(client *http.Client, rawURL string) (string, string, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", "", err
@@ -1517,9 +1564,41 @@ func fetchTextWithFinalURL(client *http.Client, rawURL string) (string, string, 
 		return "", "", err
 	}
 	if resp.StatusCode/100 != 2 {
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(payload[:minInt(len(payload), 500)]))
+		return "", "", &httpStatusError{StatusCode: resp.StatusCode, Body: string(payload[:minInt(len(payload), 500)])}
 	}
 	return string(payload), resp.Request.URL.String(), nil
+}
+
+func retryableFetchError(err error) bool {
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) {
+		return retryableHTTPStatus(statusErr.StatusCode)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "temporary failure") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "tls handshake timeout")
+}
+
+func retryableHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+		520, 521, 522, 523, 524:
+		return true
+	default:
+		return false
+	}
 }
 
 func extractMeta(src, attrName, attrValue string) string {
@@ -2202,6 +2281,13 @@ func maxInt(a, b int) int {
 
 func minInt(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
 		return a
 	}
 	return b
