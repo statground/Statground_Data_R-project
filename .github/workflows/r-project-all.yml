@@ -511,12 +511,14 @@ jobs:
                   "language": "ko",
                   "scope": "web-r-community",
                   "community": community,
-                  "community_export": int(community.get("export") or 0),
-                  "manifest_paths": ["community/ko/index.json"],
+                  "community_export": int(community.get("community_export") or community.get("export") or 0),
+                  "workshop_export": int(community.get("workshop_export") or community.get("workshop") or 0),
+                  "workshop_posts": int(community.get("workshop_posts") or 0),
+                  "manifest_paths": ["community/ko/index.json", "community/ko/workshop/index.json"],
               },
           }
           for key, report in reports.items():
-              report["item_count"] = int(report.get("r_ecosystem_export") or 0) + int(report.get("community_export") or 0) + int(report.get("packages") or 0) + int(report.get("news") or 0) + int(report.get("package_details") or 0)
+              report["item_count"] = int(report.get("r_ecosystem_export") or 0) + int(report.get("community_export") or 0) + int(report.get("workshop_export") or 0) + int(report.get("packages") or 0) + int(report.get("news") or 0) + int(report.get("package_details") or 0)
               Path(f"web_r_cdn2_{key}_export_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
           combined = {
               "schema": "web-r.content-cdn.export-report.v2",
@@ -668,3 +670,9 @@ jobs:
             --repo statground/web-r_CDN2_community \
             --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
             --manifest community/ko/index.json
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-community \
+            --language ko \
+            --repo statground/web-r_CDN2_community \
+            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --manifest community/ko/workshop/index.json

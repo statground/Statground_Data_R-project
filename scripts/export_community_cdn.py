@@ -27,6 +27,8 @@ from clickhouse_http import build_clickhouse_url
 ENCRYPTED_SCHEMA = "web-r.community.encrypted.v1"
 MANIFEST_SCHEMA = "web-r.community.manifest.plain.v1"
 CONTENT_SCHEMA = "web-r.community.content.plain.v1"
+WORKSHOP_MANIFEST_SCHEMA = "web-r.community.workshop.manifest.plain.v1"
+WORKSHOP_CONTENT_SCHEMA = "web-r.community.workshop.content.plain.v1"
 KEY_PURPOSE = "web-r:community-content:v1"
 R_COMMUNITY_BOT_UUID = "019e1127-f5d7-7304-a916-31914e58e1e9"
 R_COMMUNITY_BOT_NAME = "R Community"
@@ -34,8 +36,14 @@ R_COMMUNITY_BOT_ROLE = "Bot"
 NOTEBOOK_BOT_UUID = "7b1c9fc4-7216-44cb-81b8-5fe17f2158bc"
 NOTEBOOK_BOT_NAME = "Web-R Notebook"
 NOTEBOOK_BOT_ROLE = "Bot"
+R_PROJECT_BOT_UUID = "2aeeb31a-5cb1-47d8-bbb0-cb2d271c32ce"
+R_PROJECT_BOT_NAME = "R Project"
+R_PROJECT_BOT_ROLE = "Bot"
+R_PROJECT_CONFERENCE_ID = "official:r:conferences"
+USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
+SAFE_ID_RE = re.compile(r"[^0-9A-Za-z._-]+")
 
 
 def main() -> int:
@@ -55,9 +63,14 @@ def main() -> int:
 
     digest_rows = fetch_json_rows(env, digest_sql(args.limit))
     notebook_rows = fetch_json_rows(env, notebook_sql(args.limit))
+    workshop_rows = fetch_json_rows(env, workshop_sql(args.limit))
+    workshop_event_rows = fetch_json_rows(env, workshop_event_sql(args.limit))
+    workshop_post_rows = fetch_json_rows(env, workshop_post_sql(args.limit))
 
     payloads: dict[str, tuple[str, dict[str, Any]]] = {}
     manifest_items: dict[str, dict[str, Any]] = {}
+    workshop_manifest_items: dict[str, dict[str, Any]] = {}
+    workshop_posts: dict[str, list[dict[str, Any]]] = {}
     duplicate_count = 0
 
     for row in digest_rows:
@@ -136,26 +149,90 @@ def main() -> int:
         payloads[uuid] = (rel_path, {"schema": CONTENT_SCHEMA, "item": item})
         manifest_items[uuid] = item
 
+    for row in workshop_post_rows:
+        post = workshop_post_item(row)
+        workshop_key = text(post.get("workshop_key"))
+        if not workshop_key:
+            continue
+        workshop_posts.setdefault(workshop_key, []).append(post)
+
+    for row in workshop_rows:
+        item = workshop_catalog_item(row, language)
+        uuid = text(item.get("uuid"))
+        if not uuid:
+            continue
+        if uuid in workshop_manifest_items:
+            duplicate_count += 1
+            continue
+        rel_path = workshop_payload_path(language, uuid, first_text(item.get("starts_at"), item.get("updated_at"), item.get("published_at")))
+        item["path"] = rel_path
+        item["url"] = f"/workshop/read/{urllib.parse.quote(uuid)}/"
+        posts = workshop_posts.get(text(item.get("board_key")), [])
+        payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
+        workshop_manifest_items[uuid] = item
+
+    for row in workshop_event_rows:
+        item = workshop_event_item(row, language)
+        uuid = text(item.get("uuid"))
+        if not uuid:
+            continue
+        if uuid in workshop_manifest_items:
+            continue
+        rel_path = workshop_payload_path(language, uuid, first_text(item.get("starts_at"), item.get("updated_at"), item.get("published_at")))
+        item["path"] = rel_path
+        item["url"] = f"/workshop/read/{urllib.parse.quote(uuid)}/"
+        posts = workshop_posts.get(text(item.get("board_key")), [])
+        payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
+        workshop_manifest_items[uuid] = item
+
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "language": language,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "items": manifest_items,
     }
+    workshop_manifest = {
+        "schema": WORKSHOP_MANIFEST_SCHEMA,
+        "language": language,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "catalog_token": workshop_catalog_token(workshop_manifest_items, workshop_posts),
+        "items": workshop_manifest_items,
+    }
 
     if args.dry_run:
-        print(json.dumps({"digest": len(digest_rows), "notebook": len(notebook_rows), "export": len(payloads), "duplicates": duplicate_count}, ensure_ascii=False))
+        print(json.dumps({
+            "digest": len(digest_rows),
+            "notebook": len(notebook_rows),
+            "community_export": len(manifest_items),
+            "workshop": len(workshop_manifest_items),
+            "workshop_posts": sum(len(posts) for posts in workshop_posts.values()),
+            "workshop_export": len(workshop_manifest_items),
+            "export": len(payloads),
+            "duplicates": duplicate_count,
+        }, ensure_ascii=False))
         return 0
 
     for uuid, (rel_path, payload) in payloads.items():
-        encrypted = encrypt_document(payload, key, rel_path, language, uuid)
+        encrypted = encrypt_document(payload, key, rel_path, language, encrypted_doc_uuid(payload, uuid))
         write_json_atomic(cdn_root / rel_path, encrypted)
 
     manifest_path = f"community/{language}/index.json"
     encrypted_manifest = encrypt_document(manifest, key, manifest_path, language, "")
     write_json_atomic(cdn_root / manifest_path, encrypted_manifest)
+    workshop_manifest_path = f"community/{language}/workshop/index.json"
+    encrypted_workshop_manifest = encrypt_document(workshop_manifest, key, workshop_manifest_path, language, "")
+    write_json_atomic(cdn_root / workshop_manifest_path, encrypted_workshop_manifest)
 
-    print(json.dumps({"digest": len(digest_rows), "notebook": len(notebook_rows), "export": len(payloads), "duplicates": duplicate_count}, ensure_ascii=False))
+    print(json.dumps({
+        "digest": len(digest_rows),
+        "notebook": len(notebook_rows),
+        "community_export": len(manifest_items),
+        "workshop": len(workshop_manifest_items),
+        "workshop_posts": sum(len(posts) for posts in workshop_posts.values()),
+        "workshop_export": len(workshop_manifest_items),
+        "export": len(payloads),
+        "duplicates": duplicate_count,
+    }, ensure_ascii=False))
     return 0
 
 
@@ -203,9 +280,299 @@ SELECT toString(n.uuid) AS uuid,
 """
 
 
+def workshop_sql(limit: int) -> str:
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    return f"""
+SELECT toString(w.uuid) AS uuid,
+       ifNull(w.slug, '') AS slug,
+       w.title AS title,
+       ifNull(w.subtitle, '') AS subtitle,
+       ifNull(w.summary, '') AS summary,
+       ifNull(w.description, '') AS description,
+       ifNull(w.cover_image_url, '') AS cover_image_url,
+       ifNull(w.venue, '') AS venue,
+       if(isNull(w.starts_at), '', formatDateTime(w.starts_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS starts_at,
+       if(isNull(w.ends_at), '', formatDateTime(w.ends_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS ends_at,
+       if(isNull(w.capacity), 0, toUInt64(w.capacity)) AS capacity,
+       w.status AS status,
+       w.registration_mode AS registration_mode,
+       if(isNull(w.member_product_uuid), '', toString(w.member_product_uuid)) AS member_product_uuid,
+       ifNull(mp.title, '') AS member_product_title,
+       ifNull(toInt64(mp.price), 0) AS member_price,
+       if(isNull(w.nonmember_product_uuid), '', toString(w.nonmember_product_uuid)) AS nonmember_product_uuid,
+       ifNull(np.title, '') AS nonmember_product_title,
+       ifNull(toInt64(np.price), 0) AS nonmember_price,
+       toUInt8(w.active) AS active,
+       toInt32(w.sort_order) AS sort_order,
+       ifNull(stats.paid_count, 0) AS paid_count,
+       ifNull(stats.total_count, 0) AS total_count,
+       ifNull(stats.paid_amount, 0) AS paid_amount,
+       if(w.latest_version_at >= now64(3, 'Asia/Seoul') - toIntervalDay(7), 1, 0) AS is_new,
+       formatDateTime(w.latest_version_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS updated_at
+  FROM webr_workshop.v_workshop AS w
+  LEFT JOIN webr_code.product AS mp ON mp.uuid = w.member_product_uuid
+  LEFT JOIN webr_code.product AS np ON np.uuid = w.nonmember_product_uuid
+  LEFT JOIN
+  (
+      SELECT
+             uuid_workshop,
+             countIf(status = 'paid') AS paid_count,
+             count() AS total_count,
+             sumIf(amount, status = 'paid') AS paid_amount
+        FROM webr_workshop.registration
+       GROUP BY uuid_workshop
+  ) AS stats ON stats.uuid_workshop = w.uuid
+ WHERE w.active = 1
+ ORDER BY w.sort_order ASC, w.starts_at DESC, w.title ASC{suffix}
+ FORMAT JSONEachRow
+"""
+
+
+def workshop_event_sql(limit: int) -> str:
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    return f"""
+SELECT external_id,
+       source_id,
+       source_name,
+       source_type,
+       platform,
+       source_url,
+       canonical_url,
+       title,
+       summary,
+       if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS published_at,
+       formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS collected_at,
+       toUInt64OrZero(extract(concat(title, ' ', canonical_url, ' ', summary), '([12][0-9]{{3}})')) AS event_year
+  FROM Data_R_Community_Service.v_r_community_latest_dedup
+ WHERE notEmpty(title)
+   AND notEmpty(canonical_url)
+   AND source_id = '{R_PROJECT_CONFERENCE_ID}'
+   AND title NOT IN ('local copy', 'R: Conferences')
+   AND (
+          positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'useR') > 0
+          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'DSC') > 0
+          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R/Basel') > 0
+          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R Summit') > 0
+       )
+ ORDER BY event_year DESC,
+          published_at DESC,
+          collected_at DESC,
+          title ASC{suffix}
+ SETTINGS distributed_product_mode = 'global'
+ FORMAT JSONEachRow
+"""
+
+
+def workshop_post_sql(limit: int) -> str:
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    return f"""
+SELECT external_id,
+       source_id,
+       source_name,
+       source_url,
+       canonical_url,
+       title,
+       summary,
+       if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS published_at,
+       formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS collected_at
+  FROM Data_R_Community_Service.v_r_community_latest_dedup
+ WHERE source_id = 'mastodon:account:user-conf'
+   AND notEmpty(canonical_url)
+ ORDER BY published_at DESC,
+          collected_at DESC,
+          title ASC{suffix}
+ SETTINGS distributed_product_mode = 'global'
+ FORMAT JSONEachRow
+"""
+
+
 def community_payload_path(language: str, kind: str, uuid: str, published_at: str) -> str:
     year, month = published_year_month(published_at)
     return f"community/{language}/{kind}/{year}/{month}/{uuid}.json"
+
+
+def workshop_payload_path(language: str, uuid: str, published_at: str) -> str:
+    year, month = published_year_month(published_at)
+    return f"community/{language}/workshop/{year}/{month}/{safe_path_id(uuid)}.json"
+
+
+def workshop_catalog_item(row: dict[str, Any], language: str) -> dict[str, Any]:
+    uuid = text(row.get("uuid"))
+    slug = text(row.get("slug"))
+    board_key = first_text(slug, uuid)
+    starts_at = text(row.get("starts_at"))
+    updated_at = text(row.get("updated_at"))
+    return {
+        "uuid": uuid,
+        "slug": slug,
+        "board_key": board_key,
+        "language": language,
+        "published_at": starts_at,
+        "updated_at": updated_at,
+        "path": "",
+        "base_url": "",
+        "title": text(row.get("title")),
+        "subtitle": text(row.get("subtitle")),
+        "summary": text(row.get("summary")),
+        "description": text(row.get("description")),
+        "cover_image_url": text(row.get("cover_image_url")),
+        "venue": text(row.get("venue")),
+        "starts_at": starts_at,
+        "ends_at": text(row.get("ends_at")),
+        "capacity": int_value(row.get("capacity")),
+        "status": text(row.get("status")),
+        "registration_mode": text(row.get("registration_mode")),
+        "member_product_uuid": text(row.get("member_product_uuid")),
+        "member_product_title": text(row.get("member_product_title")),
+        "member_price": int_value(row.get("member_price")),
+        "nonmember_product_uuid": text(row.get("nonmember_product_uuid")),
+        "nonmember_product_title": text(row.get("nonmember_product_title")),
+        "nonmember_price": int_value(row.get("nonmember_price")),
+        "active": bool_value(row.get("active")),
+        "sort_order": int_value(row.get("sort_order")),
+        "paid_count": int_value(row.get("paid_count")),
+        "total_count": int_value(row.get("total_count")),
+        "paid_amount": int_value(row.get("paid_amount")),
+        "external": False,
+        "source_id": "",
+        "source_name": "",
+        "source_type": "",
+        "source_url": "",
+        "canonical_url": "",
+        "external_id": "",
+        "source_note": "",
+        "is_new": bool_value(row.get("is_new")),
+        "url": "",
+    }
+
+
+def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
+    title = text(row.get("title"))
+    summary = text(row.get("summary"))
+    canonical_url = text(row.get("canonical_url"))
+    board_key = classify_r_conference_key(" ".join([title, summary, canonical_url]))
+    if not board_key:
+        return {}
+    published_at = first_text(row.get("published_at"), row.get("collected_at"))
+    return {
+        "uuid": board_key,
+        "slug": board_key,
+        "board_key": board_key,
+        "language": language,
+        "published_at": published_at,
+        "updated_at": text(row.get("collected_at")),
+        "path": "",
+        "base_url": "",
+        "title": title,
+        "subtitle": "R Project conference",
+        "summary": summary,
+        "description": summary,
+        "cover_image_url": "",
+        "venue": "",
+        "starts_at": "",
+        "ends_at": "",
+        "capacity": 0,
+        "status": "published",
+        "registration_mode": "external",
+        "member_product_uuid": "",
+        "member_product_title": "",
+        "member_price": 0,
+        "nonmember_product_uuid": "",
+        "nonmember_product_title": "",
+        "nonmember_price": 0,
+        "active": True,
+        "sort_order": 80,
+        "paid_count": 0,
+        "total_count": 0,
+        "paid_amount": 0,
+        "external": True,
+        "source_id": text(row.get("source_id")),
+        "source_name": text(row.get("source_name")),
+        "source_type": text(row.get("source_type")),
+        "source_url": text(row.get("source_url")),
+        "canonical_url": canonical_url,
+        "external_id": text(row.get("external_id")),
+        "source_note": "",
+        "is_new": False,
+        "url": "",
+    }
+
+
+def workshop_post_item(row: dict[str, Any]) -> dict[str, Any]:
+    title = text(row.get("title"))
+    content = text(row.get("summary"))
+    canonical_url = text(row.get("canonical_url"))
+    workshop_key = classify_r_conference_key(" ".join([title, content, canonical_url])) or USE_R2026_WORKSHOP_KEY
+    if not title or title.startswith("http://") or title.startswith("https://"):
+        title = first_text_line(content, 120)
+    if not title:
+        title = "useR! conference update"
+    created_at = first_text(row.get("published_at"), row.get("collected_at"))
+    external_id = text(row.get("external_id"))
+    uuid = "import-" + hashlib.sha256(("workshop-board-import:" + external_id + ":" + canonical_url).encode("utf-8")).hexdigest()[:24]
+    return {
+        "uuid": uuid,
+        "workshop_key": workshop_key,
+        "title": title,
+        "content": content,
+        "author_uuid": R_PROJECT_BOT_UUID,
+        "author_name": R_PROJECT_BOT_NAME,
+        "author_role": R_PROJECT_BOT_ROLE,
+        "source_id": text(row.get("source_id")),
+        "source_name": text(row.get("source_name")),
+        "source_url": text(row.get("source_url")),
+        "canonical_url": canonical_url,
+        "external_id": external_id,
+        "created_at": created_at,
+        "updated_at": "",
+        "active": True,
+        "imported": True,
+        "is_new": False,
+    }
+
+
+def classify_r_conference_key(value: str) -> str:
+    lower = text(value).lower()
+    if not lower:
+        return ""
+    if "r/basel" in lower or "r-basel" in lower:
+        return "rconf-r-basel-2023"
+    match = re.search(r"r summit\s*([12][0-9]{3})", lower)
+    if match:
+        return "rconf-r-summit-" + match.group(1)
+    match = re.search(r"user!?\s*([12][0-9]{3})", lower)
+    if match:
+        return "rconf-user-" + match.group(1)
+    match = re.search(r"user([12][0-9]{3})", lower)
+    if match:
+        return "rconf-user-" + match.group(1)
+    match = re.search(r"dsc[-/\s]*([12][0-9]{3})", lower)
+    if match:
+        return "rconf-dsc-" + match.group(1)
+    return ""
+
+
+def workshop_catalog_token(items: dict[str, dict[str, Any]], posts: dict[str, list[dict[str, Any]]]) -> str:
+    body = json.dumps({"items": items, "posts": posts}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()
+
+
+def first_text_line(value: str, max_len: int) -> str:
+    for line in text(value).splitlines():
+        line = line.strip()
+        if line:
+            return line[:max_len] if max_len > 0 else line
+    return ""
+
+
+def encrypted_doc_uuid(payload: dict[str, Any], fallback: str) -> str:
+    for key in ("item", "workshop"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            uuid = text(value.get("uuid"))
+            if uuid:
+                return uuid
+    return text(fallback)
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -322,6 +689,22 @@ def int_value(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return text(value).lower() in {"1", "true", "t", "yes", "y"}
+
+
+def safe_path_id(value: Any) -> str:
+    raw = text(value)
+    safe = SAFE_ID_RE.sub("-", raw).strip("-._")
+    if safe:
+        return safe
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def text(value: Any) -> str:

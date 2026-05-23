@@ -82,7 +82,7 @@ def report_item_count(report: dict[str, Any]) -> int:
     if explicit > 0:
         return explicit
     total = 0
-    for key in ("r_ecosystem_export", "r_package_export", "community_export", "export", "packages", "news", "package_details"):
+    for key in ("r_ecosystem_export", "r_package_export", "community_export", "workshop_export", "export", "packages", "news", "package_details"):
         total += int(report.get(key) or 0)
     return total
 
