@@ -131,6 +131,8 @@ def main() -> int:
     details_by_package: dict[str, dict[str, Any]] = {}
     news_manifest: dict[str, dict[str, str]] = {}
     news_payloads: dict[str, dict[str, Any]] = {}
+    news_source_counts: dict[str, int] = {}
+    news_latest_by_source: dict[str, str] = {}
     versions_by_key: dict[str, list[dict[str, str]]] = {}
     versions_by_package: dict[str, list[dict[str, str]]] = {}
 
@@ -214,6 +216,11 @@ def main() -> int:
             "author": text(row.get("author")),
             "canonical_url": text(row.get("canonical_url")),
         }
+        source_id = item["source_id"]
+        if source_id:
+            news_source_counts[source_id] = news_source_counts.get(source_id, 0) + 1
+            if published_at and published_at > news_latest_by_source.get(source_id, ""):
+                news_latest_by_source[source_id] = published_at
         news_manifest[uuid] = {k: v for k, v in item.items() if v != ""}
         news_payloads[uuid] = {
             "schema": CONTENT_SCHEMA,
@@ -264,6 +271,8 @@ def main() -> int:
             "packages": len(packages),
             "package_details": len(detail_payloads),
             "news": len(news_manifest),
+            "news_sources": news_source_counts,
+            "news_latest_by_source": news_latest_by_source,
             "versions": sum(len(v) for v in versions_manifest["versions"].values()),
         }, ensure_ascii=False))
         return 0
@@ -284,6 +293,8 @@ def main() -> int:
         "packages": len(packages),
         "package_details": len(detail_payloads),
         "news": len(news_manifest),
+        "news_sources": news_source_counts,
+        "news_latest_by_source": news_latest_by_source,
         "versions": sum(len(v) for v in versions_manifest["versions"].values()),
         "manifest": manifest_path,
         "versions_manifest": versions_path,

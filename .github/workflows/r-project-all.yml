@@ -476,17 +476,35 @@ jobs:
           CLICKHOUSE_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+          R_PACKAGE_REQUIRED_NEWS_SOURCES: ${{ vars.R_PACKAGE_REQUIRED_NEWS_SOURCES || 'official:r-mail:r-packages' }}
         run: |
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
           python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           r_eco = json.loads(Path("/tmp/r_ecosystem_export.json").read_text(encoding="utf-8"))
           r_package = json.loads(Path("/tmp/r_package_export.json").read_text(encoding="utf-8"))
           community = json.loads(Path("/tmp/community_export.json").read_text(encoding="utf-8"))
+          required_package_news_sources = [
+              source.strip()
+              for source in os.environ.get("R_PACKAGE_REQUIRED_NEWS_SOURCES", "").split(",")
+              if source.strip()
+          ]
+          package_news_sources = r_package.get("news_sources") or {}
+          missing_package_news_sources = [
+              source
+              for source in required_package_news_sources
+              if int(package_news_sources.get(source) or 0) <= 0
+          ]
+          if missing_package_news_sources:
+              raise SystemExit(
+                  "Package CDN export is missing required package news source(s): "
+                  + ", ".join(missing_package_news_sources)
+              )
           reports = {
               "contents": {
                   "schema": "web-r.content-cdn.export-report.v2",
