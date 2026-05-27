@@ -133,6 +133,9 @@ def main() -> int:
     news_payloads: dict[str, dict[str, Any]] = {}
     news_source_counts: dict[str, int] = {}
     news_latest_by_source: dict[str, str] = {}
+    package_repository_counts: dict[str, int] = {}
+    package_recent_update_counts: dict[str, int] = {}
+    package_first_seen_counts: dict[str, int] = {}
     versions_by_key: dict[str, list[dict[str, str]]] = {}
     versions_by_package: dict[str, list[dict[str, str]]] = {}
 
@@ -164,6 +167,13 @@ def main() -> int:
         detail_path = package_detail_path(language, package_name)
         detail_paths_by_package[package_key] = detail_path
         profile = package_profile_from_row(row)
+        published_at = text(row.get("published_at"))
+        first_seen_at = text(row.get("first_seen_at"))
+        package_repository_counts[repository] = package_repository_counts.get(repository, 0) + 1
+        if published_at:
+            package_recent_update_counts[repository] = package_recent_update_counts.get(repository, 0) + 1
+        if first_seen_at:
+            package_first_seen_counts[repository] = package_first_seen_counts.get(repository, 0) + 1
         packages[key_name] = {
             "key": key_name,
             "repository": repository,
@@ -173,8 +183,8 @@ def main() -> int:
             "description": text(row.get("description")),
             "maintainer": text(row.get("maintainer")),
             "license_text": text(row.get("license_text")),
-            "published_at": text(row.get("published_at")),
-            "first_seen_at": text(row.get("first_seen_at")),
+            "published_at": published_at,
+            "first_seen_at": first_seen_at,
             "last_observed_at": text(row.get("last_observed_at")),
             "downloads_30d": int(row.get("downloads_30d") or 0),
             "reverse_depends_count": int(row.get("reverse_depends_count") or 0),
@@ -273,6 +283,9 @@ def main() -> int:
             "news": len(news_manifest),
             "news_sources": news_source_counts,
             "news_latest_by_source": news_latest_by_source,
+            "package_repository_counts": dict(sorted(package_repository_counts.items())),
+            "package_recent_update_counts": dict(sorted(package_recent_update_counts.items())),
+            "package_first_seen_counts": dict(sorted(package_first_seen_counts.items())),
             "versions": sum(len(v) for v in versions_manifest["versions"].values()),
         }, ensure_ascii=False))
         return 0
@@ -295,6 +308,9 @@ def main() -> int:
         "news": len(news_manifest),
         "news_sources": news_source_counts,
         "news_latest_by_source": news_latest_by_source,
+        "package_repository_counts": dict(sorted(package_repository_counts.items())),
+        "package_recent_update_counts": dict(sorted(package_recent_update_counts.items())),
+        "package_first_seen_counts": dict(sorted(package_first_seen_counts.items())),
         "versions": sum(len(v) for v in versions_manifest["versions"].values()),
         "manifest": manifest_path,
         "versions_manifest": versions_path,
@@ -607,9 +623,9 @@ SELECT repository,
        date_publication,
        package_url,
        bug_reports,
-       if(isNull(published_sort_key), '', formatDateTime(published_sort_key, '%Y-%m-%d %H:%i:%S')) AS published_at,
+       if(isNull(recent_update_sort_key), '', formatDateTime(recent_update_sort_key, '%Y-%m-%d %H:%i:%S')) AS published_at,
        if(isNull(first_seen_at), '', formatDateTime(first_seen_at, '%Y-%m-%d %H:%i:%S')) AS first_seen_at,
-       formatDateTime(last_observed_at, '%Y-%m-%d %H:%i:%S') AS last_observed_at,
+       if(isNull(last_observed_sort_key), '', formatDateTime(last_observed_sort_key, '%Y-%m-%d %H:%i:%S')) AS last_observed_at,
        downloads_30d,
        reverse_depends_count,
        reverse_imports_count,
@@ -637,8 +653,14 @@ SELECT repository,
            b.package_url,
            b.bug_reports,
            coalesce(cran_page.published_at, package_current.published_at, version_history.version_published_at) AS published_sort_key,
+           parseDateTime64BestEffortOrNull(nullIf(toString(b.last_observed_at), ''), 3, 'Asia/Seoul') AS last_observed_sort_key,
+           coalesce(
+               cran_page.published_at,
+               package_current.published_at,
+               version_history.version_published_at,
+               parseDateTime64BestEffortOrNull(nullIf(toString(b.last_observed_at), ''), 3, 'Asia/Seoul')
+           ) AS recent_update_sort_key,
            package_seen.first_seen_at AS first_seen_at,
-           b.last_observed_at,
            ifNull(metrics.downloads_30d, 0) AS downloads_30d,
            ifNull(metrics.reverse_depends_count, 0) AS reverse_depends_count,
            ifNull(metrics.reverse_imports_count, 0) AS reverse_imports_count,

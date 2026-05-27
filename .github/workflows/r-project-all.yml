@@ -477,6 +477,7 @@ jobs:
           CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
           R_PACKAGE_REQUIRED_NEWS_SOURCES: ${{ vars.R_PACKAGE_REQUIRED_NEWS_SOURCES || 'official:r-mail:r-packages' }}
+          R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES: ${{ vars.R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES || 'CRAN,Bioconductor,R-universe' }}
         run: |
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
@@ -494,6 +495,11 @@ jobs:
               for source in os.environ.get("R_PACKAGE_REQUIRED_NEWS_SOURCES", "").split(",")
               if source.strip()
           ]
+          required_recent_update_repositories = [
+              repository.strip()
+              for repository in os.environ.get("R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES", "").split(",")
+              if repository.strip()
+          ]
           package_news_sources = r_package.get("news_sources") or {}
           missing_package_news_sources = [
               source
@@ -504,6 +510,20 @@ jobs:
               raise SystemExit(
                   "Package CDN export is missing required package news source(s): "
                   + ", ".join(missing_package_news_sources)
+              )
+          package_recent_update_counts = {
+              str(repository).strip().lower(): int(count or 0)
+              for repository, count in (r_package.get("package_recent_update_counts") or {}).items()
+          }
+          missing_recent_update_repositories = [
+              repository
+              for repository in required_recent_update_repositories
+              if package_recent_update_counts.get(repository.lower(), 0) <= 0
+          ]
+          if missing_recent_update_repositories:
+              raise SystemExit(
+                  "Package CDN export is missing recent-update package signal(s): "
+                  + ", ".join(missing_recent_update_repositories)
               )
           reports = {
               "contents": {
