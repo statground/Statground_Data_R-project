@@ -783,13 +783,14 @@ class RSourceCollector:
                 )
             )
 
-        root_links = extract_links(
-            root_soup,
-            base_url=url,
-            include_regex=source.get("include_regex"),
-            exclude_regex=source.get("exclude_regex"),
-        )
-        self._emit_html_links(source, source_id, source_url, url, root_links, page_title, page_meta, source.get("max_items", 200))
+        if source.get("emit_root_links", True):
+            root_links = extract_links(
+                root_soup,
+                base_url=url,
+                include_regex=source.get("include_regex"),
+                exclude_regex=source.get("exclude_regex"),
+            )
+            self._emit_html_links(source, source_id, source_url, url, root_links, page_title, page_meta, source.get("max_items", 200))
 
         follow = source.get("follow") or {}
         if follow.get("enabled"):

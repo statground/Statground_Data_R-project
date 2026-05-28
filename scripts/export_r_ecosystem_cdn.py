@@ -447,6 +447,7 @@ SELECT external_id,
            OR positionCaseInsensitive(canonical_url, 'developer.r-project.org/blosxom.cgi/R-devel/NEWS') > 0
            OR positionCaseInsensitive(canonical_url, 'serve.podhome.fm/r-weekly-highlights') > 0
            OR positionCaseInsensitive(canonical_url, 'forum.posit.co/c/irl') > 0
+           OR positionCaseInsensitive(canonical_url, 'journal.r-project.org/issues.html') > 0
            OR (
                positionCaseInsensitive(canonical_url, 'dirk.eddelbuettel.com/blog/') > 0
                AND position(canonical_url, '#') > 0

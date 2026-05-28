@@ -53,16 +53,20 @@ sources:
     name: The R Journal issues and recent articles
     url: https://journal.r-project.org/issues.html
     include_regex: "journal.r-project.org/(archive|issues)|Volume|R News"
+    emit_root_links: false
     max_items: 120
     follow:
       enabled: true
       include_regex: "journal.r-project.org/archive/|Volume"
-      first_n: 4
-      extract_include_regex: "journal.r-project.org/archive/.+|RJ-|articles"
-      max_items_per_page: 120
+      first_n: 8
+      extract_include_regex: "journal\\.r-project\\.org/(articles|news)/RJ-"
+      max_items_per_page: 80
     fetch_target_meta: true
-    fetch_target_body: false
+    fetch_target_body: true
     target_meta_limit: 160
+    target_body_limit: 160
+    target_body_max_chars: 8000
+    target_content_selectors: ["d-abstract", "d-article", ".d-article", "article", "main"]
     language: en
     tags: [R, The R Journal, R Foundation, journal]
 
@@ -483,7 +487,7 @@ sources:
     expand_entry_links: true
     emit_feed_item: false
     entry_link_max_items: 50
-    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html|jumpingrivers\\.github\\.io/meetingsR/events\\.html|developer\\.r-project\\.org/blosxom\\.cgi/R-devel/NEWS|serve\\.podhome\\.fm/r-weekly-highlights|forum\\.posit\\.co/c/irl"
+    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html|jumpingrivers\\.github\\.io/meetingsR/events\\.html|developer\\.r-project\\.org/blosxom\\.cgi/R-devel/NEWS|serve\\.podhome\\.fm/r-weekly-highlights|forum\\.posit\\.co/c/irl|journal\\.r-project\\.org/issues\\.html"
     fetch_target_meta: true
     fetch_target_body: false
     target_meta_limit: 40
