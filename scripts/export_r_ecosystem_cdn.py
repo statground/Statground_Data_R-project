@@ -436,6 +436,9 @@ SELECT external_id,
    AND notEmpty(canonical_url)
    AND source_type IN ('official_release_notes', 'official_blog', 'official_journal', 'organization_social', 'organization_blog', 'newsletter', 'bot_feed')
    AND source_id NOT IN ('official:r-mail:r-packages')
+   AND positionCaseInsensitive(canonical_url, 'journal.r-project.org/issues.html') = 0
+   AND positionCaseInsensitive(canonical_url, 'community.rstudio.com/c/irl') = 0
+   AND positionCaseInsensitive(canonical_url, 'forum.posit.co/c/irl') = 0
    AND NOT (
        source_id = 'community:rweekly'
        AND (
@@ -447,7 +450,20 @@ SELECT external_id,
            OR positionCaseInsensitive(canonical_url, 'developer.r-project.org/blosxom.cgi/R-devel/NEWS') > 0
            OR positionCaseInsensitive(canonical_url, 'serve.podhome.fm/r-weekly-highlights') > 0
            OR positionCaseInsensitive(canonical_url, 'forum.posit.co/c/irl') > 0
+           OR positionCaseInsensitive(canonical_url, 'community.rstudio.com/c/irl') > 0
            OR positionCaseInsensitive(canonical_url, 'journal.r-project.org/issues.html') > 0
+           OR positionCaseInsensitive(canonical_url, 'youtube.com') > 0
+           OR positionCaseInsensitive(canonical_url, 'youtu.be') > 0
+           OR positionCaseInsensitive(canonical_url, 'youtube-nocookie.com') > 0
+           OR positionCaseInsensitiveUTF8(concat(title, ' ', summary, ' ', JSONExtractString(payload_json, 'title_ko'), ' ', JSONExtractString(payload_json, 'summary_ko')), 'R Conferences and Meetups') > 0
+           OR (
+               positionCaseInsensitiveUTF8(concat(title, ' ', summary, ' ', JSONExtractString(payload_json, 'title_ko'), ' ', JSONExtractString(payload_json, 'summary_ko')), 'Conference') > 0
+               AND positionCaseInsensitiveUTF8(concat(title, ' ', summary, ' ', JSONExtractString(payload_json, 'title_ko'), ' ', JSONExtractString(payload_json, 'summary_ko')), 'Events') > 0
+           )
+           OR (
+               positionCaseInsensitiveUTF8(concat(title, ' ', summary, ' ', JSONExtractString(payload_json, 'title_ko'), ' ', JSONExtractString(payload_json, 'summary_ko')), '컨퍼런스') > 0
+               AND positionCaseInsensitiveUTF8(concat(title, ' ', summary, ' ', JSONExtractString(payload_json, 'title_ko'), ' ', JSONExtractString(payload_json, 'summary_ko')), '이벤트') > 0
+           )
            OR (
                positionCaseInsensitive(canonical_url, 'dirk.eddelbuettel.com/blog/') > 0
                AND position(canonical_url, '#') > 0

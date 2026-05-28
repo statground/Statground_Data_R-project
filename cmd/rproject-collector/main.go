@@ -91,6 +91,9 @@ var (
 		"reddit:r/rstats",
 		"reddit:r/rprogramming",
 	}
+	defaultCommunityPrioritySourceIDs = []string{
+		"community:posit:events",
+	}
 )
 
 var boardAllowedTags = map[string]bool{
@@ -405,6 +408,8 @@ func runCommunity(ctx context.Context, args []string) error {
 	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
 	fs.Parse(args)
 	requiredSources := mergeStringSlices(defaultCommunityRequiredSourceIDs, splitCSV(envString("R_COMMUNITY_REQUIRED_SOURCE_IDS", "")))
+	prioritySources := mergeStringSlices(defaultCommunityPrioritySourceIDs, splitCSV(envString("R_COMMUNITY_PRIORITY_SOURCE_IDS", "")))
+	selectionSources := mergeStringSlices(requiredSources, prioritySources)
 
 	var ai *aiClient
 	translated := 0
@@ -435,7 +440,7 @@ func runCommunity(ctx context.Context, args []string) error {
 		}
 	}
 
-	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, requiredSources, enrich)
+	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, selectionSources, enrich)
 	if err != nil {
 		return err
 	}
@@ -453,7 +458,7 @@ func runCommunity(ctx context.Context, args []string) error {
 	if len(translationErrors) > 0 {
 		fmt.Printf("translation_errors=%d first_error=%s\n", len(translationErrors), translationErrors[0])
 	}
-	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s required_counts=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), communityRequiredCountsString(sourceCounts, requiredSources), *limit)
+	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s priority_sources=%s required_counts=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), strings.Join(prioritySources, ","), communityRequiredCountsString(sourceCounts, requiredSources), *limit)
 	return nil
 }
 

@@ -459,7 +459,6 @@ sources:
     name: Posit Community Conferences & Events
     url: https://forum.posit.co/c/irl/18.rss
     source_url: https://forum.posit.co/c/irl/18
-    item_include_regex: "Date:|Location:|Register|Registration|workshop|webinar|conference|meetup|event|call for proposal|open call|developer day|posit::conf|LatinR|useR|RUG|R Consortium|rOpenSci Community Call"
     max_items: 80
     language: en
     tags: [R, Posit Community, workshop, event, conference]
@@ -487,7 +486,7 @@ sources:
     expand_entry_links: true
     emit_feed_item: false
     entry_link_max_items: 50
-    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html|jumpingrivers\\.github\\.io/meetingsR/events\\.html|developer\\.r-project\\.org/blosxom\\.cgi/R-devel/NEWS|serve\\.podhome\\.fm/r-weekly-highlights|forum\\.posit\\.co/c/irl|journal\\.r-project\\.org/issues\\.html"
+    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html|youtube\\.com|youtu\\.be|youtube-nocookie\\.com|jumpingrivers\\.github\\.io/meetingsR/events\\.html|developer\\.r-project\\.org/blosxom\\.cgi/R-devel/NEWS|serve\\.podhome\\.fm/r-weekly-highlights|forum\\.posit\\.co/c/irl|community\\.rstudio\\.com/c/irl|journal\\.r-project\\.org/issues\\.html"
     fetch_target_meta: true
     fetch_target_body: false
     target_meta_limit: 40
