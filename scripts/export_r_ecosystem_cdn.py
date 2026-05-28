@@ -443,6 +443,9 @@ SELECT external_id,
            OR positionCaseInsensitive(canonical_url, 'diffify.com/R/') > 0
            OR positionCaseInsensitive(canonical_url, 'r-universe.dev/search') > 0
            OR positionCaseInsensitive(canonical_url, 'dirk.eddelbuettel.com/cranberries/cran/new/') > 0
+           OR positionCaseInsensitive(canonical_url, 'jumpingrivers.github.io/meetingsR/events.html') > 0
+           OR positionCaseInsensitive(canonical_url, 'developer.r-project.org/blosxom.cgi/R-devel/NEWS') > 0
+           OR positionCaseInsensitive(canonical_url, 'serve.podhome.fm/r-weekly-highlights') > 0
            OR (
                positionCaseInsensitive(canonical_url, 'dirk.eddelbuettel.com/blog/') > 0
                AND position(canonical_url, '#') > 0

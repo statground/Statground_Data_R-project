@@ -952,6 +952,8 @@ class RSourceCollector:
         source_url = source.get("source_url") or url
         heading_regex = re.compile(source.get("heading_regex", r"Changes in R"), re.IGNORECASE)
         max_items = int(source.get("max_items", 20))
+        title_prefix = str(source.get("title_prefix") or "")
+        prefer_section_permalink = bool(source.get("prefer_section_permalink", True))
         response = self.fetch(url, accept="text/html")
         soup = BeautifulSoup(response.text, "html.parser")
         page_meta = html_page_snapshot(soup, url)
@@ -964,6 +966,9 @@ class RSourceCollector:
                 continue
             summary_parts: list[str] = []
             html_parts: list[str] = []
+            section_canonical_url = ""
+            heading_anchor = heading.find("a", attrs={"name": True}) if hasattr(heading, "find") else None
+            heading_anchor_name = compact_text(str(heading_anchor.get("name") or "")) if heading_anchor else ""
             heading_level = int(heading.name[1]) if heading.name and heading.name[1].isdigit() else 6
             for sibling in heading.find_next_siblings():
                 if sibling.name and re.match(r"^h[1-6]$", sibling.name):
@@ -973,19 +978,32 @@ class RSourceCollector:
                 text = compact_text(sibling.get_text(" ", strip=True)) if hasattr(sibling, "get_text") else compact_text(str(sibling))
                 if text:
                     summary_parts.append(text)
+                if prefer_section_permalink and not section_canonical_url and hasattr(sibling, "find_all"):
+                    for anchor in sibling.find_all("a", href=True):
+                        anchor_text = compact_text(anchor.get_text(" ", strip=True)).lower()
+                        if "permanent link" in anchor_text:
+                            section_canonical_url = canonicalize_url(urljoin(url, str(anchor.get("href") or "")))
+                            break
                 html_parts.append(str(sibling)[:3000])
                 if sum(len(part) for part in summary_parts) > int(source.get("summary_limit", 2500)):
                     break
             slug = slugify(title)
+            if not section_canonical_url and heading_anchor_name:
+                anchor_date = re.match(r"^n([12][0-9]{3})-([0-9]{2})-([0-9]{2})$", heading_anchor_name)
+                if anchor_date:
+                    section_canonical_url = canonicalize_url(
+                        f"{url.rstrip('/')}/{anchor_date.group(1)}/{anchor_date.group(2)}/{anchor_date.group(3)}#{heading_anchor_name}"
+                    )
             section_text = "\n".join(summary_parts)[: int(source.get("summary_limit", 2500))]
             section_html = "\n".join(html_parts)[: int(source.get("html_limit", 12000))]
+            display_title = compact_text(title_prefix + title)
             item = self.make_item(
                 source=source,
                 source_id=source_id,
                 source_url=source_url,
-                canonical_url=f"{url}#{slug}",
+                canonical_url=section_canonical_url or f"{url}#{slug}",
                 native_id=title,
-                title=title,
+                title=display_title or title,
                 summary=section_text or None,
                 author=source.get("author"),
                 published_at=parse_fuzzy_date_to_iso(title),
@@ -995,8 +1013,10 @@ class RSourceCollector:
                     "collector": "html_release_notes",
                     "page_url": url,
                     "heading": title,
+                    "display_title": display_title,
                     "heading_level": heading_level,
-                    "heading_id": heading.get("id") or slug,
+                    "heading_id": heading.get("id") or heading_anchor_name or slug,
+                    "section_canonical_url": section_canonical_url,
                     "section_index": emitted,
                     "version_text": release_version_text(title),
                     "section_text": section_text,

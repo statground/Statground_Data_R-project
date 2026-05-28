@@ -19,6 +19,22 @@ sources:
     language: en
     tags: [R, R Project, release-notes, CRAN]
 
+  - id: official:r-devel:news-daily
+    type: html_release_notes
+    source_type: official_release_notes
+    platform: r-project
+    name: R-devel/NEWS daily changes
+    url: https://developer.r-project.org/blosxom.cgi/R-devel/NEWS
+    source_url: http://developer.r-project.org/blosxom.cgi/R-devel/NEWS
+    heading_regex: "^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [12][0-9]{3}$"
+    title_prefix: "R-devel/NEWS daily: "
+    prefer_section_permalink: true
+    max_items: 45
+    summary_limit: 3500
+    html_limit: 14000
+    language: en
+    tags: [R, R Project, R-devel, NEWS, daily-news]
+
   - id: official:r:blog
     type: rss
     source_type: official_blog
@@ -432,6 +448,18 @@ sources:
     language: en
     tags: [R, Posit Community, forum]
 
+  - id: community:posit:events
+    type: rss
+    source_type: workshop_event
+    platform: posit-community
+    name: Posit Community Conferences & Events
+    url: https://forum.posit.co/c/irl/18.rss
+    source_url: https://forum.posit.co/c/irl/18
+    item_include_regex: "Date:|Location:|Register|Registration|workshop|webinar|conference|meetup|event|call for proposal|open call|developer day|posit::conf|LatinR|useR|RUG|R Consortium|rOpenSci Community Call"
+    max_items: 80
+    language: en
+    tags: [R, Posit Community, workshop, event, conference]
+
   - id: community:ropensci:blog
     type: rss
     source_type: organization_blog
@@ -455,12 +483,23 @@ sources:
     expand_entry_links: true
     emit_feed_item: false
     entry_link_max_items: 50
-    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html"
+    entry_link_exclude_regex: "rweekly\\.org|github\\.com/rweekly|raw\\.githubusercontent\\.com/rweekly/image|bsky\\.app/profile|diffify\\.com/R/|r-universe\\.dev/search|dirk\\.eddelbuettel\\.com/(cranberries/cran/new/|blog/.+#)|cran\\.r-project\\.org/package=|bioconductor\\.org/packages/.*html|jumpingrivers\\.github\\.io/meetingsR/events\\.html|developer\\.r-project\\.org/blosxom\\.cgi/R-devel/NEWS|serve\\.podhome\\.fm/r-weekly-highlights"
     fetch_target_meta: true
     fetch_target_body: false
     target_meta_limit: 40
     language: en
     tags: [R, R Weekly, newsletter]
+
+  - id: community:rweekly-highlights
+    type: rss
+    source_type: newsletter
+    platform: rweekly-podcast
+    name: R Weekly Highlights podcast
+    url: https://serve.podhome.fm/rss/bb28afcc-137e-5c66-b231-4ffad7979b44
+    source_url: https://serve.podhome.fm/r-weekly-highlights
+    max_items: 80
+    language: en
+    tags: [R, R Weekly, podcast, newsletter]
 
   - id: community:runiverse:global
     type: rss

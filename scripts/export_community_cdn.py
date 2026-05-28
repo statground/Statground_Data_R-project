@@ -40,10 +40,37 @@ R_PROJECT_BOT_UUID = "2aeeb31a-5cb1-47d8-bbb0-cb2d271c32ce"
 R_PROJECT_BOT_NAME = "R Project"
 R_PROJECT_BOT_ROLE = "Bot"
 R_PROJECT_CONFERENCE_ID = "official:r:conferences"
+POSIT_COMMUNITY_EVENTS_ID = "community:posit:events"
 USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
 SAFE_ID_RE = re.compile(r"[^0-9A-Za-z._-]+")
+MONTH_LOOKUP = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
 
 
 def main() -> int:
@@ -346,13 +373,18 @@ SELECT external_id,
   FROM Data_R_Community_Service.v_r_community_latest_dedup
  WHERE notEmpty(title)
    AND notEmpty(canonical_url)
-   AND source_id = '{R_PROJECT_CONFERENCE_ID}'
-   AND title NOT IN ('local copy', 'R: Conferences')
    AND (
-          positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'useR') > 0
-          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'DSC') > 0
-          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R/Basel') > 0
-          OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R Summit') > 0
+          (
+              source_id = '{R_PROJECT_CONFERENCE_ID}'
+              AND title NOT IN ('local copy', 'R: Conferences')
+              AND (
+                     positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'useR') > 0
+                     OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'DSC') > 0
+                     OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R/Basel') > 0
+                     OR positionCaseInsensitiveUTF8(concat(title, ' ', canonical_url, ' ', summary), 'R Summit') > 0
+                  )
+          )
+          OR source_id = '{POSIT_COMMUNITY_EVENTS_ID}'
        )
  ORDER BY event_year DESC,
           published_at DESC,
@@ -451,9 +483,58 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
     summary = text(row.get("summary"))
     canonical_url = text(row.get("canonical_url"))
     board_key = classify_r_conference_key(" ".join([title, summary, canonical_url]))
-    if not board_key:
-        return {}
+    source_id = text(row.get("source_id"))
     published_at = first_text(row.get("published_at"), row.get("collected_at"))
+    if not board_key:
+        if source_id != POSIT_COMMUNITY_EVENTS_ID:
+            return {}
+        start_at, end_at = event_date_range_from_text(" ".join([title, summary, canonical_url]))
+        event_id = text(row.get("external_id")) or canonical_url or title
+        event_hash = hashlib.sha256(("posit-community-event:" + event_id).encode("utf-8")).hexdigest()[:24]
+        board_key = "posit-event-" + event_hash
+        description = first_text(summary, title)
+        return {
+            "uuid": board_key,
+            "slug": board_key,
+            "board_key": board_key,
+            "language": language,
+            "published_at": first_text(start_at, published_at),
+            "updated_at": text(row.get("collected_at")),
+            "path": "",
+            "base_url": "",
+            "title": title,
+            "subtitle": first_text(row.get("source_name"), "Posit Community event"),
+            "summary": summary,
+            "description": description,
+            "cover_image_url": "",
+            "venue": event_venue_from_text(summary),
+            "starts_at": start_at,
+            "ends_at": end_at,
+            "capacity": 0,
+            "status": "published",
+            "registration_mode": "external",
+            "member_product_uuid": "",
+            "member_product_title": "",
+            "member_price": 0,
+            "nonmember_product_uuid": "",
+            "nonmember_product_title": "",
+            "nonmember_price": 0,
+            "active": True,
+            "sort_order": 70,
+            "paid_count": 0,
+            "total_count": 0,
+            "paid_amount": 0,
+            "external": True,
+            "source_id": source_id,
+            "source_name": text(row.get("source_name")),
+            "source_type": text(row.get("source_type")),
+            "source_url": text(row.get("source_url")),
+            "canonical_url": canonical_url,
+            "external_id": text(row.get("external_id")),
+            "source_note": "Posit Community Conferences & Events category",
+            "is_new": False,
+            "url": "",
+        }
     return {
         "uuid": board_key,
         "slug": board_key,
@@ -486,7 +567,7 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
         "total_count": 0,
         "paid_amount": 0,
         "external": True,
-        "source_id": text(row.get("source_id")),
+        "source_id": source_id,
         "source_name": text(row.get("source_name")),
         "source_type": text(row.get("source_type")),
         "source_url": text(row.get("source_url")),
@@ -496,6 +577,56 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
         "is_new": False,
         "url": "",
     }
+
+
+def event_date_range_from_text(value: str) -> tuple[str, str]:
+    normalized = text(value)
+    if not normalized:
+        return "", ""
+    iso_match = re.search(r"\b([12][0-9]{3})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12][0-9]|3[01])\b", normalized)
+    if iso_match:
+        return format_event_datetime(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))), ""
+    year_match = re.search(r"\b([12][0-9]{3})\b", normalized)
+    fallback_year = int(year_match.group(1)) if year_match else datetime.now().year
+    month_pattern = (
+        r"\b("
+        r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+        r")\.?\s+([0-9]{1,2})(?:\s*(?:-|–|—|to)\s*([0-9]{1,2}))?(?:,?\s*([12][0-9]{3}))?"
+    )
+    month_match = re.search(month_pattern, normalized, re.IGNORECASE)
+    if not month_match:
+        return "", ""
+    month_key = month_match.group(1).lower().rstrip(".")
+    month = MONTH_LOOKUP.get(month_key[:3], MONTH_LOOKUP.get(month_key, 0))
+    if not month:
+        return "", ""
+    year = int(month_match.group(4)) if month_match.group(4) else fallback_year
+    day = int(month_match.group(2))
+    end_day = int(month_match.group(3)) if month_match.group(3) else 0
+    start = format_event_datetime(year, month, day)
+    end = format_event_datetime(year, month, end_day, end_of_day=True) if end_day else ""
+    return start, end
+
+
+def format_event_datetime(year: int, month: int, day: int, *, end_of_day: bool = False) -> str:
+    try:
+        parsed = datetime(year, month, day, 23 if end_of_day else 0, 59 if end_of_day else 0, 59 if end_of_day else 0)
+    except ValueError:
+        return ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def event_venue_from_text(value: str) -> str:
+    body = " ".join(text(value).split())
+    if not body:
+        return ""
+    match = re.search(r"Location:\s*(.*?)(?:\s+Date:|\s+Register|\s+Description\b|$)", body, re.IGNORECASE)
+    if match:
+        return text(match.group(1))[:160]
+    if re.search(r"\bonline\b", body, re.IGNORECASE):
+        return "Online"
+    return ""
 
 
 def workshop_post_item(row: dict[str, Any]) -> dict[str, Any]:
