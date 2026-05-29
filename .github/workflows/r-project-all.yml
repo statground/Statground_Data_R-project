@@ -440,6 +440,7 @@ jobs:
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_contents --description "Statground Web-R CDN2 R ecosystem encrypted content"
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_packages --description "Statground Web-R CDN2 R package encrypted content"
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_community --description "Statground Web-R CDN2 community encrypted content"
+          python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2 --description "Statground Web-R CDN2 app assets and admin snapshots"
 
       - name: Checkout Web-R CDN2 contents
         uses: actions/checkout@v4
@@ -715,3 +716,77 @@ jobs:
             --repo statground/web-r_CDN2_community \
             --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
             --manifest community/ko/workshop/index.json
+
+      - name: Checkout Web-R CDN2 admin snapshots
+        uses: actions/checkout@v4
+        with:
+          repository: statground/web-r_CDN2
+          ref: main
+          path: web-r_CDN2
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
+
+      - name: Export admin pipeline monitor CDN snapshot
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
+          WEBR_GITHUB_ACTIONS_TOKEN: ${{ secrets.WEBR_GITHUB_ACTIONS_TOKEN || secrets.GITHUB_ACTIONS_STATUS_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/export_admin_pipeline_monitor.py --cdn-root web-r_CDN2 --language ko > /tmp/admin_pipeline_export.json
+
+      - name: Commit and push Web-R CDN2 admin pipeline snapshot
+        id: web_r_cdn2_admin_pipelines
+        working-directory: web-r_CDN2
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2.git"
+          git add admin/pipelines/latest.json
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Web-R CDN2 admin pipeline snapshot is already up to date."
+            exit 0
+          fi
+          git commit -m "Refresh admin pipeline monitor snapshot"
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Record Web-R CDN2 admin pipeline snapshot release
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+        run: |
+          python scripts/record_web_r_cdn_release.py \
+            --report /tmp/admin_pipeline_export.json \
+            --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
+            --repo statground/web-r_CDN2 \
+            --branch main \
+            --scope web-r-admin-pipelines \
+            --language ko
+
+      - name: Verify Web-R CDN2 admin pipeline snapshot release
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+        run: |
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-admin-pipelines \
+            --language ko \
+            --repo statground/web-r_CDN2 \
+            --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
+            --manifest admin/pipelines/latest.json
