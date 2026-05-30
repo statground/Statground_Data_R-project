@@ -39,7 +39,7 @@ env:
 
 concurrency:
   group: r-project-data-collection
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   collect:
