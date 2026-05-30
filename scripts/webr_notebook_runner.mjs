@@ -101,6 +101,13 @@ async function captureCell(webR, cell) {
   };
 }
 
+function cellFailureContext(cell) {
+  const code = String(cell?.source || "");
+  const firstLine = code.split(/\r?\n/).find((line) => line.trim()) || "R cell";
+  const style = cell?.validation_style ? ` style=${cell.validation_style}` : "";
+  return `webR cell ${cell?.id ?? "unknown"}${style} failed: ${firstLine.slice(0, 160)}`;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const spec = JSON.parse(await readFile(args.input, "utf8"));
@@ -110,7 +117,12 @@ async function main() {
   const rResults = [];
   for (const cell of spec.cells || []) {
     if (cell && cell.mode === "r") {
-      rResults.push(await captureCell(webR, cell));
+      try {
+        rResults.push(await captureCell(webR, cell));
+      } catch (error) {
+        const detail = error && error.stack ? error.stack : String(error);
+        throw new Error(`${cellFailureContext(cell)}\n${detail}`);
+      }
     }
   }
 

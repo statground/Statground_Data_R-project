@@ -273,9 +273,15 @@ def main() -> int:
     parser.add_argument("--output", default="", help="write generated notebook JSON summary to this path")
     parser.add_argument("--dry-run", action="store_true", help="run WebR and build the row without inserting it")
     parser.add_argument("--force-new", action="store_true", help="allow more than one generated post for the same date")
+    parser.add_argument("--validate-style-templates", action="store_true", help="run every Notebook style template through webR and exit")
     args = parser.parse_args()
 
     repo_root = Path.cwd()
+    if args.validate_style_templates:
+        result = validate_style_templates(repo_root / args.runner)
+        emit_result(result, args.output)
+        return 0
+
     env = load_env(repo_root / args.env)
     series_date = parse_series_date(args.date)
     existing_titles = existing_notebook_titles(env)
@@ -829,9 +835,12 @@ retention <- sapply(
   seq_along(week),
   function(w) pmax(0.04, start_level * exp(-decay * w) + rnorm(length(cohort_labels), 0, 0.018))
 )
-retention <- pmin(1, retention)
-rownames(retention) <- cohort_labels
-colnames(retention) <- paste0("week ", week)
+retention <- matrix(
+  pmin(1, as.vector(retention)),
+  nrow = length(cohort_labels),
+  ncol = length(week),
+  dimnames = list(cohort_labels, paste0("week ", week))
+)
 drop_to_week5 <- retention[, 1] - retention[, 6]
 
 grDevices::svg({r_string(plot_path)}, width = 7.2, height = 4.6, bg = "white")
@@ -934,6 +943,50 @@ def run_webr_runner(runner: Path, spec: dict[str, Any]) -> dict[str, Any]:
             check=True,
         )
         return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def validate_style_templates(runner: Path) -> dict[str, Any]:
+    spec = build_style_validation_spec()
+    runner_result = run_webr_runner(runner, spec)
+    expected_ids = [cell["id"] for cell in spec["cells"] if cell["mode"] == "r"]
+    actual_ids = [item.get("id") for item in runner_result.get("r_results", [])]
+    missing_ids = [cell_id for cell_id in expected_ids if cell_id not in actual_ids]
+    if missing_ids:
+        raise RuntimeError(f"webR style validation missed R cell result ids: {missing_ids}")
+    return {
+        "schema": "web-r.notebook.style-validation.v1",
+        "ok": True,
+        "style_count": len(STYLES),
+        "r_cell_count": len(expected_ids),
+        "styles": [style.key for style in STYLES],
+    }
+
+
+def build_style_validation_spec() -> dict[str, Any]:
+    cells: list[dict[str, Any]] = []
+    for index, style in enumerate(STYLES):
+        topic = TOPICS[index % len(TOPICS)]
+        style_cells = build_style_cells(
+            style=style,
+            topic=topic,
+            title=f"Template validation: {style.label}",
+            seed=9100 + index * 137,
+            start_date="2026-01-01",
+            n=60,
+            change_point=34 + index,
+            effect=10 + index,
+        )
+        for cell in style_cells:
+            cloned = dict(cell)
+            cloned["id"] = index * 10 + int(cell["id"])
+            cloned["validation_style"] = style.key
+            cells.append(cloned)
+    return {
+        "schema": "web-r.notebook.style-validation-spec.v1",
+        "series_date": "2026-01-01",
+        "title": "Web-R Notebook style template validation",
+        "cells": cells,
+    }
 
 
 def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) -> dict[str, Any]:

@@ -58,6 +58,13 @@ jobs:
       - name: Install webR for Node
         run: npm install --no-save webr
 
+      - name: Validate Web-R Notebook style templates
+        run: |
+          python scripts/generate_webr_notebook_daily.py \
+            --runner scripts/webr_notebook_runner.mjs \
+            --validate-style-templates \
+            --output /tmp/webr_notebook_style_validation.json
+
       - name: Validate required settings
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
