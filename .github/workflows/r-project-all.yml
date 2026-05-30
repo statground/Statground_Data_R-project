@@ -334,6 +334,12 @@ jobs:
           R_COMMUNITY_TRANSLATION_LIMIT: ${{ vars.R_COMMUNITY_TRANSLATION_LIMIT || vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
           R_COMMUNITY_TRANSLATION_MODEL: ${{ vars.R_COMMUNITY_TRANSLATION_MODEL || vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR: ${{ vars.R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR || 'true' }}
+          R_COMMUNITY_SKIP_EXISTING_CANONICAL: ${{ vars.R_COMMUNITY_SKIP_EXISTING_CANONICAL || 'true' }}
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_DATABASE: Data_R_Community_Service
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
@@ -346,6 +352,7 @@ jobs:
             --translate="$R_COMMUNITY_TRANSLATE_ENABLED" \
             --translation-limit "$R_COMMUNITY_TRANSLATION_LIMIT" \
             --translation-model "$R_COMMUNITY_TRANSLATION_MODEL" \
+            --skip-existing-canonical="$R_COMMUNITY_SKIP_EXISTING_CANONICAL" \
             --fail-on-translation-error="$R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR"
 
       - name: Wait for R Community ClickHouse ingestion

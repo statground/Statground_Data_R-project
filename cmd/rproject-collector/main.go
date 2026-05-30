@@ -406,6 +406,11 @@ func runCommunity(ctx context.Context, args []string) error {
 	translationLimit := fs.Int("translation-limit", envInt("R_COMMUNITY_TRANSLATION_LIMIT", 0), "max rows to translate in this run; 0 means all rows that need translation")
 	translationModel := fs.String("translation-model", envString("R_COMMUNITY_TRANSLATION_MODEL", envString("R_COMMUNITY_DIGEST_MODEL", "google/gemini-2.5-flash-lite")), "AI model for R Community source item Korean translation")
 	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
+	skipExistingCanonical := fs.Bool(
+		"skip-existing-canonical",
+		envBool("R_COMMUNITY_SKIP_EXISTING_CANONICAL", true),
+		"skip source rows whose external_id or canonical URL already exists before AI translation and Kafka publish",
+	)
 	fs.Parse(args)
 	requiredSources := mergeStringSlices(defaultCommunityRequiredSourceIDs, splitCSV(envString("R_COMMUNITY_REQUIRED_SOURCE_IDS", "")))
 	prioritySources := mergeStringSlices(defaultCommunityPrioritySourceIDs, splitCSV(envString("R_COMMUNITY_PRIORITY_SOURCE_IDS", "")))
@@ -440,14 +445,33 @@ func runCommunity(ctx context.Context, args []string) error {
 		}
 	}
 
-	events, err := readCommunityJSONLEvents(*jsonlPath, *limit, selectionSources, enrich)
+	events, selectedCount, skippedExisting, err := readCommunityJSONLEvents(
+		ctx,
+		*jsonlPath,
+		*limit,
+		selectionSources,
+		enrich,
+		*skipExistingCanonical,
+	)
 	if err != nil {
 		return err
 	}
-	if err := validateRequiredCommunityEvents(events, requiredSources); err != nil {
-		return err
-	}
 	sourceCounts := communityEventSourceCounts(events)
+	if len(events) == 0 {
+		fmt.Printf(
+			"published=0 translated=%d skipped_existing=%d selected=%d topic=%s jsonl=%s required_sources=%s priority_sources=%s required_counts=%s limit=%d\n",
+			translated,
+			skippedExisting,
+			selectedCount,
+			*topic,
+			*jsonlPath,
+			strings.Join(requiredSources, ","),
+			strings.Join(prioritySources, ","),
+			communityRequiredCountsString(sourceCounts, requiredSources),
+			*limit,
+		)
+		return nil
+	}
 	pub := newPublisher(*topic, "statground-rcommunity-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
 		return err
@@ -458,7 +482,19 @@ func runCommunity(ctx context.Context, args []string) error {
 	if len(translationErrors) > 0 {
 		fmt.Printf("translation_errors=%d first_error=%s\n", len(translationErrors), translationErrors[0])
 	}
-	fmt.Printf("published=%d translated=%d topic=%s jsonl=%s required_sources=%s priority_sources=%s required_counts=%s limit=%d\n", len(events), translated, *topic, *jsonlPath, strings.Join(requiredSources, ","), strings.Join(prioritySources, ","), communityRequiredCountsString(sourceCounts, requiredSources), *limit)
+	fmt.Printf(
+		"published=%d translated=%d skipped_existing=%d selected=%d topic=%s jsonl=%s required_sources=%s priority_sources=%s required_counts=%s limit=%d\n",
+		len(events),
+		translated,
+		skippedExisting,
+		selectedCount,
+		*topic,
+		*jsonlPath,
+		strings.Join(requiredSources, ","),
+		strings.Join(prioritySources, ","),
+		communityRequiredCountsString(sourceCounts, requiredSources),
+		*limit,
+	)
 	return nil
 }
 
@@ -467,10 +503,17 @@ type communityJSONLRow struct {
 	row    map[string]any
 }
 
-func readCommunityJSONLEvents(path string, limit int, requiredSourceIDs []string, enrich func(map[string]any) error) ([]genericEvent, error) {
+func readCommunityJSONLEvents(
+	ctx context.Context,
+	path string,
+	limit int,
+	requiredSourceIDs []string,
+	enrich func(map[string]any) error,
+	skipExistingCanonical bool,
+) ([]genericEvent, int, int, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	rows := make([]communityJSONLRow, 0)
 	for lineNo, rawLine := range bytes.Split(body, []byte("\n")) {
@@ -480,21 +523,37 @@ func readCommunityJSONLEvents(path string, limit int, requiredSourceIDs []string
 		}
 		var row map[string]any
 		if err := json.Unmarshal(line, &row); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+			return nil, 0, 0, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
 		}
 		rows = append(rows, communityJSONLRow{lineNo: lineNo + 1, row: row})
 	}
 	rows = selectCommunityJSONLRows(rows, limit, requiredSourceIDs)
+	if err := validateRequiredCommunityRows(rows, requiredSourceIDs); err != nil {
+		return nil, len(rows), 0, err
+	}
+	selectedCount := len(rows)
+	skippedExisting := 0
+	if skipExistingCanonical && len(rows) > 0 {
+		cfg, err := newClickHouseQueryConfig()
+		if err != nil {
+			return nil, selectedCount, 0, err
+		}
+		var filterErr error
+		rows, skippedExisting, filterErr = filterExistingCommunityJSONLRows(ctx, cfg, rows)
+		if filterErr != nil {
+			return nil, selectedCount, skippedExisting, filterErr
+		}
+	}
 	events := make([]genericEvent, 0, len(rows))
 	for _, item := range rows {
 		if enrich != nil {
 			if err := enrich(item.row); err != nil {
-				return nil, fmt.Errorf("%s:%d: %w", path, item.lineNo, err)
+				return nil, selectedCount, skippedExisting, fmt.Errorf("%s:%d: %w", path, item.lineNo, err)
 			}
 		}
 		events = append(events, communityRowEvent(item.row))
 	}
-	return events, nil
+	return events, selectedCount, skippedExisting, nil
 }
 
 func selectCommunityJSONLRows(rows []communityJSONLRow, limit int, requiredSourceIDs []string) []communityJSONLRow {
@@ -568,6 +627,186 @@ func validateRequiredCommunityEvents(events []genericEvent, requiredSourceIDs []
 		return fmt.Errorf("R Community required source rows were not selected for publish: %s", strings.Join(missing, ","))
 	}
 	return nil
+}
+
+func validateRequiredCommunityRows(rows []communityJSONLRow, requiredSourceIDs []string) error {
+	counts := make(map[string]int)
+	for _, item := range rows {
+		sourceID := strings.TrimSpace(stringAny(item.row["source_id"]))
+		if sourceID != "" {
+			counts[sourceID]++
+		}
+	}
+	missing := make([]string, 0)
+	for _, sourceID := range requiredSourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID != "" && counts[sourceID] == 0 {
+			missing = append(missing, sourceID)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("R Community required source rows were not selected for publish: %s", strings.Join(missing, ","))
+	}
+	return nil
+}
+
+func filterExistingCommunityJSONLRows(
+	ctx context.Context,
+	cfg clickHouseQueryConfig,
+	rows []communityJSONLRow,
+) ([]communityJSONLRow, int, error) {
+	existingExternal, existingCanonical, err := loadExistingCommunityRowKeys(ctx, cfg, rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]communityJSONLRow, 0, len(rows))
+	skipped := 0
+	for _, item := range rows {
+		externalID := strings.TrimSpace(stringAny(item.row["external_id"]))
+		canonicalKey := communityCanonicalDedupKey(stringAny(item.row["canonical_url"]))
+		if (externalID != "" && existingExternal[externalID]) || (canonicalKey != "" && existingCanonical[canonicalKey]) {
+			skipped++
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, skipped, nil
+}
+
+func loadExistingCommunityRowKeys(
+	ctx context.Context,
+	cfg clickHouseQueryConfig,
+	rows []communityJSONLRow,
+) (map[string]bool, map[string]bool, error) {
+	externalIDs := make([]string, 0, len(rows))
+	canonicalKeys := make([]string, 0, len(rows))
+	seenExternal := make(map[string]bool)
+	seenCanonical := make(map[string]bool)
+	for _, item := range rows {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		default:
+		}
+		externalID := strings.TrimSpace(stringAny(item.row["external_id"]))
+		if externalID != "" && !seenExternal[externalID] {
+			seenExternal[externalID] = true
+			externalIDs = append(externalIDs, externalID)
+		}
+		canonicalKey := communityCanonicalDedupKey(stringAny(item.row["canonical_url"]))
+		if canonicalKey != "" && !seenCanonical[canonicalKey] {
+			seenCanonical[canonicalKey] = true
+			canonicalKeys = append(canonicalKeys, canonicalKey)
+		}
+	}
+	existingExternal := make(map[string]bool)
+	existingCanonical := make(map[string]bool)
+	const chunkSize = 200
+	maxChunks := maxInt((len(externalIDs)+chunkSize-1)/chunkSize, (len(canonicalKeys)+chunkSize-1)/chunkSize)
+	for i := 0; i < maxChunks; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		default:
+		}
+		externalChunk := stringChunk(externalIDs, i*chunkSize, chunkSize)
+		canonicalChunk := stringChunk(canonicalKeys, i*chunkSize, chunkSize)
+		whereParts := make([]string, 0, 2)
+		if len(externalChunk) > 0 {
+			whereParts = append(whereParts, "external_id IN ("+clickHouseStringList(externalChunk)+")")
+		}
+		if len(canonicalChunk) > 0 {
+			whereParts = append(whereParts, "canonical_key IN ("+clickHouseStringList(canonicalChunk)+")")
+		}
+		if len(whereParts) == 0 {
+			continue
+		}
+		query := fmt.Sprintf(`
+SELECT external_id, canonical_key
+  FROM
+  (
+      SELECT external_id,
+             lowerUTF8(replaceRegexpAll(canonical_url, '/+(#|$)', '\\1')) AS canonical_key
+        FROM Data_R_Community_Raw.r_community_item_raw
+       WHERE active = 1
+         AND notEmpty(canonical_url)
+  )
+ WHERE %s
+ FORMAT JSONEachRow`, strings.Join(whereParts, " OR "))
+		resultRows, err := cfg.queryJSONEachRow(query)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, row := range resultRows {
+			if externalID := strings.TrimSpace(stringAny(row["external_id"])); externalID != "" {
+				existingExternal[externalID] = true
+			}
+			if canonicalKey := strings.TrimSpace(stringAny(row["canonical_key"])); canonicalKey != "" {
+				existingCanonical[canonicalKey] = true
+			}
+		}
+	}
+	return existingExternal, existingCanonical, nil
+}
+
+func clickHouseStringList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			quoted = append(quoted, clickHouseQuoteString(value))
+		}
+	}
+	return strings.Join(quoted, ",")
+}
+
+func stringChunk(values []string, start, size int) []string {
+	if start >= len(values) || size <= 0 {
+		return nil
+	}
+	end := start + size
+	if end > len(values) {
+		end = len(values)
+	}
+	return values[start:end]
+}
+
+func communityCanonicalDedupKey(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		query := parsed.Query()
+		for key := range query {
+			keyLower := strings.ToLower(key)
+			if keyLower == "fbclid" ||
+				keyLower == "gclid" ||
+				keyLower == "igshid" ||
+				keyLower == "mc_cid" ||
+				keyLower == "mc_eid" ||
+				keyLower == "spm" ||
+				keyLower == "ref_src" ||
+				keyLower == "ref" ||
+				keyLower == "source" ||
+				strings.HasPrefix(keyLower, "utm_") {
+				query.Del(key)
+			}
+		}
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		parsed.RawQuery = query.Encode()
+		if parsed.Path != "/" {
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+		}
+		rawURL = parsed.String()
+	}
+	if hashIndex := strings.Index(rawURL, "#"); hashIndex >= 0 {
+		prefix := strings.TrimRight(rawURL[:hashIndex], "/")
+		return strings.ToLower(prefix + rawURL[hashIndex:])
+	}
+	return strings.ToLower(strings.TrimRight(rawURL, "/"))
 }
 
 func communityEventSourceCounts(events []genericEvent) map[string]int {
