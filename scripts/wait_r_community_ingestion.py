@@ -88,7 +88,7 @@ def main() -> int:
 def add_wait_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--attempts", type=int, default=36)
     parser.add_argument("--sleep", type=float, default=10)
-    parser.add_argument("--query-timeout", type=float, default=45)
+    parser.add_argument("--query-timeout", type=float, default=12)
 
 
 def wait_source(args: argparse.Namespace) -> int:
@@ -102,11 +102,12 @@ def wait_source(args: argparse.Namespace) -> int:
         print("No required R Community source ids were configured; cannot verify source ingestion.", file=sys.stderr)
         return 1
 
+    collection = collection_source_summary(report)
     cutoff_sql = f"parseDateTime64BestEffort({quote(started_at)}, 3, 'Asia/Seoul') - INTERVAL 5 MINUTE"
     last_failures: list[str] = []
     for attempt in range(1, max(1, args.attempts) + 1):
         try:
-            summary, failures = source_visibility(cutoff_sql, required, args.max_source_age_days, args.query_timeout)
+            summary, failures = source_visibility(cutoff_sql, required, args.max_source_age_days, args.query_timeout, collection)
         except ClickHouseQueryError as exc:
             summary = {"clickhouse_query_error": str(exc)}
             failures = [str(exc)]
@@ -263,7 +264,13 @@ def digest_plan_visibility(digest_ids: list[str], query_timeout: float) -> tuple
     return visible, missing
 
 
-def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age_days: float, query_timeout: float) -> tuple[dict[str, Any], list[str]]:
+def source_visibility(
+    cutoff_sql: str,
+    required: tuple[str, ...],
+    max_source_age_days: float,
+    query_timeout: float,
+    collection: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], list[str]]:
     source_rows = {
         row.get("source_id", ""): row
         for row in query_json_each_row(
@@ -274,8 +281,9 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
                 countIf(ingested_at >= {cutoff_sql}) AS latest_after_cutoff,
                 ifNull(formatDateTime(max(coalesce(original_published_at, collected_at)), '%Y-%m-%d %H:%i:%S', 'Asia/Seoul'), '') AS latest_source_at,
                 ifNull(formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i:%S', 'Asia/Seoul'), '') AS latest_ingested_at
-            FROM Data_R_Community_Service.v_r_community_latest
+            FROM Data_R_Community_Service.r_community_item_read_current
             WHERE source_id IN ({quote_list(required)})
+              AND active = 1
               AND notEmpty(title)
               AND notEmpty(canonical_url)
             GROUP BY source_id
@@ -309,20 +317,30 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
     for source_id in required:
         source = source_rows.get(source_id) or {}
         events = event_rows.get(source_id) or {}
+        collected = collection.get(source_id) or {}
         latest_after = int(source.get("latest_after_cutoff") or 0)
         raw_after = int(events.get("raw_events_after_cutoff") or 0)
         latest_source_at = str(source.get("latest_source_at") or "")
+        latest_dt = parse_datetime_value(latest_source_at)
+        collection_latest_at = str(collected.get("latest_item_at") or "")
+        collection_latest_dt = parse_datetime_value(collection_latest_at)
+        collected_rows = int(collected.get("rows") or 0)
         summary[source_id] = {
             "latest_after_cutoff": latest_after,
             "raw_events_after_cutoff": raw_after,
             "latest_source_at": latest_source_at,
             "latest_ingested_at": source.get("latest_ingested_at") or "",
             "raw_event_ingested_at": events.get("raw_event_ingested_at") or "",
+            "collection_rows": collected_rows,
+            "collection_latest_item_at": collection_latest_at,
         }
         if latest_after <= 0 and raw_after <= 0:
+            existing_reason = fresh_existing_current_reason(now, latest_dt, collection_latest_dt, collected_rows, max_source_age_days)
+            if existing_reason:
+                summary[source_id]["satisfied_by"] = existing_reason
+                continue
             failures.append(f"{source_id} missing from raw/current rows after collection start")
             continue
-        latest_dt = parse_kst_datetime(latest_source_at)
         if latest_dt is None:
             failures.append(f"{source_id} has no parseable latest source timestamp")
             continue
@@ -330,6 +348,47 @@ def source_visibility(cutoff_sql: str, required: tuple[str, ...], max_source_age
         if age_days > max_source_age_days:
             failures.append(f"{source_id} latest source timestamp is stale: {latest_source_at} ({age_days:.1f}d)")
     return summary, failures
+
+
+def collection_source_summary(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    counts = report.get("source_counts") or {}
+    latest = report.get("source_latest_item_at") or {}
+    out: dict[str, dict[str, Any]] = {}
+    if isinstance(counts, dict):
+        for source_id, count in counts.items():
+            key = str(source_id or "").strip()
+            if not key:
+                continue
+            try:
+                rows = int(count or 0)
+            except (TypeError, ValueError):
+                rows = 0
+            out[key] = {"rows": rows, "latest_item_at": ""}
+    if isinstance(latest, dict):
+        for source_id, value in latest.items():
+            key = str(source_id or "").strip()
+            if not key:
+                continue
+            out.setdefault(key, {"rows": 0, "latest_item_at": ""})
+            out[key]["latest_item_at"] = str(value or "").strip()
+    return out
+
+
+def fresh_existing_current_reason(
+    now: datetime,
+    latest_dt: datetime | None,
+    collection_latest_dt: datetime | None,
+    collected_rows: int,
+    max_source_age_days: float,
+) -> str:
+    if collected_rows <= 0 or latest_dt is None:
+        return ""
+    age_days = (now - latest_dt).total_seconds() / 86400
+    if age_days > max_source_age_days:
+        return ""
+    if collection_latest_dt is not None and latest_dt + timedelta(minutes=5) < collection_latest_dt:
+        return ""
+    return "existing_current_fresh_after_skip_existing"
 
 
 def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ...], since_days: int, query_timeout: float) -> list[dict[str, str]]:
@@ -351,8 +410,9 @@ def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ..
                 anyLast(l.source_name) AS source_name,
                 anyLast(l.source_type) AS source_type,
                 max(toDate(coalesce(l.original_published_at, l.collected_at))) AS latest_source_date
-            FROM Data_R_Community_Service.v_r_community_latest AS l
+            FROM Data_R_Community_Service.r_community_item_read_current AS l
             WHERE l.source_type IN ({quote_list(source_types)})
+              AND l.active = 1
               AND notEmpty(l.title)
               AND notEmpty(l.canonical_url)
               {exclude_where}
@@ -430,7 +490,7 @@ def clickhouse_request(sql: str, query_timeout: float) -> str:
 def clickhouse_url(query_timeout: float) -> str:
     try:
         timeout = str(max(1, int(query_timeout)))
-        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time=timeout)
+        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time=timeout, max_threads="1")
     except RuntimeError as exc:
         raise ClickHouseQueryError(str(exc)) from exc
 
@@ -450,10 +510,17 @@ def parse_digest_write_count(path: Path) -> int:
     return max(int(match) for match in matches)
 
 
-def parse_kst_datetime(value: str) -> datetime | None:
+def parse_datetime_value(value: str) -> datetime | None:
     value = str(value or "").strip()
     if not value:
         return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=KST)
+        return parsed.astimezone(KST)
+    except ValueError:
+        pass
     try:
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
     except ValueError:

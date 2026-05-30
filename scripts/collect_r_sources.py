@@ -1042,12 +1042,14 @@ class RSourceCollector:
             with path.open("w", encoding="utf-8") as fp:
                 for row in rows:
                     fp.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        source_latest_item_at = latest_item_at_by_source(rows)
         report = {
             "started_at": self.started_at,
             "finished_at": dt.datetime.now(KST).isoformat(timespec="seconds"),
             "since_days": self.since_days,
             "item_count": len(rows),
             "source_counts": dict(sorted(self.counts.items())),
+            "source_latest_item_at": dict(sorted(source_latest_item_at.items())),
             "error_count": len(self.errors),
             "errors": self.errors,
         }
@@ -1056,6 +1058,21 @@ class RSourceCollector:
         for path in (report_path, latest_report_path):
             path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
         return jsonl_path, report_path
+
+
+def latest_item_at_by_source(rows: list[dict[str, Any]]) -> dict[str, str]:
+    latest: dict[str, dt.datetime] = {}
+    for row in rows:
+        source_id = str(row.get("source_id") or "").strip()
+        if not source_id:
+            continue
+        parsed = parse_datetime(str(row.get("published_at") or "")) or parse_datetime(str(row.get("collected_at") or ""))
+        if parsed is None:
+            continue
+        parsed = parsed.astimezone(KST)
+        if source_id not in latest or parsed > latest[source_id]:
+            latest[source_id] = parsed
+    return {source_id: value.isoformat(timespec="seconds") for source_id, value in latest.items()}
 
 
 # ----------------------------- utility functions -----------------------------

@@ -92,8 +92,18 @@ def main() -> int:
                 failures.append(f"{source_id} subreddit mismatch: expected {expected_subreddit}, observed {observed}")
                 break
 
+    report_latest = report.get("source_latest_item_at") or {}
+    if not isinstance(report_latest, dict):
+        report_latest = {}
     summary = {
         "required_sources": {source_id: int(source_counts.get(source_id) or 0) for source_id in required},
+        "required_latest_item_at": {
+            source_id: (
+                report_latest.get(source_id)
+                or (latest_by_source[source_id].isoformat() if source_id in latest_by_source else "")
+            )
+            for source_id in required
+        },
         "reddit_sources_checked": len(reddit_sources),
         "rows": len(rows),
         "failures": failures,
