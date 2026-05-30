@@ -449,6 +449,7 @@ func runCommunity(ctx context.Context, args []string) error {
 		ctx,
 		*jsonlPath,
 		*limit,
+		requiredSources,
 		selectionSources,
 		enrich,
 		*skipExistingCanonical,
@@ -508,6 +509,7 @@ func readCommunityJSONLEvents(
 	path string,
 	limit int,
 	requiredSourceIDs []string,
+	selectionSourceIDs []string,
 	enrich func(map[string]any) error,
 	skipExistingCanonical bool,
 ) ([]genericEvent, int, int, error) {
@@ -527,7 +529,7 @@ func readCommunityJSONLEvents(
 		}
 		rows = append(rows, communityJSONLRow{lineNo: lineNo + 1, row: row})
 	}
-	rows = selectCommunityJSONLRows(rows, limit, requiredSourceIDs)
+	rows = selectCommunityJSONLRows(rows, limit, selectionSourceIDs)
 	if err := validateRequiredCommunityRows(rows, requiredSourceIDs); err != nil {
 		return nil, len(rows), 0, err
 	}

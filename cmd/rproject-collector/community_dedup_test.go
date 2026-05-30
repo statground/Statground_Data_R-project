@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestCommunityCanonicalDedupKey(t *testing.T) {
 	tests := []struct {
@@ -43,5 +48,29 @@ func TestValidateRequiredCommunityRows(t *testing.T) {
 	}
 	if err := validateRequiredCommunityRows(rows, []string{"reddit:r/rstats"}); err == nil {
 		t.Fatal("validateRequiredCommunityRows returned nil for missing required source")
+	}
+}
+
+func TestReadCommunityJSONLEventsAllowsMissingPrioritySource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "latest.jsonl")
+	body := `{"source_id":"community:stackoverflow:r","external_id":"so-1","canonical_url":"https://stackoverflow.com/questions/1","published_at":"2026-05-31T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	events, selected, skipped, err := readCommunityJSONLEvents(
+		context.Background(),
+		path,
+		10,
+		[]string{"community:stackoverflow:r"},
+		[]string{"community:stackoverflow:r", "community:posit:events"},
+		nil,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readCommunityJSONLEvents returned unexpected error: %v", err)
+	}
+	if selected != 1 || skipped != 0 || len(events) != 1 {
+		t.Fatalf("selected=%d skipped=%d events=%d, want selected=1 skipped=0 events=1", selected, skipped, len(events))
 	}
 }
