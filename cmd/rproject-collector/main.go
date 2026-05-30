@@ -4810,7 +4810,7 @@ FROM
                 language_code,
                 payload_json,
                 collected_at
-            FROM Data_R_Community_Service.r_youtube_video_current FINAL
+            FROM Data_R_Community_Service.r_youtube_video_current
             WHERE active = 1
               AND notEmpty(youtube_video_id)
         )
