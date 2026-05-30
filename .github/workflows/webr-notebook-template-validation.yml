@@ -1,0 +1,54 @@
+name: Web-R Notebook Template Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/webr-notebook-*.yml"
+      - "scripts/generate_webr_notebook_daily.py"
+      - "scripts/webr_notebook_runner.mjs"
+  push:
+    paths:
+      - ".github/workflows/webr-notebook-*.yml"
+      - "scripts/generate_webr_notebook_daily.py"
+      - "scripts/webr_notebook_runner.mjs"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TZ: Asia/Seoul
+  PYTHONUNBUFFERED: "1"
+
+concurrency:
+  group: webr-notebook-template-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install webR for Node
+        run: npm install --no-save webr
+
+      - name: Validate Web-R Notebook style templates
+        run: |
+          python scripts/generate_webr_notebook_daily.py \
+            --runner scripts/webr_notebook_runner.mjs \
+            --validate-style-templates \
+            --output /tmp/webr_notebook_style_validation.json
