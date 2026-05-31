@@ -1148,7 +1148,12 @@ def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -
 
 def clickhouse_url(env: dict[str, str]) -> str:
     try:
-        return build_clickhouse_url(env, default_format="JSONEachRow", max_execution_time="60")
+        return build_clickhouse_url(
+            env,
+            default_format="JSONEachRow",
+            max_execution_time=env.get("WEBR_NOTEBOOK_DAILY_CH_MAX_EXECUTION_TIME", "30"),
+            max_threads=env.get("WEBR_NOTEBOOK_DAILY_CH_MAX_THREADS", "1"),
+        )
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
 

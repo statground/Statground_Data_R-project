@@ -567,7 +567,12 @@ def clickhouse_rows(sql: str) -> list[dict[str, Any]]:
 
 
 def clickhouse_url() -> str:
-    return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time="45")
+    return build_clickhouse_url(
+        os.environ,
+        default_format="JSONEachRow",
+        max_execution_time=os.environ.get("ADMIN_PIPELINE_MONITOR_CH_MAX_EXECUTION_TIME", "20"),
+        max_threads=os.environ.get("ADMIN_PIPELINE_MONITOR_CH_MAX_THREADS", "1"),
+    )
 
 
 def pipeline_status(status: str, conclusion: str) -> str:

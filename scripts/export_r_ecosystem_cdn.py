@@ -275,12 +275,17 @@ def fetch_json_rows(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
     password = env.get("CLICKHOUSE_PASSWORD", "")
     if not user:
         raise SystemExit("ClickHouse connection environment is incomplete")
-    url = build_clickhouse_url(env, default_format="JSONEachRow", max_execution_time="120")
+    url = build_clickhouse_url(
+        env,
+        default_format="JSONEachRow",
+        max_execution_time=env.get("R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME", "60"),
+        max_threads=env.get("R_ECOSYSTEM_CDN_CH_MAX_THREADS", "2"),
+    )
     request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=int(env.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", "75"))) as response:
             body = response.read().decode("utf-8")
     except urllib.error.URLError as exc:
         raise SystemExit(f"ClickHouse export query failed: {exc.__class__.__name__}") from exc
