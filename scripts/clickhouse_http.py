@@ -18,6 +18,7 @@ def build_clickhouse_url(
     default_database: str = "Clickhouse_Statground",
     default_format: str = "JSONEachRow",
     max_execution_time: str = "30",
+    max_threads: str = "",
 ) -> str:
     values = env if env is not None else os.environ
     base = _first(values, "CH_URL", "CLICKHOUSE_URL", "CLICKHOUSE_HTTP_URL")
@@ -35,13 +36,14 @@ def build_clickhouse_url(
         root = _normalize_host_base(host, port, protocol, path)
 
     database = _first(values, "CH_DATABASE", "CLICKHOUSE_DEFAULT_DATABASE") or default_database
-    query = urllib.parse.urlencode(
-        {
-            "database": database,
-            "default_format": default_format,
-            "max_execution_time": max_execution_time,
-        }
-    )
+    params = {
+        "database": database,
+        "default_format": default_format,
+        "max_execution_time": max_execution_time,
+    }
+    if str(max_threads or "").strip():
+        params["max_threads"] = str(max_threads).strip()
+    query = urllib.parse.urlencode(params)
     separator = "&" if urllib.parse.urlsplit(root).query else "?"
     return f"{root}{separator}{query}"
 
