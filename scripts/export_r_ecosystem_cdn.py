@@ -49,8 +49,8 @@ def main() -> int:
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
-    community_rows = fetch_json_rows(env, community_sql(args.limit))
-    article_rows = fetch_json_rows(env, article_sql(args.limit))
+    community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
+    article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
 
     payloads: dict[str, dict[str, Any]] = {}
     manifest_items: dict[str, dict[str, str]] = {}
@@ -270,7 +270,7 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def fetch_json_rows(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
+def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") -> list[dict[str, Any]]:
     user = env.get("CLICKHOUSE_USER", "").strip()
     password = env.get("CLICKHOUSE_PASSWORD", "")
     if not user:
@@ -287,14 +287,46 @@ def fetch_json_rows(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
     try:
         with urllib.request.urlopen(request, timeout=int(env.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", "75"))) as response:
             body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(800).decode("utf-8", errors="replace")
+        category = clickhouse_error_category(detail)
+        raise SystemExit(f"ClickHouse export query failed ({safe_query_name(query_name)}): HTTP {exc.code} {category}") from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse export query failed: {exc.__class__.__name__}") from exc
+        raise SystemExit(f"ClickHouse export query failed ({safe_query_name(query_name)}): {exc.__class__.__name__}") from exc
     rows: list[dict[str, Any]] = []
     for line in body.splitlines():
         line = line.strip()
         if line:
             rows.append(json.loads(line))
     return rows
+
+
+def safe_query_name(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.:-]+", "_", text(value))[:80]
+    return value or "query"
+
+
+def clickhouse_error_category(detail: str) -> str:
+    upper = text(detail).upper()
+    for marker in (
+        "TIMEOUT_EXCEEDED",
+        "MEMORY_LIMIT_EXCEEDED",
+        "TOO_MANY_SIMULTANEOUS_QUERIES",
+        "ACCESS_DENIED",
+        "UNKNOWN_TABLE",
+        "UNKNOWN_IDENTIFIER",
+        "SYNTAX_ERROR",
+    ):
+        if marker in upper:
+            return marker
+    if "MAX_EXECUTION_TIME" in upper or "TIMEOUT EXCEEDED" in upper or "TIMEOUT" in upper:
+        return "TIMEOUT_EXCEEDED"
+    if "MEMORY LIMIT" in upper:
+        return "MEMORY_LIMIT_EXCEEDED"
+    match = re.search(r"CODE:\s*(\d+)", detail, re.IGNORECASE)
+    if match:
+        return f"CODE_{match.group(1)}"
+    return "CLICKHOUSE_ERROR"
 
 
 def community_sql(limit: int) -> str:
@@ -475,7 +507,8 @@ SELECT external_id,
            )
        )
    )
- ORDER BY item_uuid ASC, version DESC, collected_at DESC, ingested_at DESC{suffix}
+ ORDER BY item_uuid ASC, version DESC, collected_at DESC, ingested_at DESC
+ LIMIT 1 BY item_uuid{suffix}
  FORMAT JSONEachRow
 """
 
