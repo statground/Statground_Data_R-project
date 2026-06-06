@@ -116,14 +116,14 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path.cwd()
-    env = load_env(repo_root / args.env)
+    env = package_export_env(load_env(repo_root / args.env))
     language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
-    package_rows = fetch_json_rows(env, package_sql(args.package_limit))
-    news_rows = fetch_json_rows(env, package_news_sql(args.news_limit))
-    version_rows = fetch_json_rows(env, package_version_sql())
+    package_rows = fetch_json_rows(env, package_sql(args.package_limit), query_name="r_package_packages")
+    news_rows = fetch_json_rows(env, package_news_sql(args.news_limit), query_name="r_package_news")
+    version_rows = fetch_json_rows(env, package_version_sql(), query_name="r_package_versions")
     detail_groups = fetch_package_detail_groups(env)
 
     packages: dict[str, dict[str, Any]] = {}
@@ -508,6 +508,26 @@ def package_profile_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def package_export_env(env: dict[str, str]) -> dict[str, str]:
+    values = dict(env)
+    values["R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME"] = first_text(
+        values.get("R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME", ""),
+        values.get("R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME", ""),
+        "120",
+    )
+    values["R_ECOSYSTEM_CDN_HTTP_TIMEOUT"] = first_text(
+        values.get("R_PACKAGE_CDN_HTTP_TIMEOUT", ""),
+        values.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", ""),
+        "150",
+    )
+    values["R_ECOSYSTEM_CDN_CH_MAX_THREADS"] = first_text(
+        values.get("R_PACKAGE_CDN_CH_MAX_THREADS", ""),
+        values.get("R_ECOSYSTEM_CDN_CH_MAX_THREADS", ""),
+        "2",
+    )
+    return values
+
+
 def preferred_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
     def score(row: dict[str, Any]) -> tuple[int, int, int, str]:
         repo = text(row.get("repository")).lower()
@@ -546,19 +566,19 @@ def first_rows(rows: list[dict[str, Any]], key_field: str = "package_key") -> di
 
 def fetch_package_detail_groups(env: dict[str, str]) -> dict[str, Any]:
     return {
-        "cran_page": first_rows(fetch_json_rows(env, cran_page_sql())),
-        "checks": group_rows(fetch_json_rows(env, cran_checks_sql())),
-        "security": group_rows(fetch_json_rows(env, security_sql())),
-        "bibliometric": group_rows(fetch_json_rows(env, bibliometric_sql())),
-        "manual_topics": group_rows(fetch_json_rows(env, manual_topics_sql())),
-        "artifacts": group_rows(fetch_json_rows(env, artifacts_sql())),
-        "dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=False))),
-        "reverse_dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=True))),
-        "reverse_counts": group_rows(fetch_json_rows(env, reverse_counts_sql())),
-        "github_repos": group_rows(fetch_json_rows(env, github_repos_sql())),
-        "task_views": group_rows(fetch_json_rows(env, task_views_sql())),
-        "website_mentions": group_rows(fetch_json_rows(env, website_mentions_sql())),
-        "books": group_rows(fetch_json_rows(env, books_sql())),
+        "cran_page": first_rows(fetch_json_rows(env, cran_page_sql(), query_name="r_package_cran_page")),
+        "checks": group_rows(fetch_json_rows(env, cran_checks_sql(), query_name="r_package_cran_checks")),
+        "security": group_rows(fetch_json_rows(env, security_sql(), query_name="r_package_security")),
+        "bibliometric": group_rows(fetch_json_rows(env, bibliometric_sql(), query_name="r_package_bibliometric")),
+        "manual_topics": group_rows(fetch_json_rows(env, manual_topics_sql(), query_name="r_package_manual_topics")),
+        "artifacts": group_rows(fetch_json_rows(env, artifacts_sql(), query_name="r_package_artifacts")),
+        "dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=False), query_name="r_package_dependencies")),
+        "reverse_dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=True), query_name="r_package_reverse_dependencies")),
+        "reverse_counts": group_rows(fetch_json_rows(env, reverse_counts_sql(), query_name="r_package_reverse_counts")),
+        "github_repos": group_rows(fetch_json_rows(env, github_repos_sql(), query_name="r_package_github_repos")),
+        "task_views": group_rows(fetch_json_rows(env, task_views_sql(), query_name="r_package_task_views")),
+        "website_mentions": group_rows(fetch_json_rows(env, website_mentions_sql(), query_name="r_package_website_mentions")),
+        "books": group_rows(fetch_json_rows(env, books_sql(), query_name="r_package_books")),
     }
 
 
