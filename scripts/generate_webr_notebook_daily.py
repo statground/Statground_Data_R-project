@@ -28,11 +28,12 @@ from clickhouse_http import build_clickhouse_url
 
 NOTEBOOK_BOT_UUID = "7b1c9fc4-7216-44cb-81b8-5fe17f2158bc"
 KST = ZoneInfo("Asia/Seoul")
-RECENT_CONTENT_LIMIT = 16
-MAX_CANDIDATE_ATTEMPTS = 12
-RECENT_STYLE_LOOKBACK = 4
-RECENT_TOPIC_LOOKBACK = 6
-SIMILARITY_THRESHOLD = 0.50
+RECENT_CONTENT_LIMIT = 24
+MAX_CANDIDATE_ATTEMPTS = 48
+RECENT_STYLE_LOOKBACK = 5
+RECENT_TOPIC_LOOKBACK = 8
+RECENT_PAIR_LOOKBACK = 16
+SIMILARITY_THRESHOLD = 0.42
 STOP_TOKENS = {
     "action",
     "active",
@@ -209,6 +210,70 @@ TOPICS = [
         noise=6.0,
         threshold=1.38,
     ),
+    Topic(
+        key="learning-path-completion",
+        title="Learning path completion",
+        metric="simulated lesson completions",
+        entity="학습 경로 완료",
+        question="어떤 구간에서 학습 완료가 부드럽게 이어지고, 어디에서 끊기는가?",
+        source_note="가상의 학습 경로 단계별 완료 수",
+        background="학습 경로 완료는 콘텐츠 난이도, 예제 데이터 품질, 다음 단계 안내가 함께 만든 결과입니다. 마지막 완료율만 보면 어느 단계에서 사용자가 멈췄는지 놓치기 쉽습니다.",
+        color="#0e7490",
+        accent="#a21caf",
+        base=68,
+        slope=0.28,
+        amplitude=8,
+        noise=4.9,
+        threshold=1.33,
+    ),
+    Topic(
+        key="question-tag-mix",
+        title="Question tag mix",
+        metric="simulated tagged questions",
+        entity="질문 태그 구성",
+        question="최근 질문이 특정 주제에 과도하게 몰리고 있는가?",
+        source_note="가상의 질문 태그별 발생 수",
+        background="질문 태그는 커뮤니티가 지금 어디에서 막히는지 보여주는 빠른 표식입니다. 하나의 인기 태그보다 태그 조합의 균형을 보면 문서 보강이나 예제 추가 우선순위를 정하기 쉽습니다.",
+        color="#4f46e5",
+        accent="#db2777",
+        base=44,
+        slope=0.22,
+        amplitude=7,
+        noise=4.1,
+        threshold=1.36,
+    ),
+    Topic(
+        key="example-copy-error-rate",
+        title="Example copy error rate",
+        metric="simulated example error rate",
+        entity="예제 실행 오류율",
+        question="예제를 따라 치는 과정의 오류율이 어떤 조건에서 높아지는가?",
+        source_note="가상의 예제 실행 오류율",
+        background="예제 실행 오류는 문법 자체보다 복사 과정, 패키지 설치 상태, 환경 차이에서 자주 생깁니다. 오류율의 분포를 보면 어떤 예제를 더 친절하게 바꿔야 할지 감이 생깁니다.",
+        color="#b45309",
+        accent="#0f766e",
+        base=18,
+        slope=-0.08,
+        amplitude=5,
+        noise=2.7,
+        threshold=1.32,
+    ),
+    Topic(
+        key="package-update-cadence",
+        title="Package update cadence",
+        metric="simulated package update intervals",
+        entity="패키지 업데이트 간격",
+        question="업데이트 간격이 안정적인지, 특정 구간에서 길어지는지 볼 수 있는가?",
+        source_note="가상의 패키지 업데이트 간격",
+        background="패키지 업데이트 간격은 유지보수 활력과 release 부담을 함께 반영합니다. 간격이 조금 길어졌다고 바로 위험은 아니지만, 분포가 넓어지면 관리해야 할 변동성이 커졌다는 신호일 수 있습니다.",
+        color="#15803d",
+        accent="#7c2d12",
+        base=32,
+        slope=0.12,
+        amplitude=6,
+        noise=4.4,
+        threshold=1.34,
+    ),
 ]
 
 STYLES = [
@@ -261,6 +326,36 @@ STYLES = [
         method_note="두 지표가 함께 움직인다고 해서 모든 점이 같은 규칙을 따르는 것은 아닙니다. 회귀선을 기준으로 멀리 떨어진 점을 찾으면 다음에 따로 봐야 할 segment가 보입니다.",
         formula_note="기본 모형은 `y = beta0 + beta1 x + error` 입니다. 잔차 `error`가 큰 점은 평균적 관계가 설명하지 못한 관측치입니다.",
         closing="선에서 멀리 떨어진 점은 실패가 아니라 다음 질문을 만드는 관측치입니다.",
+    ),
+    NotebookStyle(
+        key="seasonality-scan",
+        label="Seasonality scan",
+        title_prefix="Seasonality scan",
+        question_prefix="오늘은 요일처럼 반복되는 패턴과 새로운 변화 신호를 분리해봅니다.",
+        title_template="{entity}의 반복 패턴을 요일별로 나눠 보기",
+        method_note="반복 패턴이 강한 지표는 전체 평균보다 요일별 기준선을 먼저 보는 편이 좋습니다. 같은 요일끼리 평균을 만든 뒤, 최근 값이 그 기준에서 얼마나 벗어났는지 확인합니다.",
+        formula_note="요일별 기준선은 `b_d = mean(x_t | weekday(t)=d)`로 둡니다. 관측값과 `b_d`의 차이를 보면 반복과 변화가 조금 더 분리됩니다.",
+        closing="요일별 기준선을 따로 세우면 평소 반복과 새 변화가 한 그림 안에서 덜 섞입니다.",
+    ),
+    NotebookStyle(
+        key="distribution-shift",
+        label="Distribution shift",
+        title_prefix="Distribution shift",
+        question_prefix="오늘은 앞부분과 뒷부분의 분포가 같은지 조심스럽게 비교합니다.",
+        title_template="{entity} 분포가 최근에 이동했는지 비교하기",
+        method_note="평균만 비교하면 꼬리나 산포 변화가 사라집니다. 그래서 기간을 둘로 나누고 boxplot과 분위수를 같이 보면서 분포 전체가 움직였는지 확인합니다.",
+        formula_note="분포 이동은 `Q_recent(p) - Q_early(p)`처럼 같은 분위수의 차이로 읽습니다. 중앙값과 꼬리 분위수가 함께 움직이면 변화 해석에 힘이 실립니다.",
+        closing="두 기간의 상자와 분위수 차이를 함께 보면 평균 하나보다 더 입체적인 변화가 보입니다.",
+    ),
+    NotebookStyle(
+        key="threshold-lens",
+        label="Threshold lens",
+        title_prefix="Threshold lens",
+        question_prefix="오늘은 임계값을 바꾸면 판단이 얼마나 달라지는지 살펴봅니다.",
+        title_template="{entity} 판단 기준을 임계값 곡선으로 점검하기",
+        method_note="어떤 기준 이상을 표시할지 정할 때는 임계값 하나를 고정하기 전에 precision과 recall의 균형을 봅니다. 임계값을 여러 개 움직이면 민감한 구간이 드러납니다.",
+        formula_note="기본 지표는 `precision = TP / (TP + FP)`와 `recall = TP / (TP + FN)`입니다. 둘 중 하나만 보면 실제 판단 비용을 놓칠 수 있습니다.",
+        closing="임계값 곡선은 정답 하나를 주기보다, 운영자가 감당할 오탐과 미탐의 균형점을 찾게 해줍니다.",
     ),
 ]
 
@@ -374,6 +469,24 @@ def recent_notebook_topic_keys(rows: list[dict[str, Any]]) -> list[str]:
     return topics
 
 
+def recent_notebook_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for row in rows[:RECENT_PAIR_LOOKBACK]:
+        meta = parse_json_maybe(row.get("data_meta"))
+        topic_key = ""
+        style_key = ""
+        if isinstance(meta, dict):
+            topic = meta.get("topic")
+            style = meta.get("style")
+            topic_key = str(topic.get("key", "") if isinstance(topic, dict) else topic or "").strip()
+            style_key = str(style.get("key", "") if isinstance(style, dict) else style or "").strip()
+        if not topic_key:
+            topic_key = topic_key_from_title(str(row.get("title", "")))
+        if topic_key and style_key:
+            pairs.add((topic_key, style_key))
+    return pairs
+
+
 def topic_key_from_title(title: str) -> str:
     normalized = title.lower()
     for topic in TOPICS:
@@ -390,13 +503,17 @@ def build_public_title(topic: Topic, style: NotebookStyle, existing_titles: set[
         f"{base_title}: 다른 가정으로 다시 보기",
         f"{base_title}: 작은 표본 실험",
         f"{base_title}: 해석 프레임 바꾸기",
+        f"{base_title}: 기준선 바꿔 보기",
+        f"{base_title}: 분포까지 함께 보기",
+        f"{base_title}: 운영 질문으로 다시 읽기",
     ]
+    existing_keys = {title_identity_key(title) for title in existing_titles if title_identity_key(title)}
     start = seed % len(candidates)
     for offset in range(len(candidates)):
         candidate = sanitize_public_title(candidates[(start + offset) % len(candidates)])
-        if candidate not in existing_titles:
+        if candidate not in existing_titles and title_identity_key(candidate) not in existing_keys:
             return candidate
-    return candidates[0]
+    return sanitize_public_title(f"{base_title}: 실험 노트 {(seed % 89) + 11}")
 
 
 def sanitize_public_title(title: str) -> str:
@@ -406,6 +523,13 @@ def sanitize_public_title(title: str) -> str:
     cleaned = re.sub(r"\s*#[0-9a-fA-F]{4,12}\s*$", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:")
     return cleaned or "Web-R Notebook 데이터 분석 노트"
+
+
+def title_identity_key(title: str) -> str:
+    cleaned = sanitize_public_title(title).lower()
+    cleaned = re.sub(r"[:：]\s*(민감도 점검|다른 가정으로 다시 보기|작은 표본 실험|해석 프레임 바꾸기|기준선 바꿔 보기|분포까지 함께 보기|운영 질문으로 다시 읽기|실험 노트 \d+)\s*$", "", cleaned)
+    cleaned = re.sub(r"[^0-9a-z가-힣]+", "", cleaned)
+    return cleaned
 
 
 def parse_json_maybe(value: Any) -> Any:
@@ -497,6 +621,8 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
     base_seed = int(hashlib.sha256(f"webr-notebook:{series_date}".encode("utf-8")).hexdigest()[:8], 16)
     recent_styles = recent_notebook_style_keys(recent_rows)
     recent_topics = recent_notebook_topic_keys(recent_rows)
+    recent_pairs = recent_notebook_pairs(recent_rows)
+    existing_title_keys = {title_identity_key(title) for title in existing_titles if title_identity_key(title)}
     best_spec: dict[str, Any] | None = None
     best_similarity = 1.0
 
@@ -512,19 +638,36 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
             force_new=force_new,
         )
         similarity, matched_title = max_recent_similarity(spec, recent_rows)
+        topic_key = str(spec.get("topic", {}).get("key", ""))
+        style_key = str(spec.get("style", {}).get("key", ""))
+        title_key = title_identity_key(str(spec.get("title", "")))
+        title_duplicate = bool(title_key and title_key in existing_title_keys)
+        pair_duplicate = bool(topic_key and style_key and (topic_key, style_key) in recent_pairs)
+        topic_recent = topic_key in set(recent_topics[:4])
+        style_recent = style_key in set(recent_styles[:3])
+        accepted = (
+            (similarity <= SIMILARITY_THRESHOLD or not recent_rows)
+            and not title_duplicate
+            and not pair_duplicate
+            and not (topic_recent and style_recent)
+        )
         spec["similarity_guard"] = {
             "threshold": SIMILARITY_THRESHOLD,
             "max_similarity": round(similarity, 4),
             "matched_title": matched_title,
             "compared_recent_count": len(recent_rows),
+            "title_duplicate": title_duplicate,
+            "pair_duplicate": pair_duplicate,
+            "topic_recent": topic_recent,
+            "style_recent": style_recent,
             "attempt": attempt + 1,
             "max_attempts": MAX_CANDIDATE_ATTEMPTS,
-            "accepted": similarity <= SIMILARITY_THRESHOLD or not recent_rows,
+            "accepted": accepted,
         }
         if best_spec is None or similarity < best_similarity:
             best_spec = spec
             best_similarity = similarity
-        if spec["similarity_guard"]["accepted"]:
+        if accepted:
             return spec
 
     if best_spec is None:
@@ -581,7 +724,7 @@ def build_candidate_notebook_spec(
 
 
 def choose_style(seed: int, recent_styles: list[str]) -> NotebookStyle:
-    recent = {style for style in recent_styles[:3] if style}
+    recent = {style for style in recent_styles[:RECENT_STYLE_LOOKBACK] if style}
     for offset in range(len(STYLES)):
         candidate = STYLES[(seed + offset) % len(STYLES)]
         if candidate.key not in recent:
@@ -590,7 +733,7 @@ def choose_style(seed: int, recent_styles: list[str]) -> NotebookStyle:
 
 
 def choose_topic(seed: int, recent_topics: list[str], attempt: int) -> Topic:
-    recent = {topic for topic in recent_topics[:4] if topic}
+    recent = {topic for topic in recent_topics[:RECENT_TOPIC_LOOKBACK] if topic}
     start = ((seed // max(1, len(STYLES))) + attempt * 2) % len(TOPICS)
     for offset in range(len(TOPICS)):
         candidate = TOPICS[(start + offset) % len(TOPICS)]
@@ -623,6 +766,15 @@ def build_style_cells(
     elif style.key == "scatter-diagnostics":
         r_setup = build_scatter_diagnostics_r_code(seed=seed, topic=topic, plot_path=plot_path)
         r_summary = build_scatter_diagnostics_summary_r_code(topic)
+    elif style.key == "seasonality-scan":
+        r_setup = build_seasonality_scan_r_code(seed=seed, start_date=start_date, n=n, topic=topic, plot_path=plot_path)
+        r_summary = build_seasonality_scan_summary_r_code(topic)
+    elif style.key == "distribution-shift":
+        r_setup = build_distribution_shift_r_code(seed=seed, start_date=start_date, n=n, topic=topic, plot_path=plot_path)
+        r_summary = build_distribution_shift_summary_r_code(topic)
+    elif style.key == "threshold-lens":
+        r_setup = build_threshold_lens_r_code(seed=seed, topic=topic, plot_path=plot_path)
+        r_summary = build_threshold_lens_summary_r_code(topic)
     else:
         r_setup = build_analysis_r_code(
             seed=seed,
@@ -924,6 +1076,141 @@ cat("model R-squared:", round(fit_summary$r.squared, 3), "\\n")
 cat("exposure coefficient:", round(unname(stats::coef(fit)[["exposure"]]), 3), "\\n")
 cat("large residual points:", flagged, "\\n")
 cat("segment mix:", paste(names(table(points_df$segment)), as.integer(table(points_df$segment)), collapse = ", "), "\\n")
+"""
+
+
+def build_seasonality_scan_r_code(*, seed: int, start_date: str, n: int, topic: Topic, plot_path: str) -> str:
+    return f"""# Seasonality scan: {topic.key}
+set.seed({seed})
+day <- seq.Date(as.Date({r_string(start_date)}), by = "day", length.out = {n})
+weekday <- weekdays(day)
+weekday_order <- weekdays(as.Date("2026-01-05") + 0:6)
+phase <- seq_along(day)
+weekday_effect <- setNames(round(stats::runif(7, -8, 12), 1), weekday_order)
+value <- round(pmax(1, {topic.base} + {topic.slope} * phase + weekday_effect[weekday] + stats::rnorm(length(day), 0, {topic.noise})))
+daily <- data.frame(day = day, weekday = factor(weekday, levels = weekday_order), value = value)
+weekday_summary <- aggregate(value ~ weekday, daily, mean)
+weekday_summary$value <- round(weekday_summary$value, 1)
+recent <- tail(daily, 14)
+recent$weekday_baseline <- weekday_summary$value[match(recent$weekday, weekday_summary$weekday)]
+recent$gap <- recent$value - recent$weekday_baseline
+
+grDevices::svg({r_string(plot_path)}, width = 7.2, height = 4.6, bg = "white")
+op <- par(mar = c(6.0, 4.7, 3.2, 1.2), bg = "white")
+bar_mid <- barplot(
+  weekday_summary$value,
+  names.arg = as.character(weekday_summary$weekday),
+  las = 2,
+  col = {r_string(topic.color)},
+  border = "white",
+  ylab = {r_string(topic.metric)},
+  main = {r_string(topic.title)}
+)
+points(bar_mid, weekday_summary$value, pch = 21, bg = {r_string(topic.accent)}, col = "white", cex = 1.15)
+abline(h = mean(daily$value), col = "#111827", lwd = 2, lty = 2)
+legend("topright", legend = c("weekday baseline", "overall mean"), fill = c({r_string(topic.color)}, NA), border = c("white", NA), lty = c(NA, 2), lwd = c(NA, 2), col = c(NA, "#111827"), bty = "n")
+par(op)
+grDevices::dev.off()
+"""
+
+
+def build_seasonality_scan_summary_r_code(topic: Topic) -> str:
+    return f"""# Seasonality summary
+strongest <- weekday_summary$weekday[which.max(weekday_summary$value)]
+weakest <- weekday_summary$weekday[which.min(weekday_summary$value)]
+largest_recent_gap <- recent[which.max(abs(recent$gap)), ]
+cat({r_string(topic.entity)}, "seasonality scan\\n")
+cat("strongest weekday baseline:", as.character(strongest), "\\n")
+cat("weakest weekday baseline:", as.character(weakest), "\\n")
+cat("largest recent baseline gap:", format(largest_recent_gap$day, "%Y-%m-%d"), round(largest_recent_gap$gap, 1), "\\n")
+cat("recent mean vs full mean:", round(mean(recent$value), 1), "vs", round(mean(daily$value), 1), "\\n")
+"""
+
+
+def build_distribution_shift_r_code(*, seed: int, start_date: str, n: int, topic: Topic, plot_path: str) -> str:
+    return f"""# Distribution shift: {topic.key}
+set.seed({seed})
+day <- seq.Date(as.Date({r_string(start_date)}), by = "day", length.out = {n})
+phase <- seq_along(day)
+period <- ifelse(phase <= floor(length(phase) / 2), "early", "recent")
+shift <- ifelse(period == "recent", stats::runif(1, -4, 10), 0)
+spread <- ifelse(period == "recent", {topic.noise} * stats::runif(1, 0.8, 1.35), {topic.noise})
+value <- round(pmax(1, {topic.base} + {topic.slope} * phase + shift + {topic.amplitude} * sin(2 * pi * phase / 14) + stats::rnorm(length(day), 0, spread)))
+shift_df <- data.frame(day = day, period = factor(period, levels = c("early", "recent")), value = value)
+q_early <- stats::quantile(shift_df$value[shift_df$period == "early"], probs = c(0.1, 0.5, 0.9))
+q_recent <- stats::quantile(shift_df$value[shift_df$period == "recent"], probs = c(0.1, 0.5, 0.9))
+median_shift <- unname(q_recent["50%"] - q_early["50%"])
+
+grDevices::svg({r_string(plot_path)}, width = 7.2, height = 4.6, bg = "white")
+op <- par(mar = c(4.5, 4.7, 3.2, 1.2), bg = "white")
+boxplot(
+  value ~ period,
+  data = shift_df,
+  col = c("#e5e7eb", {r_string(topic.color)}),
+  border = "#111827",
+  ylab = {r_string(topic.metric)},
+  main = {r_string(topic.title)}
+)
+stripchart(value ~ period, data = shift_df, vertical = TRUE, method = "jitter", pch = 21, bg = {r_string(topic.accent)}, col = "white", add = TRUE)
+legend("topleft", legend = c("daily value", "recent period"), pch = c(21, 15), pt.bg = c({r_string(topic.accent)}, {r_string(topic.color)}), col = c("white", {r_string(topic.color)}), bty = "n")
+par(op)
+grDevices::dev.off()
+"""
+
+
+def build_distribution_shift_summary_r_code(topic: Topic) -> str:
+    return f"""# Distribution shift summary
+iqr_early <- stats::IQR(shift_df$value[shift_df$period == "early"])
+iqr_recent <- stats::IQR(shift_df$value[shift_df$period == "recent"])
+cat({r_string(topic.entity)}, "distribution shift\\n")
+cat("early median:", round(unname(q_early["50%"]), 1), "\\n")
+cat("recent median:", round(unname(q_recent["50%"]), 1), "\\n")
+cat("median shift:", round(median_shift, 1), "\\n")
+cat("IQR early vs recent:", round(iqr_early, 1), "vs", round(iqr_recent, 1), "\\n")
+"""
+
+
+def build_threshold_lens_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
+    return f"""# Threshold lens: {topic.key}
+set.seed({seed})
+n <- 220
+segment <- sample(c("low", "middle", "high"), n, replace = TRUE, prob = c(0.36, 0.44, 0.20))
+score <- pmin(1, pmax(0, stats::rbeta(n, shape1 = 2.2 + (segment == "high"), shape2 = 2.8 - 0.4 * (segment == "high"))))
+true_prob <- pmin(0.95, pmax(0.05, 0.18 + 0.62 * score + 0.10 * (segment == "high")))
+outcome <- stats::rbinom(n, size = 1, prob = true_prob)
+thresholds <- seq(0.15, 0.85, by = 0.05)
+metrics <- data.frame(threshold = thresholds, precision = NA_real_, recall = NA_real_, flagged = NA_real_)
+for (i in seq_along(thresholds)) {{
+  predicted <- score >= thresholds[i]
+  tp <- sum(predicted & outcome == 1)
+  fp <- sum(predicted & outcome == 0)
+  fn <- sum(!predicted & outcome == 1)
+  metrics$precision[i] <- ifelse(tp + fp == 0, NA, tp / (tp + fp))
+  metrics$recall[i] <- ifelse(tp + fn == 0, NA, tp / (tp + fn))
+  metrics$flagged[i] <- mean(predicted)
+}}
+metrics$f1 <- 2 * metrics$precision * metrics$recall / (metrics$precision + metrics$recall)
+best <- metrics[which.max(metrics$f1), ]
+
+grDevices::svg({r_string(plot_path)}, width = 7.2, height = 4.6, bg = "white")
+op <- par(mar = c(4.5, 4.7, 3.2, 4.2), bg = "white")
+plot(metrics$threshold, metrics$precision, type = "b", pch = 19, col = {r_string(topic.color)}, ylim = c(0, 1), xlab = "threshold", ylab = "precision / recall", main = {r_string(topic.title)})
+lines(metrics$threshold, metrics$recall, type = "b", pch = 21, bg = {r_string(topic.accent)}, col = {r_string(topic.accent)})
+lines(metrics$threshold, metrics$f1, type = "b", pch = 17, col = "#111827")
+abline(v = best$threshold, col = "#111827", lwd = 2, lty = 2)
+legend("bottomleft", legend = c("precision", "recall", "F1", "best threshold"), col = c({r_string(topic.color)}, {r_string(topic.accent)}, "#111827", "#111827"), pch = c(19, 21, 17, NA), lty = c(1, 1, 1, 2), bty = "n")
+par(op)
+grDevices::dev.off()
+"""
+
+
+def build_threshold_lens_summary_r_code(topic: Topic) -> str:
+    return f"""# Threshold lens summary
+cat({r_string(topic.entity)}, "threshold lens\\n")
+cat("best threshold:", round(best$threshold, 2), "\\n")
+cat("precision at best:", round(best$precision, 3), "\\n")
+cat("recall at best:", round(best$recall, 3), "\\n")
+cat("flagged share at best:", paste0(round(100 * best$flagged, 1), "%"), "\\n")
 """
 
 

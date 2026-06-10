@@ -225,6 +225,7 @@ def main() -> int:
         "catalog_token": workshop_catalog_token(workshop_manifest_items, workshop_posts),
         "items": workshop_manifest_items,
     }
+    current_payload_paths = {rel_path for rel_path, _payload in payloads.values()}
 
     if args.dry_run:
         print(json.dumps({
@@ -249,6 +250,9 @@ def main() -> int:
     workshop_manifest_path = f"community/{language}/workshop/index.json"
     encrypted_workshop_manifest = encrypt_document(workshop_manifest, key, workshop_manifest_path, language, "")
     write_json_atomic(cdn_root / workshop_manifest_path, encrypted_workshop_manifest)
+    pruned_payloads = 0
+    if args.limit <= 0:
+        pruned_payloads = prune_stale_notebook_payloads(cdn_root, language, current_payload_paths)
 
     print(json.dumps({
         "digest": len(digest_rows),
@@ -259,6 +263,7 @@ def main() -> int:
         "workshop_export": len(workshop_manifest_items),
         "export": len(payloads),
         "duplicates": duplicate_count,
+        "pruned_payloads": pruned_payloads,
     }, ensure_ascii=False))
     return 0
 
@@ -786,6 +791,20 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
         tmp.write(body)
         tmp_path = Path(tmp.name)
     tmp_path.replace(path)
+
+
+def prune_stale_notebook_payloads(cdn_root: Path, language: str, current_payload_paths: set[str]) -> int:
+    notebook_root = cdn_root / "community" / language / "notebook"
+    if not notebook_root.exists():
+        return 0
+    pruned = 0
+    for path in notebook_root.rglob("*.json"):
+        rel_path = path.relative_to(cdn_root).as_posix()
+        if rel_path in current_payload_paths:
+            continue
+        path.unlink()
+        pruned += 1
+    return pruned
 
 
 def published_year_month(value: str) -> tuple[str, str]:
