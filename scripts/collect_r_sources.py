@@ -53,6 +53,9 @@ TRACKING_QUERY_KEYS = {
     "source",
 }
 DEFAULT_USER_AGENT = "StatgroundRCollector/1.0 (+https://www.statground.net)"
+DEFAULT_REDDIT_REQUEST_DELAY = 2.0
+DEFAULT_REDDIT_429_COOLDOWN = 12.0
+DEFAULT_REQUIRED_REDDIT_SOURCE_IDS = ("reddit:r/rstats", "reddit:r/rprogramming")
 
 
 @dataclass
@@ -92,7 +95,10 @@ class RSourceCollector:
         self.counts: dict[str, int] = defaultdict(int)
         self.seen: set[str] = set()
         self.seen_canonical: set[str] = set()
+        self.source_observed_latest_item_at: dict[str, dt.datetime] = {}
         self.started_at = dt.datetime.now(KST).isoformat(timespec="seconds")
+        self.reddit_request_delay = env_float("R_COMMUNITY_REDDIT_REQUEST_DELAY", max(request_delay, DEFAULT_REDDIT_REQUEST_DELAY))
+        self.reddit_429_cooldown = env_float("R_COMMUNITY_REDDIT_429_COOLDOWN", DEFAULT_REDDIT_429_COOLDOWN)
         self.session = self._make_session()
         self.context = {
             "year": dt.datetime.now(KST).year,
@@ -127,6 +133,7 @@ class RSourceCollector:
         sources = self.config.get("sources", [])
         if not isinstance(sources, list):
             raise CollectorError("config.sources must be a list")
+        sources = prioritize_required_reddit_sources(sources)
 
         for source in sources:
             if not source.get("enabled", True):
@@ -153,7 +160,14 @@ class RSourceCollector:
                 else:
                     raise CollectorError(f"unknown source type: {source_type}")
             except Exception as exc:  # noqa: BLE001 - every source must be isolated
-                logging.exception("source failed id=%s", source_id)
+                if (
+                    source_type == "reddit_subreddit"
+                    and str(source_id or "").strip() not in required_reddit_source_ids()
+                    and is_transient_reddit_error(str(exc))
+                ):
+                    logging.warning("optional reddit source transient failed id=%s err=%s", source_id, exc)
+                else:
+                    logging.exception("source failed id=%s", source_id)
                 self.errors.append(
                     {
                         "source_id": source_id,
@@ -162,14 +176,49 @@ class RSourceCollector:
                         "message": str(exc),
                     }
                 )
+        self._retry_missing_required_reddit_sources(sources)
         return self.items
 
-    def fetch(self, url: str, *, accept: str | None = None) -> requests.Response:
+    def _retry_missing_required_reddit_sources(self, sources: list[dict[str, Any]]) -> None:
+        required_ids = required_reddit_source_ids()
+        attempts = max(0, int(env_float("R_COMMUNITY_REDDIT_REQUIRED_RETRY_ATTEMPTS", 2)))
+        if attempts <= 0:
+            return
+        source_by_id = {
+            str(source.get("id") or "").strip(): source
+            for source in sources
+            if isinstance(source, dict) and source.get("type") == "reddit_subreddit" and source.get("enabled", True)
+        }
+        for source_id in sorted(required_ids):
+            source = source_by_id.get(source_id)
+            if not source or self.counts.get(source_id, 0) > 0:
+                continue
+            if self.source_inactive_for_collection_window(source_id):
+                logging.info("skip required reddit retry id=%s reason=upstream_inactive_for_collection_window", source_id)
+                continue
+            source_errors = [error for error in self.errors if error.get("source_id") == source_id]
+            if source_errors and not any(is_transient_reddit_error(str(error.get("message") or "")) for error in source_errors):
+                continue
+            for attempt in range(1, attempts + 1):
+                if self.reddit_429_cooldown > 0:
+                    time.sleep(self.reddit_429_cooldown)
+                logging.warning("retry missing required reddit source id=%s attempt=%s/%s", source_id, attempt, attempts)
+                before = self.counts.get(source_id, 0)
+                try:
+                    self.collect_reddit_subreddit(source)
+                except Exception as exc:  # noqa: BLE001
+                    logging.warning("required reddit retry failed id=%s attempt=%s err=%s", source_id, attempt, exc)
+                    continue
+                if self.counts.get(source_id, 0) > before:
+                    self.errors = [error for error in self.errors if error.get("source_id") != source_id]
+                    break
+
+    def fetch(self, url: str, *, accept: str | None = None, min_delay: float | None = None) -> requests.Response:
         if accept:
             headers = {"Accept": accept}
         else:
             headers = None
-        time.sleep(self.request_delay)
+        time.sleep(max(self.request_delay, float(min_delay or 0)))
         response = self.session.get(url, headers=headers, timeout=25)
         response.raise_for_status()
         return response
@@ -252,8 +301,16 @@ class RSourceCollector:
         for item in feed_items:
             self.add_item(item)
 
-    def _parse_feed_url(self, url: str, *, source: dict[str, Any], source_id: str, source_url: str) -> list[NormalizedItem]:
-        response = self.fetch(url)
+    def _parse_feed_url(
+        self,
+        url: str,
+        *,
+        source: dict[str, Any],
+        source_id: str,
+        source_url: str,
+        min_delay: float | None = None,
+    ) -> list[NormalizedItem]:
+        response = self.fetch(url, min_delay=min_delay)
         parsed = feedparser.parse(response.content)
         if getattr(parsed, "bozo", False):
             logging.warning("feed parse warning source_id=%s url=%s error=%r", source_id, url, getattr(parsed, "bozo_exception", None))
@@ -271,6 +328,7 @@ class RSourceCollector:
                 continue
             native_id = entry.get("id") or entry.get("guid") or link
             published_at = entry_datetime(entry)
+            self.record_source_observed_item_at(source_id, published_at)
             if self.since_days is not None and published_at:
                 parsed_at = parse_datetime(published_at)
                 cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=self.since_days)
@@ -370,6 +428,23 @@ class RSourceCollector:
         ]
         collected = 0
         last_error: Exception | None = None
+        rss_first = env_bool("R_COMMUNITY_REDDIT_RSS_FIRST", True)
+        is_required_source = source_id in required_reddit_source_ids()
+        if rss_first:
+            collected, last_error, rss_reachable = self._collect_reddit_rss_urls(
+                source,
+                source_id,
+                source_url,
+                subreddit,
+                configured_subreddit,
+                rss_urls,
+                is_required_source=is_required_source,
+            )
+            if collected or rss_reachable:
+                return
+            if last_error and not is_required_source and is_transient_reddit_error(str(last_error)):
+                raise last_error
+
         if source.get("json_fallback", True):
             try:
                 collected = self._collect_reddit_json(source, source_id, source_url, subreddit, limit)
@@ -377,11 +452,47 @@ class RSourceCollector:
                     return
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                self._cooldown_after_reddit_429(exc, subreddit, is_required_source=is_required_source)
                 logging.warning("reddit json failed subreddit=%s err=%s", subreddit, exc)
 
+        if not rss_first:
+            collected, last_error, rss_reachable = self._collect_reddit_rss_urls(
+                source,
+                source_id,
+                source_url,
+                subreddit,
+                configured_subreddit,
+                rss_urls,
+                is_required_source=is_required_source,
+            )
+            if collected or rss_reachable:
+                return
+
+        if last_error:
+            raise last_error
+
+    def _collect_reddit_rss_urls(
+        self,
+        source: dict[str, Any],
+        source_id: str,
+        source_url: str,
+        subreddit: str,
+        configured_subreddit: str,
+        rss_urls: list[str],
+        *,
+        is_required_source: bool,
+    ) -> tuple[int, Exception | None, bool]:
+        collected = 0
+        last_error: Exception | None = None
         for rss_url in rss_urls:
             try:
-                feed_items = self._parse_feed_url(rss_url, source=source, source_id=source_id, source_url=source_url)
+                feed_items = self._parse_feed_url(
+                    rss_url,
+                    source=source,
+                    source_id=source_id,
+                    source_url=source_url,
+                    min_delay=self.reddit_request_delay,
+                )
                 for item in feed_items:
                     # Reddit Atom entries may include HTML tables; keep plain text only.
                     item.platform = "reddit"
@@ -391,18 +502,18 @@ class RSourceCollector:
                     item.raw["subreddit"] = subreddit
                     self.add_item(item)
                     collected += 1
-                if collected:
-                    return
+                return collected, None, True
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                self._cooldown_after_reddit_429(exc, subreddit, is_required_source=is_required_source)
                 logging.warning("reddit rss failed subreddit=%s url=%s err=%s", subreddit, rss_url, exc)
-
-        if last_error:
-            raise last_error
+                if not is_required_source and is_transient_reddit_error(str(exc)):
+                    return collected, last_error, False
+        return collected, last_error, False
 
     def _collect_reddit_json(self, source: dict[str, Any], source_id: str, source_url: str, subreddit: str, limit: int) -> int:
         url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={limit}"
-        response = self.fetch(url, accept="application/json")
+        response = self.fetch(url, accept="application/json", min_delay=self.reddit_request_delay)
         data = response.json()
         collected = 0
         for child in data.get("data", {}).get("children", []):
@@ -425,6 +536,7 @@ class RSourceCollector:
             published = None
             if post.get("created_utc") is not None:
                 published = dt.datetime.fromtimestamp(float(post["created_utc"]), tz=dt.timezone.utc).astimezone(KST).isoformat(timespec="seconds")
+            self.record_source_observed_item_at(source_id, published)
             item = self.make_item(
                 source=source,
                 source_id=source_id,
@@ -476,6 +588,35 @@ class RSourceCollector:
             self.add_item(item)
             collected += 1
         return collected
+
+    def record_source_observed_item_at(self, source_id: str, value: str | None) -> None:
+        parsed = parse_datetime(value)
+        if parsed is None:
+            return
+        parsed = parsed.astimezone(KST)
+        if source_id not in self.source_observed_latest_item_at or parsed > self.source_observed_latest_item_at[source_id]:
+            self.source_observed_latest_item_at[source_id] = parsed
+
+    def source_inactive_for_collection_window(self, source_id: str) -> bool:
+        observed = self.source_observed_latest_item_at.get(source_id)
+        if observed is None or self.since_days is None or self.since_days < 0:
+            return False
+        started = parse_datetime(self.started_at) or dt.datetime.now(KST)
+        cutoff = started.astimezone(dt.timezone.utc) - dt.timedelta(days=float(self.since_days))
+        return observed.astimezone(dt.timezone.utc) < cutoff
+
+    def _cooldown_after_reddit_429(self, exc: Exception, subreddit: str, *, is_required_source: bool) -> None:
+        if self.reddit_429_cooldown <= 0:
+            return
+        message = str(exc).lower()
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code != 429 and not is_transient_reddit_error(message):
+            return
+        if not is_required_source:
+            return
+        logging.warning("reddit rate limited subreddit=%s cooldown=%.1fs", subreddit, self.reddit_429_cooldown)
+        time.sleep(self.reddit_429_cooldown)
 
     def collect_mastodon_tag(self, source: dict[str, Any]) -> None:
         tag = source["tag"].strip().lstrip("#")
@@ -1043,6 +1184,13 @@ class RSourceCollector:
                 for row in rows:
                     fp.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
         source_latest_item_at = latest_item_at_by_source(rows)
+        observed_latest_item_at = dict(source_latest_item_at)
+        observed_latest_item_at.update(
+            {
+                source_id: value.isoformat(timespec="seconds")
+                for source_id, value in self.source_observed_latest_item_at.items()
+            }
+        )
         report = {
             "started_at": self.started_at,
             "finished_at": dt.datetime.now(KST).isoformat(timespec="seconds"),
@@ -1050,6 +1198,7 @@ class RSourceCollector:
             "item_count": len(rows),
             "source_counts": dict(sorted(self.counts.items())),
             "source_latest_item_at": dict(sorted(source_latest_item_at.items())),
+            "source_observed_latest_item_at": dict(sorted(observed_latest_item_at.items())),
             "error_count": len(self.errors),
             "errors": self.errors,
         }
@@ -1701,6 +1850,45 @@ def env_bool(name: str, default: bool = False) -> bool:
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return max(0.0, parsed)
+
+
+def split_csv(value: str | None) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def required_reddit_source_ids() -> set[str]:
+    values = set(DEFAULT_REQUIRED_REDDIT_SOURCE_IDS)
+    values.update(value for value in split_csv(os.environ.get("R_COMMUNITY_REQUIRED_SOURCE_IDS", "")) if value.startswith("reddit:"))
+    return values
+
+
+def prioritize_required_reddit_sources(sources: list[Any]) -> list[Any]:
+    required = required_reddit_source_ids()
+    indexed = list(enumerate(sources))
+
+    def priority(item: tuple[int, Any]) -> tuple[int, int]:
+        index, source = item
+        if isinstance(source, dict) and str(source.get("id") or "").strip() in required:
+            return (0, index)
+        return (1, index)
+
+    return [source for _, source in sorted(indexed, key=priority)]
+
+
+def is_transient_reddit_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return "429" in lowered or "too many" in lowered or "temporarily unavailable" in lowered or "503" in lowered
 
 
 def json_safe(value: Any) -> Any:

@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +48,15 @@ def main() -> int:
         if source_id:
             errors_by_source[source_id].append(str(error.get("message") or error.get("error_type") or "collector error"))
 
+    report_observed_latest = report.get("source_observed_latest_item_at") or {}
+    if not isinstance(report_observed_latest, dict):
+        report_observed_latest = {}
+
     for source_id in required:
-        if errors_by_source.get(source_id):
+        inactive_for_window = source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
+        if errors_by_source.get(source_id) and not inactive_for_window:
             failures.append(f"{source_id} failed: {errors_by_source[source_id][0]}")
-        if int(source_counts.get(source_id) or 0) <= 0:
+        if int(source_counts.get(source_id) or 0) <= 0 and not inactive_for_window:
             failures.append(f"{source_id} produced no rows")
 
     rows_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -71,7 +76,8 @@ def main() -> int:
     for source_id in required:
         latest = latest_by_source.get(source_id)
         if latest is None:
-            failures.append(f"{source_id} has no parseable published_at")
+            if not source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or "")):
+                failures.append(f"{source_id} has no parseable published_at")
             continue
         age_days = (now - latest).total_seconds() / 86400
         if age_days > args.max_source_age_days:
@@ -102,6 +108,10 @@ def main() -> int:
                 report_latest.get(source_id)
                 or (latest_by_source[source_id].isoformat() if source_id in latest_by_source else "")
             )
+            for source_id in required
+        },
+        "required_observed_latest_item_at": {
+            source_id: str(report_observed_latest.get(source_id) or "")
             for source_id in required
         },
         "reddit_sources_checked": len(reddit_sources),
@@ -153,6 +163,24 @@ def merge_required_sources(defaults: tuple[str, ...], csv_value: str, explicit: 
 
 def split_csv(value: str) -> list[str]:
     return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def source_inactive_for_collection_window(report: dict[str, Any], observed_value: str) -> bool:
+    observed = parse_datetime(observed_value)
+    if observed is None:
+        return False
+    since_days = report.get("since_days")
+    if since_days is None:
+        return False
+    try:
+        since_days_float = float(since_days)
+    except (TypeError, ValueError):
+        return False
+    if since_days_float < 0:
+        return False
+    started = parse_datetime(str(report.get("started_at") or "")) or datetime.now(timezone.utc)
+    cutoff = started.astimezone(timezone.utc) - timedelta(days=since_days_float)
+    return observed.astimezone(timezone.utc) < cutoff
 
 
 def reddit_source_map(config: dict[str, Any]) -> dict[str, str]:

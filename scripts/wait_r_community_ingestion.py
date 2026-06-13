@@ -324,6 +324,7 @@ def source_visibility(
         latest_dt = parse_datetime_value(latest_source_at)
         collection_latest_at = str(collected.get("latest_item_at") or "")
         collection_latest_dt = parse_datetime_value(collection_latest_at)
+        observed_latest_at = str(collected.get("observed_latest_item_at") or "")
         collected_rows = int(collected.get("rows") or 0)
         summary[source_id] = {
             "latest_after_cutoff": latest_after,
@@ -333,8 +334,12 @@ def source_visibility(
             "raw_event_ingested_at": events.get("raw_event_ingested_at") or "",
             "collection_rows": collected_rows,
             "collection_latest_item_at": collection_latest_at,
+            "collection_observed_latest_item_at": observed_latest_at,
         }
         if latest_after <= 0 and raw_after <= 0:
+            if bool(collected.get("inactive_for_collection_window")):
+                summary[source_id]["satisfied_by"] = "upstream_inactive_for_collection_window"
+                continue
             existing_reason = fresh_existing_current_reason(now, latest_dt, collection_latest_dt, collected_rows, max_source_age_days)
             if existing_reason:
                 summary[source_id]["satisfied_by"] = existing_reason
@@ -353,6 +358,7 @@ def source_visibility(
 def collection_source_summary(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     counts = report.get("source_counts") or {}
     latest = report.get("source_latest_item_at") or {}
+    observed_latest = report.get("source_observed_latest_item_at") or {}
     out: dict[str, dict[str, Any]] = {}
     if isinstance(counts, dict):
         for source_id, count in counts.items():
@@ -363,15 +369,42 @@ def collection_source_summary(report: dict[str, Any]) -> dict[str, dict[str, Any
                 rows = int(count or 0)
             except (TypeError, ValueError):
                 rows = 0
-            out[key] = {"rows": rows, "latest_item_at": ""}
+            out[key] = {"rows": rows, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False}
     if isinstance(latest, dict):
         for source_id, value in latest.items():
             key = str(source_id or "").strip()
             if not key:
                 continue
-            out.setdefault(key, {"rows": 0, "latest_item_at": ""})
+            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False})
             out[key]["latest_item_at"] = str(value or "").strip()
+    if isinstance(observed_latest, dict):
+        for source_id, value in observed_latest.items():
+            key = str(source_id or "").strip()
+            if not key:
+                continue
+            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False})
+            observed = str(value or "").strip()
+            out[key]["observed_latest_item_at"] = observed
+            out[key]["inactive_for_collection_window"] = source_inactive_for_collection_window(report, observed)
     return out
+
+
+def source_inactive_for_collection_window(report: dict[str, Any], observed_value: str) -> bool:
+    observed = parse_datetime_value(observed_value)
+    if observed is None:
+        return False
+    since_days = report.get("since_days")
+    if since_days is None:
+        return False
+    try:
+        since_days_float = float(since_days)
+    except (TypeError, ValueError):
+        return False
+    if since_days_float < 0:
+        return False
+    started = parse_datetime_value(str(report.get("started_at") or "")) or datetime.now(KST)
+    cutoff = started.astimezone(timezone.utc) - timedelta(days=since_days_float)
+    return observed.astimezone(timezone.utc) < cutoff
 
 
 def fresh_existing_current_reason(

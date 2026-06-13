@@ -127,7 +127,7 @@ sources:
     tags: [R, Bioconductor, packages, release-notes]
 
   # ---------------------------------------------------------------------------
-  # Reddit R communities. API key 없이 RSS 우선, public JSON fallback 사용.
+  # Reddit R communities. API key 없이 RSS/Atom 우선, public JSON fallback 사용.
   # ---------------------------------------------------------------------------
   - id: reddit:r/rstats
     type: reddit_subreddit

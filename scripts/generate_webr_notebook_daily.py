@@ -34,6 +34,7 @@ RECENT_STYLE_LOOKBACK = 5
 RECENT_TOPIC_LOOKBACK = 8
 RECENT_PAIR_LOOKBACK = 16
 SIMILARITY_THRESHOLD = 0.42
+R_SET_SEED_MAX = 2_147_483_647
 STOP_TOKENS = {
     "action",
     "active",
@@ -718,6 +719,7 @@ def build_candidate_notebook_spec(
         "topic": topic.__dict__,
         "style": style.__dict__,
         "seed": seed,
+        "r_seed": r_seed_value(seed),
         "candidate_attempt": attempt,
         "cells": cells,
     }
@@ -822,7 +824,7 @@ def build_style_cells(
 
 def build_analysis_r_code(*, seed: int, start_date: str, n: int, change_point: int, effect: int, topic: Topic, plot_path: str) -> str:
     return f"""# WebR data analysis note: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 day <- seq.Date(as.Date({r_string(start_date)}), by = "day", length.out = {n})
 phase <- seq_along(day)
 baseline <- {topic.base} + ({topic.slope}) * phase + {topic.amplitude} * sin(2 * pi * phase / 7)
@@ -883,7 +885,7 @@ cat("flagged days:", flag_text, "\\n")
 
 def build_ranked_audit_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
     return f"""# Ranked audit: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 channel <- c("docs", "search", "examples", "forum", "video", "newsletter", "package page", "workshop")
 raw_score <- {topic.base} + stats::rpois(length(channel), lambda = seq(12, 34, length.out = length(channel)))
 tilt <- round(seq(length(channel), 1) * runif(length(channel), 0.5, 2.2))
@@ -931,7 +933,7 @@ cat("smallest channel:", tail(audit$channel, 1), "with", tail(audit$value, 1), "
 
 def build_bootstrap_lab_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
     return f"""# Bootstrap lab: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 n_control <- 180
 n_treatment <- 176
 p_control <- pmin(0.82, pmax(0.08, {topic.base} / ({topic.base} + 180)))
@@ -978,7 +980,7 @@ cat("Pr(lift > 0):", round(prob_positive, 3), "=>", label, "\\n")
 
 def build_cohort_map_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
     return f"""# Cohort map: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 cohort_labels <- paste("cohort", LETTERS[1:6])
 week <- 0:5
 start_level <- runif(length(cohort_labels), 0.74, 0.93)
@@ -1034,7 +1036,7 @@ cat("matrix size:", nrow(retention), "cohorts x", ncol(retention), "weeks\\n")
 
 def build_scatter_diagnostics_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
     return f"""# Scatter diagnostics: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 n <- 72
 exposure <- round(stats::runif(n, 15, 100), 1)
 segment <- sample(c("small", "medium", "large"), n, replace = TRUE, prob = c(0.38, 0.42, 0.20))
@@ -1081,7 +1083,7 @@ cat("segment mix:", paste(names(table(points_df$segment)), as.integer(table(poin
 
 def build_seasonality_scan_r_code(*, seed: int, start_date: str, n: int, topic: Topic, plot_path: str) -> str:
     return f"""# Seasonality scan: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 day <- seq.Date(as.Date({r_string(start_date)}), by = "day", length.out = {n})
 weekday <- weekdays(day)
 weekday_order <- weekdays(as.Date("2026-01-05") + 0:6)
@@ -1129,7 +1131,7 @@ cat("recent mean vs full mean:", round(mean(recent$value), 1), "vs", round(mean(
 
 def build_distribution_shift_r_code(*, seed: int, start_date: str, n: int, topic: Topic, plot_path: str) -> str:
     return f"""# Distribution shift: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 day <- seq.Date(as.Date({r_string(start_date)}), by = "day", length.out = {n})
 phase <- seq_along(day)
 period <- ifelse(phase <= floor(length(phase) / 2), "early", "recent")
@@ -1172,7 +1174,7 @@ cat("IQR early vs recent:", round(iqr_early, 1), "vs", round(iqr_recent, 1), "\\
 
 def build_threshold_lens_r_code(*, seed: int, topic: Topic, plot_path: str) -> str:
     return f"""# Threshold lens: {topic.key}
-set.seed({seed})
+set.seed({r_seed_value(seed)})
 n <- 220
 segment <- sample(c("low", "middle", "high"), n, replace = TRUE, prob = c(0.36, 0.44, 0.20))
 score <- pmin(1, pmax(0, stats::rbeta(n, shape1 = 2.2 + (segment == "high"), shape2 = 2.8 - 0.4 * (segment == "high"))))
@@ -1218,6 +1220,10 @@ def r_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def r_seed_value(seed: int) -> int:
+    return ((int(seed) - 1) % R_SET_SEED_MAX) + 1
+
+
 def run_webr_runner(runner: Path, spec: dict[str, Any]) -> dict[str, Any]:
     if not runner.exists():
         raise SystemExit(f"webR runner is missing: {runner}")
@@ -1257,7 +1263,7 @@ def build_style_validation_spec() -> dict[str, Any]:
             style=style,
             topic=topic,
             title=f"Template validation: {style.label}",
-            seed=9100 + index * 137,
+            seed=3_340_467_507 + index * 137,
             start_date="2026-01-01",
             n=60,
             change_point=34 + index,
