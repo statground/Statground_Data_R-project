@@ -309,6 +309,11 @@ jobs:
       - name: Validate R Community collection report
         env:
           R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || '' }}
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_DATABASE: Data_R_Community_Service
         run: |
           python scripts/validate_r_community_collection.py \
             --config config/r_sources.yaml \
@@ -347,6 +352,7 @@ jobs:
         run: |
           go run ./cmd/rproject-collector community \
             --jsonl data/collected/r/latest.jsonl \
+            --report data/collected/r/latest_report.json \
             --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --limit "$R_COMMUNITY_EVENT_LIMIT" \
             --translate="$R_COMMUNITY_TRANSLATE_ENABLED" \

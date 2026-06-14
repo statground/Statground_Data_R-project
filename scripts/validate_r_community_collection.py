@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from clickhouse_http import build_clickhouse_url
 from collect_r_sources import normalize_subreddit_name, parse_datetime
 
 
@@ -52,11 +57,21 @@ def main() -> int:
     if not isinstance(report_observed_latest, dict):
         report_observed_latest = {}
 
+    live_fresh_by_source: dict[str, dict[str, Any]] = {}
+    satisfied_by: dict[str, str] = {}
     for source_id in required:
         inactive_for_window = source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
-        if errors_by_source.get(source_id) and not inactive_for_window:
+        if (
+            errors_by_source.get(source_id)
+            and not inactive_for_window
+            and source_unavailable_error(errors_by_source[source_id])
+        ):
+            live_fresh_by_source[source_id] = live_current_freshness(source_id, args.max_source_age_days)
+            if live_fresh_by_source[source_id].get("fresh"):
+                satisfied_by[source_id] = "live_current_after_source_unavailable"
+        if errors_by_source.get(source_id) and not inactive_for_window and source_id not in satisfied_by:
             failures.append(f"{source_id} failed: {errors_by_source[source_id][0]}")
-        if int(source_counts.get(source_id) or 0) <= 0 and not inactive_for_window:
+        if int(source_counts.get(source_id) or 0) <= 0 and not inactive_for_window and source_id not in satisfied_by:
             failures.append(f"{source_id} produced no rows")
 
     rows_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -76,7 +91,10 @@ def main() -> int:
     for source_id in required:
         latest = latest_by_source.get(source_id)
         if latest is None:
-            if not source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or "")):
+            if (
+                not source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
+                and source_id not in satisfied_by
+            ):
                 failures.append(f"{source_id} has no parseable published_at")
             continue
         age_days = (now - latest).total_seconds() / 86400
@@ -113,6 +131,15 @@ def main() -> int:
         "required_observed_latest_item_at": {
             source_id: str(report_observed_latest.get(source_id) or "")
             for source_id in required
+        },
+        "required_satisfied_by": {
+            source_id: satisfied_by.get(source_id, "")
+            for source_id in required
+        },
+        "required_live_current": {
+            source_id: live_fresh_by_source.get(source_id, {})
+            for source_id in required
+            if source_id in live_fresh_by_source
         },
         "reddit_sources_checked": len(reddit_sources),
         "rows": len(rows),
@@ -181,6 +208,81 @@ def source_inactive_for_collection_window(report: dict[str, Any], observed_value
     started = parse_datetime(str(report.get("started_at") or "")) or datetime.now(timezone.utc)
     cutoff = started.astimezone(timezone.utc) - timedelta(days=since_days_float)
     return observed.astimezone(timezone.utc) < cutoff
+
+
+def source_unavailable_error(messages: list[str]) -> bool:
+    haystack = "\n".join(str(message or "").lower() for message in messages)
+    return any(token in haystack for token in ("403", "blocked", "forbidden", "429", "too many", "503", "temporarily unavailable"))
+
+
+def live_current_freshness(source_id: str, max_age_days: float) -> dict[str, Any]:
+    try:
+        rows = query_clickhouse_json_each_row(
+            f"""
+            SELECT
+                count() AS rows,
+                ifNull(formatDateTime(max(coalesce(original_published_at, collected_at)), '%Y-%m-%d %H:%i:%S', 'Asia/Seoul'), '') AS latest_source_at
+            FROM Data_R_Community_Service.r_community_item_read_current
+            WHERE source_id = {clickhouse_quote(source_id)}
+              AND active = 1
+              AND notEmpty(title)
+              AND notEmpty(canonical_url)
+            FORMAT JSONEachRow
+            """
+        )
+    except RuntimeError as exc:
+        return {"fresh": False, "reason": str(exc)}
+    row = rows[0] if rows else {}
+    latest_source_at = str(row.get("latest_source_at") or "")
+    latest = parse_datetime(latest_source_at)
+    if latest is None:
+        return {"fresh": False, "rows": int(row.get("rows") or 0), "latest_source_at": latest_source_at, "reason": "no_parseable_live_current_timestamp"}
+    age_days = (datetime.now(timezone.utc) - latest.astimezone(timezone.utc)).total_seconds() / 86400
+    return {
+        "fresh": int(row.get("rows") or 0) > 0 and age_days <= max_age_days,
+        "rows": int(row.get("rows") or 0),
+        "latest_source_at": latest_source_at,
+        "age_days": round(age_days, 3),
+    }
+
+
+def query_clickhouse_json_each_row(sql: str) -> list[dict[str, Any]]:
+    user = first_env("CH_USER", "CLICKHOUSE_USER")
+    password = first_env("CH_PASSWORD", "CLICKHOUSE_PASSWORD")
+    if not user:
+        raise RuntimeError("clickhouse_user_missing")
+    try:
+        url = build_clickhouse_url(default_format="JSONEachRow", max_execution_time="30", max_threads="1")
+    except RuntimeError as exc:
+        raise RuntimeError("clickhouse_url_missing") from exc
+    request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
+    request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
+    request.add_header("Content-Type", "text/plain; charset=utf-8")
+    try:
+        with urllib.request.urlopen(request, timeout=35) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"clickhouse_http_{exc.code}") from exc
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"clickhouse_{exc.__class__.__name__}") from exc
+    out: list[dict[str, Any]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def first_env(*names: str) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def clickhouse_quote(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def reddit_source_map(config: dict[str, Any]) -> dict[str, str]:

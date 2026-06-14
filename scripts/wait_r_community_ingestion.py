@@ -340,6 +340,9 @@ def source_visibility(
             if bool(collected.get("inactive_for_collection_window")):
                 summary[source_id]["satisfied_by"] = "upstream_inactive_for_collection_window"
                 continue
+            if bool(collected.get("source_unavailable")) and live_current_fresh_after_unavailable(now, latest_dt, max_source_age_days):
+                summary[source_id]["satisfied_by"] = "live_current_after_source_unavailable"
+                continue
             existing_reason = fresh_existing_current_reason(now, latest_dt, collection_latest_dt, collected_rows, max_source_age_days)
             if existing_reason:
                 summary[source_id]["satisfied_by"] = existing_reason
@@ -359,6 +362,7 @@ def collection_source_summary(report: dict[str, Any]) -> dict[str, dict[str, Any
     counts = report.get("source_counts") or {}
     latest = report.get("source_latest_item_at") or {}
     observed_latest = report.get("source_observed_latest_item_at") or {}
+    errors = report.get("errors") or []
     out: dict[str, dict[str, Any]] = {}
     if isinstance(counts, dict):
         for source_id, count in counts.items():
@@ -369,23 +373,34 @@ def collection_source_summary(report: dict[str, Any]) -> dict[str, dict[str, Any
                 rows = int(count or 0)
             except (TypeError, ValueError):
                 rows = 0
-            out[key] = {"rows": rows, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False}
+            out[key] = {"rows": rows, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False, "source_unavailable": False}
     if isinstance(latest, dict):
         for source_id, value in latest.items():
             key = str(source_id or "").strip()
             if not key:
                 continue
-            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False})
+            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False, "source_unavailable": False})
             out[key]["latest_item_at"] = str(value or "").strip()
     if isinstance(observed_latest, dict):
         for source_id, value in observed_latest.items():
             key = str(source_id or "").strip()
             if not key:
                 continue
-            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False})
+            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False, "source_unavailable": False})
             observed = str(value or "").strip()
             out[key]["observed_latest_item_at"] = observed
             out[key]["inactive_for_collection_window"] = source_inactive_for_collection_window(report, observed)
+    if isinstance(errors, list):
+        for error in errors:
+            if not isinstance(error, dict):
+                continue
+            key = str(error.get("source_id") or "").strip()
+            if not key:
+                continue
+            out.setdefault(key, {"rows": 0, "latest_item_at": "", "observed_latest_item_at": "", "inactive_for_collection_window": False, "source_unavailable": False})
+            message = "\n".join(str(error.get(field) or "") for field in ("error_type", "message"))
+            if source_unavailable_error(message):
+                out[key]["source_unavailable"] = True
     return out
 
 
@@ -407,6 +422,11 @@ def source_inactive_for_collection_window(report: dict[str, Any], observed_value
     return observed.astimezone(timezone.utc) < cutoff
 
 
+def source_unavailable_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(token in lowered for token in ("403", "blocked", "forbidden", "429", "too many", "503", "temporarily unavailable"))
+
+
 def fresh_existing_current_reason(
     now: datetime,
     latest_dt: datetime | None,
@@ -422,6 +442,13 @@ def fresh_existing_current_reason(
     if collection_latest_dt is not None and latest_dt + timedelta(minutes=5) < collection_latest_dt:
         return ""
     return "existing_current_fresh_after_skip_existing"
+
+
+def live_current_fresh_after_unavailable(now: datetime, latest_dt: datetime | None, max_source_age_days: float) -> bool:
+    if latest_dt is None:
+        return False
+    age_days = (now - latest_dt).total_seconds() / 86400
+    return age_days <= max_source_age_days
 
 
 def digest_lag(source_types: tuple[str, ...], excluded_source_ids: tuple[str, ...], since_days: int, query_timeout: float) -> list[dict[str, str]]:

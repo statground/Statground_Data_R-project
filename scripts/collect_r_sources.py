@@ -1888,7 +1888,15 @@ def prioritize_required_reddit_sources(sources: list[Any]) -> list[Any]:
 
 def is_transient_reddit_error(message: str) -> bool:
     lowered = str(message or "").lower()
-    return "429" in lowered or "too many" in lowered or "temporarily unavailable" in lowered or "503" in lowered
+    return (
+        "429" in lowered
+        or "too many" in lowered
+        or "temporarily unavailable" in lowered
+        or "503" in lowered
+        or "403" in lowered
+        or "blocked" in lowered
+        or "forbidden" in lowered
+    )
 
 
 def json_safe(value: Any) -> Any:

@@ -406,6 +406,12 @@ func runCommunity(ctx context.Context, args []string) error {
 	translationLimit := fs.Int("translation-limit", envInt("R_COMMUNITY_TRANSLATION_LIMIT", 0), "max rows to translate in this run; 0 means all rows that need translation")
 	translationModel := fs.String("translation-model", envString("R_COMMUNITY_TRANSLATION_MODEL", envString("R_COMMUNITY_DIGEST_MODEL", "google/gemini-2.5-flash-lite")), "AI model for R Community source item Korean translation")
 	failOnTranslationErr := fs.Bool("fail-on-translation-error", envBool("R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR", false), "fail community publish when a source row translation fails")
+	reportPath := fs.String("report", envString("R_COMMUNITY_REPORT", defaultCommunityReportPath(*jsonlPath)), "R Community collection report JSON path")
+	maxSourceAgeDays := fs.Float64(
+		"max-source-age-days",
+		envFloat("R_COMMUNITY_MAX_SOURCE_AGE_DAYS", 8),
+		"max age in days for existing current rows that satisfy a temporarily unavailable required source",
+	)
 	skipExistingCanonical := fs.Bool(
 		"skip-existing-canonical",
 		envBool("R_COMMUNITY_SKIP_EXISTING_CANONICAL", true),
@@ -451,6 +457,8 @@ func runCommunity(ctx context.Context, args []string) error {
 		*limit,
 		requiredSources,
 		selectionSources,
+		*reportPath,
+		*maxSourceAgeDays,
 		enrich,
 		*skipExistingCanonical,
 	)
@@ -504,12 +512,27 @@ type communityJSONLRow struct {
 	row    map[string]any
 }
 
+type communityCollectionReport struct {
+	StartedAt                  string                     `json:"started_at"`
+	SinceDays                  any                        `json:"since_days"`
+	SourceObservedLatestItemAt map[string]string          `json:"source_observed_latest_item_at"`
+	Errors                     []communityCollectionError `json:"errors"`
+}
+
+type communityCollectionError struct {
+	SourceID  string `json:"source_id"`
+	ErrorType string `json:"error_type"`
+	Message   string `json:"message"`
+}
+
 func readCommunityJSONLEvents(
 	ctx context.Context,
 	path string,
 	limit int,
 	requiredSourceIDs []string,
 	selectionSourceIDs []string,
+	reportPath string,
+	maxSourceAgeDays float64,
 	enrich func(map[string]any) error,
 	skipExistingCanonical bool,
 ) ([]genericEvent, int, int, error) {
@@ -530,7 +553,11 @@ func readCommunityJSONLEvents(
 		rows = append(rows, communityJSONLRow{lineNo: lineNo + 1, row: row})
 	}
 	rows = selectCommunityJSONLRows(rows, limit, selectionSourceIDs)
-	if err := validateRequiredCommunityRows(rows, requiredSourceIDs); err != nil {
+	report, err := loadCommunityCollectionReport(reportPath)
+	if err != nil {
+		return nil, len(rows), 0, err
+	}
+	if err := validateRequiredCommunityRows(ctx, rows, requiredSourceIDs, report, maxSourceAgeDays); err != nil {
 		return nil, len(rows), 0, err
 	}
 	selectedCount := len(rows)
@@ -631,7 +658,13 @@ func validateRequiredCommunityEvents(events []genericEvent, requiredSourceIDs []
 	return nil
 }
 
-func validateRequiredCommunityRows(rows []communityJSONLRow, requiredSourceIDs []string) error {
+func validateRequiredCommunityRows(
+	ctx context.Context,
+	rows []communityJSONLRow,
+	requiredSourceIDs []string,
+	report *communityCollectionReport,
+	maxSourceAgeDays float64,
+) error {
 	counts := make(map[string]int)
 	for _, item := range rows {
 		sourceID := strings.TrimSpace(stringAny(item.row["source_id"]))
@@ -642,14 +675,170 @@ func validateRequiredCommunityRows(rows []communityJSONLRow, requiredSourceIDs [
 	missing := make([]string, 0)
 	for _, sourceID := range requiredSourceIDs {
 		sourceID = strings.TrimSpace(sourceID)
-		if sourceID != "" && counts[sourceID] == 0 {
+		if sourceID == "" || counts[sourceID] > 0 {
+			continue
+		}
+		if communityReportSourceInactiveForWindow(report, sourceID) {
+			continue
+		}
+		if !communityReportSourceUnavailable(report, sourceID) {
 			missing = append(missing, sourceID)
 		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("R Community required source rows were not selected for publish: %s", strings.Join(missing, ","))
 	}
+	blockedMissing := make([]string, 0)
+	for _, sourceID := range requiredSourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID != "" &&
+			counts[sourceID] == 0 &&
+			communityReportSourceUnavailable(report, sourceID) &&
+			!communityReportSourceInactiveForWindow(report, sourceID) {
+			blockedMissing = append(blockedMissing, sourceID)
+		}
+	}
+	if len(blockedMissing) == 0 {
+		return nil
+	}
+	satisfied, err := communitySourcesFreshInCurrent(ctx, blockedMissing, maxSourceAgeDays)
+	if err != nil {
+		return fmt.Errorf("R Community required source rows were blocked and live current freshness could not be verified: %w", err)
+	}
+	for _, sourceID := range blockedMissing {
+		if !satisfied[sourceID] {
+			missing = append(missing, sourceID)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("R Community required source rows were not selected for publish and live current was not fresh: %s", strings.Join(missing, ","))
+	}
 	return nil
+}
+
+func loadCommunityCollectionReport(path string) (*communityCollectionReport, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var report communityCollectionReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &report, nil
+}
+
+func defaultCommunityReportPath(jsonlPath string) string {
+	jsonlPath = strings.TrimSpace(jsonlPath)
+	if jsonlPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(jsonlPath)
+	base := filepath.Base(jsonlPath)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	return filepath.Join(dir, base+"_report.json")
+}
+
+func communityReportSourceInactiveForWindow(report *communityCollectionReport, sourceID string) bool {
+	if report == nil {
+		return false
+	}
+	observedRaw := strings.TrimSpace(report.SourceObservedLatestItemAt[sourceID])
+	if observedRaw == "" {
+		return false
+	}
+	observed := parseKSTTime(observedRaw, time.Time{})
+	if observed.IsZero() {
+		return false
+	}
+	sinceDays, ok := floatAny(report.SinceDays)
+	if !ok || sinceDays < 0 {
+		return false
+	}
+	started := parseKSTTime(report.StartedAt, time.Now())
+	cutoff := started.UTC().Add(-time.Duration(sinceDays * float64(24*time.Hour)))
+	return observed.UTC().Before(cutoff)
+}
+
+func communityReportSourceUnavailable(report *communityCollectionReport, sourceID string) bool {
+	if report == nil {
+		return false
+	}
+	for _, item := range report.Errors {
+		if strings.TrimSpace(item.SourceID) != sourceID {
+			continue
+		}
+		if communitySourceUnavailableError(item.ErrorType + "\n" + item.Message) {
+			return true
+		}
+	}
+	return false
+}
+
+func communitySourceUnavailableError(message string) bool {
+	lowered := strings.ToLower(message)
+	for _, token := range []string{"403", "blocked", "forbidden", "429", "too many", "503", "temporarily unavailable"} {
+		if strings.Contains(lowered, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func communitySourcesFreshInCurrent(ctx context.Context, sourceIDs []string, maxSourceAgeDays float64) (map[string]bool, error) {
+	if maxSourceAgeDays <= 0 {
+		maxSourceAgeDays = 8
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`
+SELECT
+    source_id,
+    count() AS rows,
+    ifNull(formatDateTime(max(coalesce(original_published_at, collected_at)), '%%Y-%%m-%%d %%H:%%i:%%S', 'Asia/Seoul'), '') AS latest_source_at
+FROM Data_R_Community_Service.r_community_item_read_current
+WHERE source_id IN (%s)
+  AND active = 1
+  AND notEmpty(title)
+  AND notEmpty(canonical_url)
+GROUP BY source_id
+FORMAT JSONEachRow`, clickHouseStringList(sourceIDs))
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	out := make(map[string]bool, len(sourceIDs))
+	for _, row := range rows {
+		sourceID := strings.TrimSpace(stringAny(row["source_id"]))
+		if sourceID == "" || intAny(row["rows"]) <= 0 {
+			continue
+		}
+		latest := parseKSTTime(stringAny(row["latest_source_at"]), time.Time{})
+		if latest.IsZero() {
+			continue
+		}
+		ageDays := now.Sub(latest).Hours() / 24
+		out[sourceID] = ageDays <= maxSourceAgeDays
+	}
+	return out, nil
 }
 
 func filterExistingCommunityJSONLRows(
@@ -8091,6 +8280,27 @@ func intAny(value any) int64 {
 	}
 }
 
+func floatAny(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func configuredURLs(envName string, defaults []string) []string {
 	raw := envString(envName, "")
 	if raw == "" {
@@ -8155,6 +8365,18 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(name string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

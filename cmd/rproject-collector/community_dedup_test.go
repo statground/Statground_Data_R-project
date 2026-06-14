@@ -43,11 +43,38 @@ func TestValidateRequiredCommunityRows(t *testing.T) {
 		{lineNo: 1, row: map[string]any{"source_id": "community:stackoverflow:r"}},
 		{lineNo: 2, row: map[string]any{"source_id": "community:posit:latest-r-filtered"}},
 	}
-	if err := validateRequiredCommunityRows(rows, []string{"community:stackoverflow:r"}); err != nil {
+	if err := validateRequiredCommunityRows(context.Background(), rows, []string{"community:stackoverflow:r"}, nil, 8); err != nil {
 		t.Fatalf("validateRequiredCommunityRows returned unexpected error: %v", err)
 	}
-	if err := validateRequiredCommunityRows(rows, []string{"reddit:r/rstats"}); err == nil {
+	if err := validateRequiredCommunityRows(context.Background(), rows, []string{"reddit:r/rstats"}, nil, 8); err == nil {
 		t.Fatal("validateRequiredCommunityRows returned nil for missing required source")
+	}
+}
+
+func TestValidateRequiredCommunityRowsAllowsInactiveWindowSource(t *testing.T) {
+	rows := []communityJSONLRow{
+		{lineNo: 1, row: map[string]any{"source_id": "community:stackoverflow:r"}},
+	}
+	report := &communityCollectionReport{
+		StartedAt: "2026-06-14T00:00:00+09:00",
+		SinceDays: float64(3),
+		SourceObservedLatestItemAt: map[string]string{
+			"reddit:r/rprogramming": "2026-06-04T19:10:07+09:00",
+		},
+	}
+	if err := validateRequiredCommunityRows(context.Background(), rows, []string{"reddit:r/rprogramming"}, report, 8); err != nil {
+		t.Fatalf("validateRequiredCommunityRows returned unexpected error for inactive source: %v", err)
+	}
+}
+
+func TestCommunitySourceUnavailableError(t *testing.T) {
+	for _, message := range []string{
+		"403 Client Error: Blocked for url",
+		"too many 429 error responses",
+	} {
+		if !communitySourceUnavailableError(message) {
+			t.Fatalf("communitySourceUnavailableError(%q) = false, want true", message)
+		}
 	}
 }
 
@@ -64,6 +91,8 @@ func TestReadCommunityJSONLEventsAllowsMissingPrioritySource(t *testing.T) {
 		10,
 		[]string{"community:stackoverflow:r"},
 		[]string{"community:stackoverflow:r", "community:posit:events"},
+		"",
+		8,
 		nil,
 		false,
 	)
