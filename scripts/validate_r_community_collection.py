@@ -59,8 +59,12 @@ def main() -> int:
 
     live_fresh_by_source: dict[str, dict[str, Any]] = {}
     satisfied_by: dict[str, str] = {}
+    inactive_by_source = {
+        source_id: source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
+        for source_id in required
+    }
     for source_id in required:
-        inactive_for_window = source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
+        inactive_for_window = inactive_by_source.get(source_id, False)
         if (
             errors_by_source.get(source_id)
             and not inactive_for_window
@@ -92,13 +96,17 @@ def main() -> int:
         latest = latest_by_source.get(source_id)
         if latest is None:
             if (
-                not source_inactive_for_collection_window(report, str(report_observed_latest.get(source_id) or ""))
+                not inactive_by_source.get(source_id, False)
                 and source_id not in satisfied_by
             ):
                 failures.append(f"{source_id} has no parseable published_at")
+            elif inactive_by_source.get(source_id, False):
+                satisfied_by.setdefault(source_id, "upstream_inactive_for_collection_window")
             continue
         age_days = (now - latest).total_seconds() / 86400
-        if age_days > args.max_source_age_days:
+        if age_days > args.max_source_age_days and inactive_by_source.get(source_id, False):
+            satisfied_by.setdefault(source_id, "upstream_inactive_for_collection_window")
+        elif age_days > args.max_source_age_days:
             failures.append(f"{source_id} latest published_at is stale: {latest.isoformat()} ({age_days:.1f}d)")
 
     reddit_sources = reddit_source_map(config)
