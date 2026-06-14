@@ -292,6 +292,26 @@ def source_visibility(
             query_timeout,
         )
     }
+    latest_view_rows = {
+        row.get("source_id", ""): row
+        for row in query_json_each_row(
+            f"""
+            SELECT
+                source_id,
+                count() AS latest_view_rows,
+                countIf(ingested_at >= {cutoff_sql}) AS latest_view_after_cutoff,
+                ifNull(formatDateTime(max(coalesce(original_published_at, collected_at)), '%Y-%m-%d %H:%i:%S', 'Asia/Seoul'), '') AS latest_view_source_at,
+                ifNull(formatDateTime(max(ingested_at), '%Y-%m-%d %H:%i:%S', 'Asia/Seoul'), '') AS latest_view_ingested_at
+            FROM Data_R_Community_Service.v_r_community_latest
+            WHERE source_id IN ({quote_list(required)})
+              AND notEmpty(title)
+              AND notEmpty(canonical_url)
+            GROUP BY source_id
+            FORMAT JSONEachRow
+            """,
+            query_timeout,
+        )
+    }
     event_rows = {
         row.get("source_id", ""): row
         for row in query_json_each_row(
@@ -316,12 +336,18 @@ def source_visibility(
     summary: dict[str, Any] = {}
     for source_id in required:
         source = source_rows.get(source_id) or {}
+        latest_view = latest_view_rows.get(source_id) or {}
         events = event_rows.get(source_id) or {}
         collected = collection.get(source_id) or {}
-        latest_after = int(source.get("latest_after_cutoff") or 0)
+        latest_after = max(int(source.get("latest_after_cutoff") or 0), int(latest_view.get("latest_view_after_cutoff") or 0))
         raw_after = int(events.get("raw_events_after_cutoff") or 0)
         latest_source_at = str(source.get("latest_source_at") or "")
         latest_dt = parse_datetime_value(latest_source_at)
+        latest_view_source_at = str(latest_view.get("latest_view_source_at") or "")
+        latest_view_dt = parse_datetime_value(latest_view_source_at)
+        if latest_view_dt is not None and (latest_dt is None or latest_view_dt > latest_dt):
+            latest_dt = latest_view_dt
+            latest_source_at = latest_view_source_at
         collection_latest_at = str(collected.get("latest_item_at") or "")
         collection_latest_dt = parse_datetime_value(collection_latest_at)
         observed_latest_at = str(collected.get("observed_latest_item_at") or "")
@@ -331,6 +357,9 @@ def source_visibility(
             "raw_events_after_cutoff": raw_after,
             "latest_source_at": latest_source_at,
             "latest_ingested_at": source.get("latest_ingested_at") or "",
+            "latest_view_after_cutoff": int(latest_view.get("latest_view_after_cutoff") or 0),
+            "latest_view_source_at": latest_view_source_at,
+            "latest_view_ingested_at": latest_view.get("latest_view_ingested_at") or "",
             "raw_event_ingested_at": events.get("raw_event_ingested_at") or "",
             "collection_rows": collected_rows,
             "collection_latest_item_at": collection_latest_at,

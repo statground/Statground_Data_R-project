@@ -368,10 +368,12 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || '' }}
+          R_COMMUNITY_WAIT_QUERY_TIMEOUT: ${{ vars.R_COMMUNITY_WAIT_QUERY_TIMEOUT || '90' }}
         run: |
           python scripts/wait_r_community_ingestion.py source \
             --report data/collected/r/latest_report.json \
             --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS" \
+            --query-timeout "$R_COMMUNITY_WAIT_QUERY_TIMEOUT" \
             --attempts 36 \
             --sleep 10
 
