@@ -7768,19 +7768,159 @@ func (p *publisher) createKafkaTopic(ctx context.Context, dialer *kafka.Dialer) 
 }
 
 func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) error {
+	fallbackEnabled := p.packageClickHouseFallbackEnabled(events)
+	directFallback := false
+	for _, chunk := range chunkGenericEvents(events, p.chunkSize) {
+		if p.dryRun {
+			for _, event := range chunk {
+				body, err := json.Marshal(event)
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(body))
+			}
+			continue
+		}
+		if directFallback {
+			if err := insertPackageRawEventsFallback(ctx, chunk); err != nil {
+				return fmt.Errorf("ClickHouse package raw fallback failed: %s", publicClickHouseError(err))
+			}
+			continue
+		}
+		messages, err := genericEventsToMessages(chunk)
+		if err != nil {
+			return err
+		}
+		if err := p.writeMessagesWithRetry(ctx, messages); err != nil {
+			if fallbackEnabled && shouldUsePackageClickHouseFallback(err, len(chunk)) {
+				if fallbackErr := insertPackageRawEventsFallback(ctx, chunk); fallbackErr != nil {
+					return fmt.Errorf("kafka publish failed and ClickHouse package raw fallback failed: %s; original_error=%s", publicClickHouseError(fallbackErr), shortKafkaError(err))
+				}
+				fmt.Printf("[clickhouse] package raw fallback succeeded events=%d reason=%s\n", len(chunk), kafkaRetryReason(err))
+				directFallback = true
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *publisher) packageClickHouseFallbackEnabled(events []genericEvent) bool {
+	if p.dryRun || len(events) == 0 || !envBool("RPKG_CLICKHOUSE_FALLBACK_ENABLED", false) {
+		return false
+	}
+	for _, event := range events {
+		if !strings.HasPrefix(event.EventType, "rpkg.") {
+			return false
+		}
+	}
+	return true
+}
+
+func shouldUsePackageClickHouseFallback(err error, eventCount int) bool {
+	if err == nil || eventCount <= 0 {
+		return false
+	}
+	reason := kafkaRetryReason(err)
+	if reason != "leader-metadata-stale" && reason != "leader-not-available" && reason != "network" && reason != "timeout" && reason != "temporary-kafka-error" {
+		return false
+	}
+	return kafkaErrorFailedAllMessages(err, eventCount)
+}
+
+func kafkaErrorFailedAllMessages(err error, eventCount int) bool {
+	if err == nil || eventCount <= 0 {
+		return false
+	}
+	var writeErrs kafka.WriteErrors
+	if errors.As(err, &writeErrs) {
+		return writeErrs.Count() == eventCount
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, fmt.Sprintf("kafka write errors (%d/%d)", eventCount, eventCount)) ||
+		hasCountField(msg, "failed_messages", eventCount) ||
+		(!strings.Contains(msg, "kafka write errors") && !strings.Contains(msg, "failed_messages="))
+}
+
+func hasCountField(message, name string, count int) bool {
+	token := fmt.Sprintf("%s=%d", name, count)
+	start := strings.Index(message, token)
+	if start < 0 {
+		return false
+	}
+	end := start + len(token)
+	if end >= len(message) {
+		return true
+	}
+	next := message[end]
+	return next < '0' || next > '9'
+}
+
+func genericEventsToMessages(events []genericEvent) ([]kafka.Message, error) {
 	messages := make([]kafka.Message, 0, len(events))
 	for _, event := range events {
 		body, err := json.Marshal(event)
 		if err != nil {
-			return err
-		}
-		if p.dryRun {
-			fmt.Println(string(body))
-			continue
+			return nil, err
 		}
 		messages = append(messages, kafka.Message{Key: []byte(eventKey(event)), Value: body, Time: time.Now()})
 	}
-	return p.write(ctx, messages)
+	return messages, nil
+}
+
+func insertPackageRawEventsFallback(ctx context.Context, events []genericEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return err
+	}
+	chunkSize := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", envInt("KAFKA_WRITE_CHUNK_SIZE", 100)))
+	for _, chunk := range chunkGenericEvents(events, chunkSize) {
+		if err := insertPackageRawEventChunk(ctx, cfg, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertPackageRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, events []genericEvent) error {
+	var b strings.Builder
+	b.WriteString("INSERT INTO Data_R_Package_Raw.r_package_event_raw SETTINGS insert_distributed_sync = 1 FORMAT JSONEachRow\n")
+	now := time.Now().UTC()
+	for _, event := range events {
+		row := packageRawEventFallbackRow(event, now)
+		body, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+	}
+	return cfg.exec(ctx, b.String())
+}
+
+func packageRawEventFallbackRow(event genericEvent, now time.Time) map[string]any {
+	observedAt := parseKSTTime(event.ObservedAt, now)
+	collectedAt := parseKSTTime(event.CollectedAt, now)
+	return map[string]any{
+		"uuid":            event.EventID,
+		"event_id":        event.EventID,
+		"event_type":      event.EventType,
+		"schema_version":  event.SchemaVersion,
+		"source":          event.Source,
+		"source_url":      event.SourceURL,
+		"repository":      event.Repository,
+		"package_name":    event.PackageName,
+		"package_version": event.PackageVersion,
+		"observed_at":     formatKST(observedAt),
+		"collected_at":    formatKST(collectedAt),
+		"payload_hash":    event.PayloadHash,
+		"payload":         event.Payload,
+		"ingested_at":     formatKST(now),
+	}
 }
 
 func (p *publisher) publishWebR(ctx context.Context, events []webREvent) error {
@@ -8138,6 +8278,40 @@ func shortKafkaError(err error) string {
 	}
 	msg := strings.Join(strings.Fields(err.Error()), " ")
 	return truncate(msg, 280)
+}
+
+func publicClickHouseError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, context.DeadlineExceeded),
+		strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "deadline exceeded"):
+		return "clickhouse-timeout"
+	case strings.Contains(msg, "401"),
+		strings.Contains(msg, "authentication"),
+		strings.Contains(msg, "unauthorized"):
+		return "clickhouse-auth"
+	case strings.Contains(msg, "403"),
+		strings.Contains(msg, "not enough privileges"),
+		strings.Contains(msg, "readonly"):
+		return "clickhouse-permission"
+	case strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "network is unreachable"),
+		strings.Contains(msg, "temporary failure in name resolution"):
+		return "clickhouse-network"
+	case strings.Contains(msg, "clickhouse http 5"):
+		return "clickhouse-server-error"
+	case strings.Contains(msg, "clickhouse http 4"):
+		return "clickhouse-request-error"
+	default:
+		return "clickhouse-error"
+	}
 }
 
 func kafkaSecurityUsesTLS(value string) bool {
@@ -9112,6 +9286,24 @@ func chunkMessages(values []kafka.Message, size int) [][]kafka.Message {
 		size = len(values)
 	}
 	chunks := make([][]kafka.Message, 0, (len(values)+size-1)/size)
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		chunks = append(chunks, values[start:end])
+	}
+	return chunks
+}
+
+func chunkGenericEvents(values []genericEvent, size int) [][]genericEvent {
+	if len(values) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		size = len(values)
+	}
+	chunks := make([][]genericEvent, 0, (len(values)+size-1)/size)
 	for start := 0; start < len(values); start += size {
 		end := start + size
 		if end > len(values) {

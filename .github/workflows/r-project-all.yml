@@ -139,13 +139,17 @@ jobs:
           KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
           CH_DATABASE: Data_R_Package_Raw
           KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
           KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
           KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           KAFKA_WRITE_CHUNK_SIZE: ${{ vars.RPKG_KAFKA_WRITE_CHUNK_SIZE || '100' }}
+          RPKG_CLICKHOUSE_FALLBACK_ENABLED: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_ENABLED || 'true' }}
+          RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE || '100' }}
           RPKG_KAFKA_TOPIC: ${{ vars.RPKG_KAFKA_TOPIC || 'rpkg.events' }}
           RPKG_JOB: ${{ steps.opts.outputs.r_package_job }}
           RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}

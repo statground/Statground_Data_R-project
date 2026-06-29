@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -69,6 +70,70 @@ func TestShouldUsePartitionFallbackForLeaderMetadataErrors(t *testing.T) {
 	}
 	if shouldUsePartitionFallback(errors.New("connection reset by peer")) {
 		t.Fatal("network errors should use normal retry path")
+	}
+}
+
+func TestPackageClickHouseFallbackOnlyForRPackageEvents(t *testing.T) {
+	t.Setenv("RPKG_CLICKHOUSE_FALLBACK_ENABLED", "true")
+	pub := &publisher{}
+	if !pub.packageClickHouseFallbackEnabled([]genericEvent{{EventType: "rpkg.cran.package_snapshot.v1"}}) {
+		t.Fatal("expected rpkg event to allow ClickHouse fallback")
+	}
+	if pub.packageClickHouseFallbackEnabled([]genericEvent{{EventType: "r.youtube.video.snapshot.v1"}}) {
+		t.Fatal("non-rpkg generic events must not use package ClickHouse fallback")
+	}
+	pub.dryRun = true
+	if pub.packageClickHouseFallbackEnabled([]genericEvent{{EventType: "rpkg.cran.package_snapshot.v1"}}) {
+		t.Fatal("dry-run should not use ClickHouse fallback")
+	}
+}
+
+func TestShouldUsePackageClickHouseFallbackRequiresWholeChunkFailure(t *testing.T) {
+	allFailed := errors.New("kafka fixed partition fallback exhausted partitions=[0 1 2] failed_messages=100 last_error=Kafka write errors (100/100), errors: [[6] Not Leader For Partition]")
+	if !shouldUsePackageClickHouseFallback(allFailed, 100) {
+		t.Fatal("expected whole-chunk leader failure to allow ClickHouse fallback")
+	}
+	partialFailed := errors.New("kafka fixed partition fallback exhausted partitions=[0 1 2] failed_messages=3 last_error=Kafka write errors (3/100), errors: [[6] Not Leader For Partition]")
+	if shouldUsePackageClickHouseFallback(partialFailed, 100) {
+		t.Fatal("partial Kafka writes must not be blindly duplicated into ClickHouse")
+	}
+	otherCount := errors.New("kafka fixed partition fallback exhausted partitions=[0 1 2] failed_messages=1000 last_error=Kafka write errors (1000/1000), errors: [[6] Not Leader For Partition]")
+	if shouldUsePackageClickHouseFallback(otherCount, 100) {
+		t.Fatal("failed_messages=1000 must not be treated as failed_messages=100")
+	}
+}
+
+func TestPackageRawEventFallbackRowFormatsDateTimes(t *testing.T) {
+	event := genericEvent{
+		EventID:        "0197b9b4-90c0-7000-8000-000000000001",
+		EventType:      "rpkg.cran.package_snapshot.v1",
+		SchemaVersion:  1,
+		Source:         "cran_metadata",
+		SourceURL:      "https://cran.r-project.org/web/packages/A3/index.html",
+		Repository:     "CRAN",
+		PackageName:    "A3",
+		PackageVersion: "1.0.0",
+		ObservedAt:     "2026-06-30T00:00:00.000Z",
+		CollectedAt:    "2026-06-30T01:00:00.000Z",
+		PayloadHash:    "abc123",
+		Payload:        `{"Package":"A3"}`,
+	}
+	row := packageRawEventFallbackRow(event, time.Date(2026, 6, 30, 2, 0, 0, 0, time.UTC))
+	if row["observed_at"] != "2026-06-30 09:00:00.000" {
+		t.Fatalf("observed_at = %v", row["observed_at"])
+	}
+	if row["collected_at"] != "2026-06-30 10:00:00.000" {
+		t.Fatalf("collected_at = %v", row["collected_at"])
+	}
+	if row["ingested_at"] != "2026-06-30 11:00:00.000" {
+		t.Fatalf("ingested_at = %v", row["ingested_at"])
+	}
+}
+
+func TestPublicClickHouseErrorSanitizesDetails(t *testing.T) {
+	err := errors.New("ClickHouse HTTP 500: DB::Exception: table Data_R_Package_Raw.r_package_event_raw does not exist")
+	if got := publicClickHouseError(err); got != "clickhouse-server-error" {
+		t.Fatalf("publicClickHouseError = %q", got)
 	}
 }
 
