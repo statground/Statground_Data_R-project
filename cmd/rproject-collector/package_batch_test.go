@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/segmentio/kafka-go"
+)
 
 func TestPackagePageBatchIndexesContinuesAfterCursor(t *testing.T) {
 	keys := []string{"a", "b", "c", "d"}
@@ -36,6 +41,34 @@ func TestSelectPackagePageRecordsUsesForcedThenStableBatch(t *testing.T) {
 	}
 	if batch.ForcedCount != 1 || batch.SelectedCount != 3 || batch.NextCursorKey != "b" {
 		t.Fatalf("batch metadata = %+v", batch)
+	}
+}
+
+func TestFixedPartitionBalancerUsesRequestedPartition(t *testing.T) {
+	balancer := fixedPartitionBalancer{partition: 7}
+	if got := balancer.Balance(kafka.Message{}, 0, 3, 7, 9); got != 7 {
+		t.Fatalf("fixed partition = %d, want 7", got)
+	}
+	if got := balancer.Balance(kafka.Message{}, 1, 2, 3); got != 1 {
+		t.Fatalf("fallback partition = %d, want first available partition", got)
+	}
+}
+
+func TestSplitIntCSVSortsAndDeduplicates(t *testing.T) {
+	got := splitIntCSV("5, 1, bad, -1, 5, 3")
+	want := []int{1, 3, 5}
+	if !sameInts(got, want) {
+		t.Fatalf("splitIntCSV got %v want %v", got, want)
+	}
+}
+
+func TestShouldUsePartitionFallbackForLeaderMetadataErrors(t *testing.T) {
+	err := errors.New("[6] Not Leader For Partition: metadata are likely out of date")
+	if !shouldUsePartitionFallback(err) {
+		t.Fatal("expected leader metadata error to use fixed partition fallback")
+	}
+	if shouldUsePartitionFallback(errors.New("connection reset by peer")) {
+		t.Fatal("network errors should use normal retry path")
 	}
 }
 

@@ -189,18 +189,25 @@ type communityDigestPlanRecord struct {
 }
 
 type publisher struct {
-	topic        string
-	brokers      []string
-	username     string
-	password     string
-	security     string
-	clientID     string
-	dryRun       bool
-	writeTimeout time.Duration
-	chunkSize    int
-	createTopic  bool
-	partitions   int
-	replicas     int
+	topic              string
+	brokers            []string
+	username           string
+	password           string
+	security           string
+	clientID           string
+	dryRun             bool
+	writeTimeout       time.Duration
+	chunkSize          int
+	createTopic        bool
+	partitions         int
+	replicas           int
+	writerMaxAttempts  int
+	writeAttempts      int
+	writeBackoffMin    time.Duration
+	writeBackoffMax    time.Duration
+	partitionFallback  bool
+	fallbackPartitions []int
+	fallbackTimeout    time.Duration
 }
 
 type aiClient struct {
@@ -7644,18 +7651,25 @@ func anyStringSliceFromJSON(value string) []string {
 
 func newPublisher(topic, clientID string, dryRun bool) *publisher {
 	return &publisher{
-		topic:        topic,
-		brokers:      splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
-		username:     firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
-		password:     firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), os.Getenv("KAFKA_EXTERNAL_PASSWORD")),
-		security:     envString("KAFKA_SECURITY_PROTOCOL", ""),
-		clientID:     envString("KAFKA_CLIENT_ID", clientID),
-		dryRun:       dryRun,
-		writeTimeout: time.Duration(envInt("KAFKA_WRITE_TIMEOUT", 60)) * time.Second,
-		chunkSize:    maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 100)),
-		createTopic:  envBool("KAFKA_CREATE_TOPIC", envBool("KAFKA_ALLOW_TOPIC_CREATE", true)),
-		partitions:   maxInt(1, envInt("KAFKA_TOPIC_PARTITIONS", 3)),
-		replicas:     maxInt(1, envInt("KAFKA_TOPIC_REPLICATION_FACTOR", 1)),
+		topic:              topic,
+		brokers:            splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
+		username:           firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
+		password:           firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), os.Getenv("KAFKA_EXTERNAL_PASSWORD")),
+		security:           envString("KAFKA_SECURITY_PROTOCOL", ""),
+		clientID:           envString("KAFKA_CLIENT_ID", clientID),
+		dryRun:             dryRun,
+		writeTimeout:       time.Duration(maxInt(1, envInt("KAFKA_WRITE_TIMEOUT", envInt("KAFKA_WRITE_TIMEOUT_SECONDS", 60)))) * time.Second,
+		chunkSize:          maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 100)),
+		createTopic:        envBool("KAFKA_CREATE_TOPIC", envBool("KAFKA_ALLOW_TOPIC_CREATE", true)),
+		partitions:         maxInt(1, envInt("KAFKA_TOPIC_PARTITIONS", 3)),
+		replicas:           maxInt(1, envInt("KAFKA_TOPIC_REPLICATION_FACTOR", 1)),
+		writerMaxAttempts:  maxInt(1, envInt("KAFKA_WRITER_MAX_ATTEMPTS", 1)),
+		writeAttempts:      maxInt(1, envInt("KAFKA_WRITE_ATTEMPTS", 3)),
+		writeBackoffMin:    time.Duration(envFloat("KAFKA_WRITE_BACKOFF_MIN", envFloat("KAFKA_WRITE_BACKOFF_MIN_SECONDS", 1.0)) * float64(time.Second)),
+		writeBackoffMax:    time.Duration(envFloat("KAFKA_WRITE_BACKOFF_MAX", envFloat("KAFKA_WRITE_BACKOFF_MAX_SECONDS", 12.0)) * float64(time.Second)),
+		partitionFallback:  envBool("KAFKA_PARTITION_FALLBACK_ENABLED", true),
+		fallbackPartitions: splitIntCSV(envString("KAFKA_FALLBACK_PARTITIONS", "")),
+		fallbackTimeout:    time.Duration(envFloat("KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS", 8.0) * float64(time.Second)),
 	}
 }
 
@@ -7789,16 +7803,26 @@ func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
 	if p.dryRun || len(messages) == 0 {
 		return nil
 	}
+	for _, chunk := range chunkMessages(messages, p.chunkSize) {
+		if err := p.writeMessagesWithRetry(ctx, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *publisher) writerWithBalancer(balancer kafka.Balancer) *kafka.Writer {
 	writer := &kafka.Writer{
 		Addr:                   kafka.TCP(p.brokers...),
 		Topic:                  p.topic,
-		Balancer:               &kafka.Hash{},
+		Balancer:               balancer,
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: p.createTopic,
 		BatchSize:              p.chunkSize,
 		BatchTimeout:           500 * time.Millisecond,
 		WriteTimeout:           p.writeTimeout,
 		ReadTimeout:            p.writeTimeout,
+		MaxAttempts:            p.writerMaxAttempts,
 	}
 	transport := &kafka.Transport{
 		ClientID: p.clientID,
@@ -7811,16 +7835,135 @@ func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
 		transport.TLS = kafkaTLSConfig()
 	}
 	writer.Transport = transport
-	defer writer.Close()
-	for _, chunk := range chunkMessages(messages, p.chunkSize) {
+	return writer
+}
+
+func (p *publisher) writeMessagesWithRetry(ctx context.Context, messages []kafka.Message) error {
+	pending := messages
+	var lastErr error
+	for attempt := 1; attempt <= p.writeAttempts; attempt++ {
 		writeCtx, cancel := context.WithTimeout(ctx, p.writeTimeout+15*time.Second)
-		err := writer.WriteMessages(writeCtx, chunk...)
+		writer := p.writerWithBalancer(&kafka.Hash{})
+		err := writer.WriteMessages(writeCtx, pending...)
+		_ = writer.Close()
 		cancel()
-		if err != nil {
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("[kafka] publish retry succeeded attempt=%d messages=%d\n", attempt, len(pending))
+			}
+			return nil
+		}
+
+		lastErr = err
+		failed, retryable := retryableFailedMessages(pending, err)
+		if len(failed) == 0 {
+			return nil
+		}
+		if p.partitionFallback && shouldUsePartitionFallback(err) {
+			if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err))
+			}
+		}
+		if !retryable || attempt == p.writeAttempts {
+			return err
+		}
+		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, p.writeAttempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
+		if err := sleepContext(ctx, kafkaBackoffDuration(attempt, p.writeBackoffMin, p.writeBackoffMax)); err != nil {
+			return fmt.Errorf("kafka retry wait stopped: %w; last_error=%s", err, shortKafkaError(lastErr))
+		}
+		pending = failed
+	}
+	return lastErr
+}
+
+func (p *publisher) writeMessagesToWritablePartition(ctx context.Context, messages []kafka.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	partitions, err := p.fallbackPartitionIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(partitions) == 0 {
+		return fmt.Errorf("kafka partition fallback found zero partitions for topic=%s", p.topic)
+	}
+
+	pending := messages
+	var lastErr error
+	for _, partition := range partitions {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, p.fallbackTimeout)
+		writer := p.writerWithBalancer(fixedPartitionBalancer{partition: partition})
+		err := writer.WriteMessages(attemptCtx, pending...)
+		_ = writer.Close()
+		cancel()
+		if err == nil {
+			fmt.Printf("[kafka] fixed partition fallback succeeded partition=%d messages=%d\n", partition, len(pending))
+			return nil
+		}
+
+		lastErr = err
+		failed, retryable := retryableFailedMessages(pending, err)
+		if len(failed) == 0 {
+			return nil
+		}
+		pending = failed
+		fmt.Printf("[kafka] fixed partition fallback failed partition=%d failed_messages=%d reason=%s error=%s\n", partition, len(pending), kafkaRetryReason(err), shortKafkaError(err))
+		if !retryable {
 			return err
 		}
 	}
-	return nil
+	return fmt.Errorf("kafka fixed partition fallback exhausted partitions=%v failed_messages=%d last_error=%s", partitions, len(pending), shortKafkaError(lastErr))
+}
+
+func (p *publisher) fallbackPartitionIDs(ctx context.Context) ([]int, error) {
+	if len(p.fallbackPartitions) > 0 {
+		out := append([]int(nil), p.fallbackPartitions...)
+		sort.Ints(out)
+		return uniqueInts(out), nil
+	}
+
+	dialer := p.dialer()
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(probeCtx, "tcp", p.brokers[0])
+	if err != nil {
+		return nil, fmt.Errorf("kafka partition fallback failed to connect to bootstrap broker: %w", err)
+	}
+	defer conn.Close()
+
+	partitions, err := conn.ReadPartitions(p.topic)
+	if err != nil {
+		return nil, fmt.Errorf("kafka partition fallback failed to read metadata for topic %q: %w", p.topic, err)
+	}
+	out := make([]int, 0, len(partitions))
+	for _, partition := range partitions {
+		if partition.Topic == p.topic {
+			out = append(out, partition.ID)
+		}
+	}
+	sort.Ints(out)
+	return uniqueInts(out), nil
+}
+
+type fixedPartitionBalancer struct {
+	partition int
+}
+
+func (b fixedPartitionBalancer) Balance(_ kafka.Message, partitions ...int) int {
+	for _, partition := range partitions {
+		if partition == b.partition {
+			return partition
+		}
+	}
+	if len(partitions) > 0 {
+		return partitions[0]
+	}
+	return b.partition
 }
 
 func (p *publisher) usesTLS() bool {
@@ -7845,6 +7988,156 @@ func kafkaTopicAlreadyExists(err error) bool {
 	return strings.Contains(message, "topic already exists") ||
 		strings.Contains(message, "already exists") ||
 		strings.Contains(message, "[36]")
+}
+
+func retryableFailedMessages(messages []kafka.Message, err error) ([]kafka.Message, bool) {
+	var writeErrs kafka.WriteErrors
+	if errors.As(err, &writeErrs) {
+		if len(writeErrs) != len(messages) {
+			return messages, retryableKafkaWriteError(err)
+		}
+		failed := make([]kafka.Message, 0, writeErrs.Count())
+		retryable := true
+		for i, writeErr := range writeErrs {
+			if writeErr == nil {
+				continue
+			}
+			failed = append(failed, messages[i])
+			if !retryableKafkaWriteError(writeErr) {
+				retryable = false
+			}
+		}
+		return failed, retryable
+	}
+	return messages, retryableKafkaWriteError(err)
+}
+
+func retryableKafkaWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var writeErrs kafka.WriteErrors
+	if errors.As(err, &writeErrs) {
+		if writeErrs.Count() == 0 {
+			return false
+		}
+		for _, writeErr := range writeErrs {
+			if writeErr != nil && !retryableKafkaWriteError(writeErr) {
+				return false
+			}
+		}
+		return true
+	}
+	var tempErr interface{ Temporary() bool }
+	if errors.As(err, &tempErr) && tempErr.Temporary() {
+		return true
+	}
+	var timeoutErr interface{ Timeout() bool }
+	if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, io.EOF) || isRetryableKafkaErrorText(err.Error())
+}
+
+func isRetryableKafkaErrorText(message string) bool {
+	msg := strings.ToLower(message)
+	return strings.Contains(msg, "not leader for partition") ||
+		strings.Contains(msg, "partition has no leader") ||
+		strings.Contains(msg, "has no leader") ||
+		strings.Contains(msg, "leader not available") ||
+		strings.Contains(msg, "metadata are likely out of date") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "failed to dial") ||
+		strings.Contains(msg, "failed to open connection") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "temporary failure in name resolution") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "eof")
+}
+
+func shouldUsePartitionFallback(err error) bool {
+	return kafkaRetryReason(err) == "leader-metadata-stale" || kafkaRetryReason(err) == "leader-not-available"
+}
+
+func kafkaRetryReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "not leader for partition"),
+		strings.Contains(msg, "partition has no leader"),
+		strings.Contains(msg, "has no leader"),
+		strings.Contains(msg, "metadata are likely out of date"):
+		return "leader-metadata-stale"
+	case strings.Contains(msg, "leader not available"):
+		return "leader-not-available"
+	case strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "eof"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "broken pipe"),
+		strings.Contains(msg, "failed to dial"),
+		strings.Contains(msg, "failed to open connection"),
+		strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "network is unreachable"),
+		strings.Contains(msg, "temporary failure in name resolution"):
+		return "network"
+	default:
+		return "temporary-kafka-error"
+	}
+}
+
+func kafkaBackoffDuration(attempt int, minDelay, maxDelay time.Duration) time.Duration {
+	if minDelay <= 0 {
+		minDelay = time.Second
+	}
+	if maxDelay <= 0 {
+		maxDelay = 12 * time.Second
+	}
+	if maxDelay < minDelay {
+		maxDelay = minDelay
+	}
+	delay := minDelay
+	for i := 1; i < attempt; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func shortKafkaError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.Join(strings.Fields(err.Error()), " ")
+	return truncate(msg, 280)
 }
 
 func kafkaSecurityUsesTLS(value string) bool {
@@ -8324,6 +8617,39 @@ func splitCSV(value string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func splitIntCSV(value string) []int {
+	out := make([]int, 0)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return uniqueInts(out)
+}
+
+func uniqueInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := values[:0]
+	var last int
+	for i, value := range values {
+		if i > 0 && value == last {
+			continue
+		}
+		out = append(out, value)
+		last = value
 	}
 	return out
 }
