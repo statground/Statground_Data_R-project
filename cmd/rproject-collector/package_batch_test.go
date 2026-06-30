@@ -112,6 +112,19 @@ func TestShouldUsePartitionFallbackForLeaderMetadataErrors(t *testing.T) {
 	}
 }
 
+func TestShouldTryPartitionFallbackOnlyAfterNormalRetries(t *testing.T) {
+	err := errors.New("[6] Not Leader For Partition: metadata are likely out of date")
+	if shouldTryPartitionFallback(err, 1, 3, true) {
+		t.Fatal("fixed partition fallback should wait until normal writer retries are exhausted")
+	}
+	if !shouldTryPartitionFallback(err, 3, 3, true) {
+		t.Fatal("fixed partition fallback should run on the final retryable leader error")
+	}
+	if shouldTryPartitionFallback(err, 3, 3, false) {
+		t.Fatal("disabled partition fallback must stay disabled")
+	}
+}
+
 func TestPackageClickHouseFallbackOnlyForRPackageEvents(t *testing.T) {
 	t.Setenv("RPKG_CLICKHOUSE_FALLBACK_ENABLED", "true")
 	pub := &publisher{}
@@ -216,6 +229,42 @@ func TestRetryableClickHouseFallbackError(t *testing.T) {
 	}
 	if retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 403: not enough privileges")) {
 		t.Fatal("permission errors should not be retried")
+	}
+}
+
+func TestPackageRawEventInsertPrefixDefaultsToAsyncDistributedInsert(t *testing.T) {
+	got := packageRawEventInsertPrefix(clickHouseQueryConfig{})
+	if !strings.Contains(got, "insert_distributed_sync = 0") {
+		t.Fatalf("fallback insert should not wait for distributed sync by default: %s", got)
+	}
+	if !strings.Contains(got, "insert_deduplicate = 1") {
+		t.Fatalf("fallback insert should request insert deduplication: %s", got)
+	}
+
+	got = packageRawEventInsertPrefix(clickHouseQueryConfig{InsertDistributedSync: true})
+	if !strings.Contains(got, "insert_distributed_sync = 1") {
+		t.Fatalf("explicit distributed sync setting not reflected: %s", got)
+	}
+}
+
+func TestShouldDeferPackagePublishFailureOnlyForTransientErrors(t *testing.T) {
+	t.Setenv("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	transient := errors.New("kafka publish failed and ClickHouse package raw fallback failed: clickhouse-timeout; original_error=kafka publish failed after fixed-partition fallback: leader not available")
+	if !shouldDeferPackagePublishFailure(transient) {
+		t.Fatal("transient Kafka plus ClickHouse timeout should be deferred")
+	}
+	auth := errors.New("kafka publish failed: SASL authentication failed: invalid credentials")
+	if shouldDeferPackagePublishFailure(auth) {
+		t.Fatal("auth errors must remain fatal")
+	}
+}
+
+func TestKafkaAuthErrorIsNotRetryableUnlessNetworkHandshakeFailed(t *testing.T) {
+	if retryableKafkaWriteError(errors.New("SASL authentication failed: invalid credentials")) {
+		t.Fatal("bad credentials should not be retried")
+	}
+	if !retryableKafkaWriteError(errors.New("SASL handshake failed: read tcp 10.1.0.222:59538->203.0.113.10:9092: connection reset by peer")) {
+		t.Fatal("network failure during SASL handshake should be retryable")
 	}
 }
 

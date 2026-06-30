@@ -130,13 +130,14 @@ type webREvent struct {
 }
 
 type clickHouseQueryConfig struct {
-	Host     string
-	Port     int
-	User     string
-	Password string
-	Database string
-	Secure   bool
-	Timeout  time.Duration
+	Host                  string
+	Port                  int
+	User                  string
+	Password              string
+	Database              string
+	Secure                bool
+	Timeout               time.Duration
+	InsertDistributedSync bool
 }
 
 type communityDigestItem struct {
@@ -362,6 +363,7 @@ func runPackage(ctx context.Context, args []string) error {
 	}
 
 	total := 0
+	deferred := 0
 	for _, currentJob := range jobs {
 		events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
 			metadataLimit:                       *metadataLimit,
@@ -396,12 +398,20 @@ func runPackage(ctx context.Context, args []string) error {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
 		if err := pub.publishGeneric(ctx, events); err != nil {
+			if shouldDeferPackagePublishFailure(err) {
+				fmt.Printf("[package] publish_deferred job=%s events=%d reason=%s\n", currentJob, len(events), packagePublishFailureReason(err))
+				deferred += len(events)
+				continue
+			}
 			return fmt.Errorf("%s publish: %w", currentJob, err)
 		}
 		fmt.Printf("job=%s published=%d\n", currentJob, len(events))
 		total += len(events)
 	}
 	fmt.Printf("published=%d\n", total)
+	if deferred > 0 {
+		fmt.Printf("publish_deferred=%d\n", deferred)
+	}
 	return nil
 }
 
@@ -7848,6 +7858,51 @@ func shouldUsePackageClickHouseFallback(err error, eventCount int) bool {
 	return kafkaErrorFailedAllMessages(err, eventCount)
 }
 
+func shouldDeferPackagePublishFailure(err error) bool {
+	if err == nil || !envBool("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if isKafkaAuthOrPermissionErrorText(message) ||
+		strings.Contains(message, "clickhouse-auth") ||
+		strings.Contains(message, "clickhouse-permission") ||
+		strings.Contains(message, "kafka-auth") ||
+		strings.Contains(message, "not authorized") ||
+		strings.Contains(message, "authorization failed") {
+		return false
+	}
+	reason := kafkaRetryReason(err)
+	return reason == "leader-metadata-stale" ||
+		reason == "leader-not-available" ||
+		reason == "network" ||
+		reason == "timeout" ||
+		reason == "temporary-kafka-error" ||
+		strings.Contains(message, "clickhouse-timeout") ||
+		strings.Contains(message, "clickhouse-network") ||
+		strings.Contains(message, "clickhouse-server-error")
+}
+
+func packagePublishFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	chReason := ""
+	switch {
+	case strings.Contains(msg, "clickhouse-timeout"):
+		chReason = "clickhouse-timeout"
+	case strings.Contains(msg, "clickhouse-network"):
+		chReason = "clickhouse-network"
+	case strings.Contains(msg, "clickhouse-server-error"):
+		chReason = "clickhouse-server-error"
+	}
+	kReason := kafkaRetryReason(err)
+	if chReason == "" {
+		return kReason
+	}
+	return kReason + "+" + chReason
+}
+
 func kafkaErrorFailedAllMessages(err error, eventCount int) bool {
 	if err == nil || eventCount <= 0 {
 		return false
@@ -7896,7 +7951,7 @@ func insertPackageRawEventsFallback(ctx context.Context, events []genericEvent) 
 	if err != nil {
 		return err
 	}
-	chunkSize := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", minInt(envInt("KAFKA_WRITE_CHUNK_SIZE", 100), 25)))
+	chunkSize := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", minInt(envInt("KAFKA_WRITE_CHUNK_SIZE", 100), 10)))
 	for _, chunk := range chunkGenericEvents(events, chunkSize) {
 		if err := insertPackageRawEventChunk(ctx, cfg, chunk); err != nil {
 			return err
@@ -7928,8 +7983,15 @@ func failedPackageEventsFromKafkaError(err error) ([]genericEvent, error) {
 }
 
 func insertPackageRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, events []genericEvent) error {
+	return insertPackageRawEventChunkWithSplit(ctx, cfg, events)
+}
+
+func insertPackageRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQueryConfig, events []genericEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
 	var b strings.Builder
-	b.WriteString("INSERT INTO Data_R_Package_Raw.r_package_event_raw SETTINGS insert_distributed_sync = 1 FORMAT JSONEachRow\n")
+	b.WriteString(packageRawEventInsertPrefix(cfg))
 	now := time.Now().UTC()
 	for _, event := range events {
 		row := packageRawEventFallbackRow(event, now)
@@ -7940,7 +8002,27 @@ func insertPackageRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, 
 		b.Write(body)
 		b.WriteByte('\n')
 	}
-	return execPackageRawFallbackChunk(ctx, cfg, b.String(), len(events))
+	err := execPackageRawFallbackChunk(ctx, cfg, b.String(), len(events))
+	if err == nil {
+		return nil
+	}
+	if len(events) > 1 && envBool("RPKG_CLICKHOUSE_FALLBACK_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+		mid := len(events) / 2
+		fmt.Printf("[clickhouse] package raw fallback split events=%d reason=%s\n", len(events), publicClickHouseError(err))
+		if splitErr := insertPackageRawEventChunkWithSplit(ctx, cfg, events[:mid]); splitErr != nil {
+			return splitErr
+		}
+		return insertPackageRawEventChunkWithSplit(ctx, cfg, events[mid:])
+	}
+	return err
+}
+
+func packageRawEventInsertPrefix(cfg clickHouseQueryConfig) string {
+	sync := 0
+	if cfg.InsertDistributedSync {
+		sync = 1
+	}
+	return fmt.Sprintf("INSERT INTO Data_R_Package_Raw.r_package_event_raw SETTINGS insert_distributed_sync = %d, insert_deduplicate = 1 FORMAT JSONEachRow\n", sync)
 }
 
 func execPackageRawFallbackChunk(ctx context.Context, cfg clickHouseQueryConfig, query string, eventCount int) error {
@@ -8080,17 +8162,17 @@ func (p *publisher) writeMessagesWithRetry(ctx context.Context, messages []kafka
 		if len(failed) == 0 {
 			return nil
 		}
-		if p.partitionFallback && shouldUsePartitionFallback(err) {
-			if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
-				return nil
-			} else {
-				return newKafkaPublishError(
-					fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err)),
-					firstKafkaFailedMessages(fallbackErr, failed),
-				)
-			}
-		}
 		if !retryable || attempt == p.writeAttempts {
+			if shouldTryPartitionFallback(err, attempt, p.writeAttempts, p.partitionFallback) {
+				if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
+					return nil
+				} else {
+					return newKafkaPublishError(
+						fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err)),
+						firstKafkaFailedMessages(fallbackErr, failed),
+					)
+				}
+			}
 			return newKafkaPublishError(err, failed)
 		}
 		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, p.writeAttempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
@@ -8100,6 +8182,10 @@ func (p *publisher) writeMessagesWithRetry(ctx context.Context, messages []kafka
 		pending = failed
 	}
 	return lastErr
+}
+
+func shouldTryPartitionFallback(err error, attempt, maxAttempts int, enabled bool) bool {
+	return enabled && attempt >= maxAttempts && shouldUsePartitionFallback(err)
 }
 
 func (p *publisher) writeMessagesToWritablePartition(ctx context.Context, messages []kafka.Message) error {
@@ -8308,6 +8394,9 @@ func retryableKafkaWriteError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	if isKafkaAuthOrPermissionErrorText(err.Error()) {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -8336,6 +8425,9 @@ func retryableKafkaWriteError(err error) bool {
 
 func isRetryableKafkaErrorText(message string) bool {
 	msg := strings.ToLower(message)
+	if isKafkaAuthOrPermissionErrorText(msg) {
+		return false
+	}
 	return strings.Contains(msg, "not leader for partition") ||
 		strings.Contains(msg, "partition has no leader") ||
 		strings.Contains(msg, "has no leader") ||
@@ -8353,6 +8445,30 @@ func isRetryableKafkaErrorText(message string) bool {
 		strings.Contains(msg, "eof")
 }
 
+func isKafkaAuthOrPermissionErrorText(message string) bool {
+	msg := strings.ToLower(message)
+	if strings.Contains(msg, "read tcp") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "failed to dial") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "temporary failure in name resolution") {
+		return false
+	}
+	return strings.Contains(msg, "sasl authentication failed") ||
+		strings.Contains(msg, "authentication failed") ||
+		strings.Contains(msg, "not authorized") ||
+		strings.Contains(msg, "authorization failed") ||
+		strings.Contains(msg, "invalid credentials") ||
+		strings.Contains(msg, "invalid username") ||
+		strings.Contains(msg, "invalid password")
+}
+
 func shouldUsePartitionFallback(err error) bool {
 	return kafkaRetryReason(err) == "leader-metadata-stale" || kafkaRetryReason(err) == "leader-not-available"
 }
@@ -8363,6 +8479,8 @@ func kafkaRetryReason(err error) string {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	case isKafkaAuthOrPermissionErrorText(msg):
+		return "kafka-auth"
 	case strings.Contains(msg, "not leader for partition"),
 		strings.Contains(msg, "partition has no leader"),
 		strings.Contains(msg, "has no leader"),
@@ -8613,13 +8731,14 @@ func doJSONRequest(method, targetURL string, headers map[string]string, body []b
 
 func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 	cfg := clickHouseQueryConfig{
-		Host:     firstNonEmpty(os.Getenv("CH_HOST"), os.Getenv("CLICKHOUSE_HOST")),
-		Port:     maxInt(1, envInt("CH_PORT", envInt("CLICKHOUSE_PORT", 8123))),
-		User:     firstNonEmpty(os.Getenv("CH_USER"), os.Getenv("CLICKHOUSE_USER")),
-		Password: firstNonEmpty(os.Getenv("CH_PASSWORD"), os.Getenv("CLICKHOUSE_PASSWORD")),
-		Database: envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Service")),
-		Secure:   envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
-		Timeout:  time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
+		Host:                  firstNonEmpty(os.Getenv("CH_HOST"), os.Getenv("CLICKHOUSE_HOST")),
+		Port:                  maxInt(1, envInt("CH_PORT", envInt("CLICKHOUSE_PORT", 8123))),
+		User:                  firstNonEmpty(os.Getenv("CH_USER"), os.Getenv("CLICKHOUSE_USER")),
+		Password:              firstNonEmpty(os.Getenv("CH_PASSWORD"), os.Getenv("CLICKHOUSE_PASSWORD")),
+		Database:              envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Service")),
+		Secure:                envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
+		Timeout:               time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
+		InsertDistributedSync: envBool("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", false),
 	}
 	if cfg.Host == "" {
 		return cfg, errors.New("CH_HOST or CLICKHOUSE_HOST is required for DB-backed collectors")
