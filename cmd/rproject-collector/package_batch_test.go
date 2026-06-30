@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,35 @@ func TestSplitIntCSVSortsAndDeduplicates(t *testing.T) {
 	want := []int{1, 3, 5}
 	if !sameInts(got, want) {
 		t.Fatalf("splitIntCSV got %v want %v", got, want)
+	}
+}
+
+func TestFallbackPartitionIDsUsesCachedMetadata(t *testing.T) {
+	pub := &publisher{
+		topic:           "rpkg.events",
+		knownPartitions: []int{2, 0, 2, 1},
+	}
+	got, err := pub.fallbackPartitionIDs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int{0, 1, 2}
+	if !sameInts(got, want) {
+		t.Fatalf("fallbackPartitionIDs got %v want %v", got, want)
+	}
+}
+
+func TestPartitionIDsForTopicFiltersAndSorts(t *testing.T) {
+	partitions := []kafka.Partition{
+		{Topic: "other.events", ID: 9},
+		{Topic: "rpkg.events", ID: 2},
+		{Topic: "rpkg.events", ID: 0},
+		{Topic: "rpkg.events", ID: 2},
+	}
+	got := partitionIDsForTopic(partitions, "rpkg.events")
+	want := []int{0, 2}
+	if !sameInts(got, want) {
+		t.Fatalf("partitionIDsForTopic got %v want %v", got, want)
 	}
 }
 
@@ -177,6 +207,26 @@ func TestFailedPackageEventsFromKafkaErrorUsesOnlyFailedMessages(t *testing.T) {
 	}
 	if len(failedEvents) != 1 || failedEvents[0].EventID != events[1].EventID {
 		t.Fatalf("failed events = %+v, want only second event", failedEvents)
+	}
+}
+
+func TestRetryableClickHouseFallbackError(t *testing.T) {
+	if !retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 500: timeout exceeded")) {
+		t.Fatal("expected ClickHouse HTTP 5xx timeout to be retryable")
+	}
+	if retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 403: not enough privileges")) {
+		t.Fatal("permission errors should not be retried")
+	}
+}
+
+func TestShortKafkaErrorSanitizesIPAddresses(t *testing.T) {
+	err := errors.New("SASL handshake failed: read tcp 10.1.0.222:59538->203.0.113.10:9092: connection reset by peer")
+	got := shortKafkaError(err)
+	if strings.Contains(got, "10.1.0.222") || strings.Contains(got, "203.0.113.10") {
+		t.Fatalf("shortKafkaError leaked IP address: %s", got)
+	}
+	if !strings.Contains(got, "[ip]") {
+		t.Fatalf("shortKafkaError should keep a sanitized endpoint marker: %s", got)
 	}
 }
 

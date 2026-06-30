@@ -59,6 +59,7 @@ var (
 	githubRepoRE      = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([^/\s?#]+)/([^/\s?#]+)`)
 	cranPackageLinkRE = regexp.MustCompile(`(?i)(?:/web/packages/|\.\./packages/)([^/\s?#"']+)/?`)
 	isoDurationRE     = regexp.MustCompile(`^P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$`)
+	kafkaIPv4RE       = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
 	depVersionRE      = regexp.MustCompile(`\s*\(.*?\)\s*`)
 	boardURLRE        = regexp.MustCompile(`(?i)\b(?:https?://|www\.)[^\s<>()"']+`)
 	boardMdLinkRE     = regexp.MustCompile(`\[([^\]]+)\]\((?:https?://|www\.)[^)]+\)`)
@@ -207,6 +208,7 @@ type publisher struct {
 	writeBackoffMax    time.Duration
 	partitionFallback  bool
 	fallbackPartitions []int
+	knownPartitions    []int
 	fallbackTimeout    time.Duration
 }
 
@@ -7713,6 +7715,7 @@ func (p *publisher) validate(ctx context.Context) error {
 	if err := validateKafkaAdvertisedLeaders(partitions, p.brokers, "kafka metadata"); err != nil {
 		return err
 	}
+	p.knownPartitions = partitionIDsForTopic(partitions, p.topic)
 	return nil
 }
 
@@ -7893,7 +7896,7 @@ func insertPackageRawEventsFallback(ctx context.Context, events []genericEvent) 
 	if err != nil {
 		return err
 	}
-	chunkSize := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", envInt("KAFKA_WRITE_CHUNK_SIZE", 100)))
+	chunkSize := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", minInt(envInt("KAFKA_WRITE_CHUNK_SIZE", 100), 25)))
 	for _, chunk := range chunkGenericEvents(events, chunkSize) {
 		if err := insertPackageRawEventChunk(ctx, cfg, chunk); err != nil {
 			return err
@@ -7937,7 +7940,47 @@ func insertPackageRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, 
 		b.Write(body)
 		b.WriteByte('\n')
 	}
-	return cfg.exec(ctx, b.String())
+	return execPackageRawFallbackChunk(ctx, cfg, b.String(), len(events))
+}
+
+func execPackageRawFallbackChunk(ctx context.Context, cfg clickHouseQueryConfig, query string, eventCount int) error {
+	attempts := maxInt(1, envInt("RPKG_CLICKHOUSE_FALLBACK_ATTEMPTS", 3))
+	backoff := time.Duration(envFloat("RPKG_CLICKHOUSE_FALLBACK_BACKOFF_SECONDS", 2.0) * float64(time.Second))
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err := cfg.exec(ctx, query)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("[clickhouse] package raw fallback retry succeeded attempt=%d events=%d\n", attempt, eventCount)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt == attempts || !retryableClickHouseFallbackError(err) {
+			return err
+		}
+		fmt.Printf("[clickhouse] package raw fallback retry attempt=%d/%d events=%d reason=%s\n", attempt+1, attempts, eventCount, publicClickHouseError(err))
+		if sleepErr := sleepContext(ctx, backoff); sleepErr != nil {
+			return fmt.Errorf("clickhouse fallback retry wait stopped: %w; last_error=%s", sleepErr, publicClickHouseError(lastErr))
+		}
+	}
+	return lastErr
+}
+
+func retryableClickHouseFallbackError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "temporary failure in name resolution") ||
+		strings.Contains(msg, "clickhouse http 5")
 }
 
 func packageRawEventFallbackRow(event genericEvent, now time.Time) map[string]any {
@@ -8163,6 +8206,11 @@ func (p *publisher) fallbackPartitionIDs(ctx context.Context) ([]int, error) {
 		sort.Ints(out)
 		return uniqueInts(out), nil
 	}
+	if len(p.knownPartitions) > 0 {
+		out := append([]int(nil), p.knownPartitions...)
+		sort.Ints(out)
+		return uniqueInts(out), nil
+	}
 
 	dialer := p.dialer()
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -8177,14 +8225,18 @@ func (p *publisher) fallbackPartitionIDs(ctx context.Context) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka partition fallback failed to read metadata for topic %q: %w", p.topic, err)
 	}
+	return partitionIDsForTopic(partitions, p.topic), nil
+}
+
+func partitionIDsForTopic(partitions []kafka.Partition, topic string) []int {
 	out := make([]int, 0, len(partitions))
 	for _, partition := range partitions {
-		if partition.Topic == p.topic {
+		if partition.Topic == topic {
 			out = append(out, partition.ID)
 		}
 	}
 	sort.Ints(out)
-	return uniqueInts(out), nil
+	return uniqueInts(out)
 }
 
 type fixedPartitionBalancer struct {
@@ -8376,8 +8428,12 @@ func shortKafkaError(err error) string {
 	if err == nil {
 		return ""
 	}
-	msg := strings.Join(strings.Fields(err.Error()), " ")
+	msg := sanitizeKafkaError(strings.Join(strings.Fields(err.Error()), " "))
 	return truncate(msg, 280)
+}
+
+func sanitizeKafkaError(message string) string {
+	return kafkaIPv4RE.ReplaceAllString(message, "[ip]")
 }
 
 func publicClickHouseError(err error) string {
