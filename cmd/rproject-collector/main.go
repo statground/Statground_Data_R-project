@@ -7800,6 +7800,22 @@ func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) e
 				directFallback = true
 				continue
 			}
+			if fallbackEnabled {
+				failedEvents, failedErr := failedPackageEventsFromKafkaError(err)
+				if failedErr != nil {
+					return fmt.Errorf("kafka publish failed and failed-message extraction failed: %w; original_error=%s", failedErr, shortKafkaError(err))
+				}
+				if len(failedEvents) > 0 {
+					if fallbackErr := insertPackageRawEventsFallback(ctx, failedEvents); fallbackErr != nil {
+						return fmt.Errorf("partial kafka publish failed and ClickHouse package raw fallback failed: %s; original_error=%s", publicClickHouseError(fallbackErr), shortKafkaError(err))
+					}
+					fmt.Printf("[clickhouse] package raw partial fallback succeeded events=%d reason=%s\n", len(failedEvents), kafkaRetryReason(err))
+					if len(failedEvents) == len(chunk) {
+						directFallback = true
+					}
+					continue
+				}
+			}
 			return err
 		}
 	}
@@ -7884,6 +7900,28 @@ func insertPackageRawEventsFallback(ctx context.Context, events []genericEvent) 
 		}
 	}
 	return nil
+}
+
+func failedPackageEventsFromKafkaError(err error) ([]genericEvent, error) {
+	messages := kafkaFailedMessages(err)
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	events := make([]genericEvent, 0, len(messages))
+	for _, message := range messages {
+		var event genericEvent
+		if decodeErr := json.Unmarshal(message.Value, &event); decodeErr != nil {
+			return nil, decodeErr
+		}
+		if event.EventID == "" || event.EventType == "" {
+			return nil, fmt.Errorf("failed kafka message is missing package event identity")
+		}
+		if !strings.HasPrefix(event.EventType, "rpkg.") {
+			return nil, fmt.Errorf("failed kafka message event_type %q is not a package event", event.EventType)
+		}
+		events = append(events, event)
+	}
+	return events, nil
 }
 
 func insertPackageRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, events []genericEvent) error {
@@ -8003,11 +8041,14 @@ func (p *publisher) writeMessagesWithRetry(ctx context.Context, messages []kafka
 			if fallbackErr := p.writeMessagesToWritablePartition(ctx, failed); fallbackErr == nil {
 				return nil
 			} else {
-				return fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err))
+				return newKafkaPublishError(
+					fmt.Errorf("kafka publish failed after fixed-partition fallback: %s; original_error=%s", shortKafkaError(fallbackErr), shortKafkaError(err)),
+					firstKafkaFailedMessages(fallbackErr, failed),
+				)
 			}
 		}
 		if !retryable || attempt == p.writeAttempts {
-			return err
+			return newKafkaPublishError(err, failed)
 		}
 		fmt.Printf("[kafka] retrying publish attempt=%d/%d failed_messages=%d reason=%s error=%s\n", attempt+1, p.writeAttempts, len(failed), kafkaRetryReason(err), shortKafkaError(err))
 		if err := sleepContext(ctx, kafkaBackoffDuration(attempt, p.writeBackoffMin, p.writeBackoffMax)); err != nil {
@@ -8024,10 +8065,10 @@ func (p *publisher) writeMessagesToWritablePartition(ctx context.Context, messag
 	}
 	partitions, err := p.fallbackPartitionIDs(ctx)
 	if err != nil {
-		return err
+		return newKafkaPublishError(err, messages)
 	}
 	if len(partitions) == 0 {
-		return fmt.Errorf("kafka partition fallback found zero partitions for topic=%s", p.topic)
+		return newKafkaPublishError(fmt.Errorf("kafka partition fallback found zero partitions for topic=%s", p.topic), messages)
 	}
 
 	pending := messages
@@ -8054,10 +8095,66 @@ func (p *publisher) writeMessagesToWritablePartition(ctx context.Context, messag
 		pending = failed
 		fmt.Printf("[kafka] fixed partition fallback failed partition=%d failed_messages=%d reason=%s error=%s\n", partition, len(pending), kafkaRetryReason(err), shortKafkaError(err))
 		if !retryable {
-			return err
+			return newKafkaPublishError(err, failed)
 		}
 	}
-	return fmt.Errorf("kafka fixed partition fallback exhausted partitions=%v failed_messages=%d last_error=%s", partitions, len(pending), shortKafkaError(lastErr))
+	return newKafkaPublishError(fmt.Errorf("kafka fixed partition fallback exhausted partitions=%v failed_messages=%d last_error=%s", partitions, len(pending), shortKafkaError(lastErr)), pending)
+}
+
+type kafkaPublishError struct {
+	err            error
+	failedMessages []kafka.Message
+}
+
+func (err *kafkaPublishError) Error() string {
+	if err == nil || err.err == nil {
+		return ""
+	}
+	return err.err.Error()
+}
+
+func (err *kafkaPublishError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.err
+}
+
+func newKafkaPublishError(err error, failedMessages []kafka.Message) error {
+	if err == nil {
+		return nil
+	}
+	if len(failedMessages) == 0 {
+		return err
+	}
+	return &kafkaPublishError{
+		err:            err,
+		failedMessages: cloneKafkaMessages(failedMessages),
+	}
+}
+
+func kafkaFailedMessages(err error) []kafka.Message {
+	var publishErr *kafkaPublishError
+	if !errors.As(err, &publishErr) || publishErr == nil {
+		return nil
+	}
+	return cloneKafkaMessages(publishErr.failedMessages)
+}
+
+func firstKafkaFailedMessages(err error, fallback []kafka.Message) []kafka.Message {
+	if failed := kafkaFailedMessages(err); len(failed) > 0 {
+		return failed
+	}
+	return fallback
+}
+
+func cloneKafkaMessages(messages []kafka.Message) []kafka.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]kafka.Message, len(messages))
+	copy(out, messages)
+	return out
 }
 
 func (p *publisher) fallbackPartitionIDs(ctx context.Context) ([]int, error) {
@@ -8156,8 +8253,11 @@ func retryableKafkaWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	var writeErrs kafka.WriteErrors
 	if errors.As(err, &writeErrs) {

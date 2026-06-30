@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/segmentio/kafka-go"
 )
+
+type kafkaTimeoutError struct{}
+
+func (kafkaTimeoutError) Error() string {
+	return "kafka.(*Client).Produce: dial tcp 203.0.113.10:9092: i/o timeout"
+}
+func (kafkaTimeoutError) Timeout() bool   { return true }
+func (kafkaTimeoutError) Temporary() bool { return true }
 
 func TestPackagePageBatchIndexesContinuesAfterCursor(t *testing.T) {
 	keys := []string{"a", "b", "c", "d"}
@@ -100,6 +109,74 @@ func TestShouldUsePackageClickHouseFallbackRequiresWholeChunkFailure(t *testing.
 	otherCount := errors.New("kafka fixed partition fallback exhausted partitions=[0 1 2] failed_messages=1000 last_error=Kafka write errors (1000/1000), errors: [[6] Not Leader For Partition]")
 	if shouldUsePackageClickHouseFallback(otherCount, 100) {
 		t.Fatal("failed_messages=1000 must not be treated as failed_messages=100")
+	}
+}
+
+func TestRetryableFailedMessagesExtractsPartialKafkaWriteErrors(t *testing.T) {
+	messages := []kafka.Message{
+		{Key: []byte("ok-1")},
+		{Key: []byte("failed-1")},
+		{Key: []byte("ok-2")},
+		{Key: []byte("failed-2")},
+	}
+	failed, retryable := retryableFailedMessages(messages, kafka.WriteErrors{
+		nil,
+		kafkaTimeoutError{},
+		nil,
+		kafkaTimeoutError{},
+	})
+	if !retryable {
+		t.Fatal("expected i/o timeout write errors to be retryable")
+	}
+	if len(failed) != 2 {
+		t.Fatalf("failed message count = %d, want 2", len(failed))
+	}
+	if string(failed[0].Key) != "failed-1" || string(failed[1].Key) != "failed-2" {
+		t.Fatalf("failed messages = %q, %q; want failed-1, failed-2", failed[0].Key, failed[1].Key)
+	}
+}
+
+func TestRetryableKafkaWriteErrorTreatsAttemptDeadlineAsRetryable(t *testing.T) {
+	if !retryableKafkaWriteError(context.DeadlineExceeded) {
+		t.Fatal("per-attempt deadline should be retryable")
+	}
+	if retryableKafkaWriteError(context.Canceled) {
+		t.Fatal("canceled context should not be retried")
+	}
+}
+
+func TestFailedPackageEventsFromKafkaErrorUsesOnlyFailedMessages(t *testing.T) {
+	events := []genericEvent{
+		{
+			EventID:       "0197b9b4-90c0-7000-8000-000000000001",
+			EventType:     "rpkg.cran.reverse_dependency_edge.v1",
+			SchemaVersion: 1,
+			Repository:    "CRAN",
+			PackageName:   "A3",
+			PayloadHash:   "hash-a3",
+			Payload:       `{"package":"A3"}`,
+		},
+		{
+			EventID:       "0197b9b4-90c0-7000-8000-000000000002",
+			EventType:     "rpkg.cran.reverse_dependency_edge.v1",
+			SchemaVersion: 1,
+			Repository:    "CRAN",
+			PackageName:   "A4",
+			PayloadHash:   "hash-a4",
+			Payload:       `{"package":"A4"}`,
+		},
+	}
+	messages, err := genericEventsToMessages(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishErr := newKafkaPublishError(kafka.WriteErrors{nil, kafkaTimeoutError{}}, []kafka.Message{messages[1]})
+	failedEvents, err := failedPackageEventsFromKafkaError(publishErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failedEvents) != 1 || failedEvents[0].EventID != events[1].EventID {
+		t.Fatalf("failed events = %+v, want only second event", failedEvents)
 	}
 }
 
