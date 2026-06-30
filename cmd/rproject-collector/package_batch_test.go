@@ -393,6 +393,60 @@ func TestGenericRawEventDirectRowOmitsPackageFieldsForCommunity(t *testing.T) {
 	}
 }
 
+func TestCommunityDigestDirectRowsBuildsClickHouseRows(t *testing.T) {
+	now := time.Date(2026, 7, 1, 3, 4, 5, 0, time.UTC)
+	rows, err := communityDigestDirectRows([]communityDigestRecord{{
+		DigestID:         "digest:test",
+		DigestUUID:       "0197b9b4-90c0-7000-8000-000000000010",
+		DigestDate:       "2026-07-01",
+		SourceType:       "qna_feed",
+		SourceID:         "community:stackoverflow:r",
+		SourceName:       "Stack Overflow R",
+		Platform:         "stack_overflow",
+		SourceURL:        "https://stackoverflow.com/questions/tagged/r",
+		Title:            "R 질문 요약",
+		Summary:          "<p>요약입니다.</p>",
+		ItemCount:        2,
+		DedupedItemCount: 1,
+		Items: []communityDigestItem{{
+			ExternalID:   "item-1",
+			Title:        "Question",
+			CanonicalURL: "https://example.com/q/1",
+		}},
+		Model:       "test-model",
+		PromptHash:  "prompt-hash",
+		Status:      "generated",
+		GeneratedAt: "2026-07-01T03:00:00+09:00",
+		PayloadHash: "payload-hash",
+	}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row["digest_id"] != "digest:test" || row["source_id"] != "community:stackoverflow:r" {
+		t.Fatalf("unexpected digest row identity: %+v", row)
+	}
+	if !strings.Contains(row["source_items_json"].(string), "https://example.com/q/1") {
+		t.Fatalf("source_items_json missing canonical URL: %v", row["source_items_json"])
+	}
+	if row["version"] != uint64(now.UnixMilli()) {
+		t.Fatalf("version = %v, want %d", row["version"], now.UnixMilli())
+	}
+}
+
+func TestCommunityDigestDirectInsertPrefixDefaultsAsync(t *testing.T) {
+	got := genericRawEventInsertPrefix(clickHouseQueryConfig{}, "Data_R_Community_Service.r_community_daily_digest")
+	if !strings.Contains(got, "insert_distributed_sync = 0") {
+		t.Fatalf("digest direct insert should not wait for distributed sync by default: %s", got)
+	}
+	if !strings.Contains(got, "insert_deduplicate = 1") {
+		t.Fatalf("digest direct insert should request deduplication: %s", got)
+	}
+}
+
 func packageNames(records []cranRecord) []string {
 	out := make([]string, 0, len(records))
 	for _, record := range records {

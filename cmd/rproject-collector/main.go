@@ -1402,7 +1402,7 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	missingOnly := fs.Bool("missing-only", envBool("R_COMMUNITY_DIGEST_MISSING_ONLY", false), "only publish or insert digest groups not already present in the latest digest view")
 	latestPerSource := fs.Bool("latest-per-source", envBool("R_COMMUNITY_DIGEST_LATEST_PER_SOURCE", true), "publish at most the newest missing digest group per source in one run")
 	planOutput := fs.String("plan-output", envString("R_COMMUNITY_DIGEST_PLAN_OUTPUT", ""), "write planned digest ids to this JSON file for visibility wait")
-	publishKafka := fs.Bool("publish-kafka", envBool("R_COMMUNITY_DIGEST_PUBLISH_KAFKA", true), "publish digest events to Kafka after optional direct ClickHouse insert")
+	publishKafka := fs.Bool("publish-kafka", envBool("R_COMMUNITY_DIGEST_PUBLISH_KAFKA", false), "publish digest events to Kafka after optional direct ClickHouse insert")
 	fs.Parse(args)
 
 	cfg, err := newClickHouseQueryConfig()
@@ -2346,12 +2346,21 @@ func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig
 	if len(records) == 0 {
 		return nil
 	}
-	var b strings.Builder
-	b.WriteString("INSERT INTO Data_R_Community_Service.r_community_daily_digest SETTINGS insert_distributed_sync = 1 FORMAT JSONEachRow\n")
-	now := nowKST()
+	rows, err := communityDigestDirectRows(records, nowKST())
+	if err != nil {
+		return err
+	}
+	return insertDirectRows(ctx, cfg, "Data_R_Community_Service.r_community_daily_digest", rows)
+}
+
+func communityDigestDirectRows(records []communityDigestRecord, now time.Time) ([]map[string]any, error) {
+	rows := make([]map[string]any, 0, len(records))
 	for _, record := range records {
-		itemsJSON, _ := json.Marshal(record.Items)
-		row := map[string]any{
+		itemsJSON, err := json.Marshal(record.Items)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, map[string]any{
 			"digest_id":          record.DigestID,
 			"digest_uuid":        record.DigestUUID,
 			"digest_date":        record.DigestDate,
@@ -2373,15 +2382,9 @@ func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig
 			"payload_hash":       record.PayloadHash,
 			"active":             1,
 			"version":            uint64(now.UnixMilli()),
-		}
-		body, err := json.Marshal(row)
-		if err != nil {
-			return err
-		}
-		b.Write(body)
-		b.WriteByte('\n')
+		})
 	}
-	return cfg.exec(ctx, b.String())
+	return rows, nil
 }
 
 func communityDigestCanonicalKey(raw string) string {
