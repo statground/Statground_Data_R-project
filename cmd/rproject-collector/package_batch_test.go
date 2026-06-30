@@ -313,6 +313,86 @@ func TestPublicClickHouseErrorSanitizesDetails(t *testing.T) {
 	}
 }
 
+func TestNormalizePublishModeDefaultsToClickHouse(t *testing.T) {
+	cases := map[string]string{
+		"":                 "clickhouse",
+		"db":               "clickhouse",
+		"direct":           "clickhouse",
+		"kafka":            "kafka",
+		"dual":             "dual",
+		"clickhouse+kafka": "dual",
+		"unexpected":       "clickhouse",
+	}
+	for input, want := range cases {
+		if got := normalizePublishMode(input); got != want {
+			t.Fatalf("normalizePublishMode(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestPublisherValidateSkipsKafkaInClickHouseMode(t *testing.T) {
+	pub := &publisher{publishMode: "clickhouse"}
+	if err := pub.validate(context.Background()); err != nil {
+		t.Fatalf("clickhouse publish mode should not require Kafka config: %v", err)
+	}
+}
+
+func TestGenericEventDirectTargetRoutesSupportedFamilies(t *testing.T) {
+	cases := []struct {
+		eventType      string
+		table          string
+		includePackage bool
+	}{
+		{"rpkg.cran.package_snapshot.v1", "Data_R_Package_Raw.r_package_event_raw", true},
+		{"r.youtube.video.snapshot.v1", "Data_R_Community_Raw.r_youtube_event_raw", true},
+		{"r.community.item.v1", "Data_R_Community_Raw.r_community_event_raw", false},
+	}
+	for _, tc := range cases {
+		got, err := genericEventDirectTarget(genericEvent{EventType: tc.eventType})
+		if err != nil {
+			t.Fatalf("genericEventDirectTarget(%q) returned error: %v", tc.eventType, err)
+		}
+		if got.table != tc.table || got.includePackage != tc.includePackage {
+			t.Fatalf("genericEventDirectTarget(%q) = %+v, want table=%s includePackage=%t", tc.eventType, got, tc.table, tc.includePackage)
+		}
+	}
+}
+
+func TestGenericEventsDirectTargetRejectsMixedTables(t *testing.T) {
+	_, err := genericEventsDirectTarget([]genericEvent{
+		{EventType: "rpkg.cran.package_snapshot.v1"},
+		{EventType: "r.community.item.v1"},
+	})
+	if err == nil {
+		t.Fatal("mixed direct ClickHouse targets should fail instead of inserting into the wrong raw table")
+	}
+}
+
+func TestGenericRawEventDirectRowOmitsPackageFieldsForCommunity(t *testing.T) {
+	event := genericEvent{
+		EventID:       "0197b9b4-90c0-7000-8000-000000000001",
+		EventType:     "r.community.item.v1",
+		SchemaVersion: 1,
+		Source:        "R-Community",
+		SourceURL:     "https://example.com/item",
+		Repository:    "R-Community",
+		ObservedAt:    "2026-06-30T00:00:00.000Z",
+		CollectedAt:   "2026-06-30T01:00:00.000Z",
+		PayloadHash:   "abc123",
+		Payload:       `{"source_id":"community:test"}`,
+	}
+	row := genericRawEventDirectRow(event, time.Date(2026, 6, 30, 2, 0, 0, 0, time.UTC), false)
+	if _, ok := row["package_name"]; ok {
+		t.Fatal("community raw events must not include package_name")
+	}
+	if row["uuid"] != event.EventID || row["event_type"] != event.EventType {
+		t.Fatalf("unexpected direct row identity: %+v", row)
+	}
+	if row["ingested_at"] != "2026-06-30 11:00:00.000" {
+		t.Fatalf("ingested_at = %v", row["ingested_at"])
+	}
+}
+
 func packageNames(records []cranRecord) []string {
 	out := make([]string, 0, len(records))
 	for _, record := range records {

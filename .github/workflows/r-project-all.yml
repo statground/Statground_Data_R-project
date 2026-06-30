@@ -36,12 +36,7 @@ defaults:
 env:
   TZ: Asia/Seoul
   PYTHONUNBUFFERED: "1"
-  KAFKA_WRITE_ATTEMPTS: ${{ vars.KAFKA_WRITE_ATTEMPTS || '3' }}
-  KAFKA_WRITE_BACKOFF_MIN: ${{ vars.KAFKA_WRITE_BACKOFF_MIN || '1.0' }}
-  KAFKA_WRITE_BACKOFF_MAX: ${{ vars.KAFKA_WRITE_BACKOFF_MAX || '12.0' }}
-  KAFKA_WRITER_MAX_ATTEMPTS: ${{ vars.KAFKA_WRITER_MAX_ATTEMPTS || '1' }}
-  KAFKA_PARTITION_FALLBACK_ENABLED: ${{ vars.KAFKA_PARTITION_FALLBACK_ENABLED || 'true' }}
-  KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS: ${{ vars.KAFKA_PARTITION_FALLBACK_TIMEOUT_SECONDS || '8.0' }}
+  RPROJECT_PUBLISH_MODE: ${{ vars.RPROJECT_PUBLISH_MODE || 'clickhouse' }}
 
 concurrency:
   group: r-project-data-collection
@@ -92,35 +87,6 @@ jobs:
           python -m pip install --user yt-dlp
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Validate Kafka settings
-        env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-        run: |
-          test -n "$KAFKA_BROKERS" || { echo "Kafka broker secret is required"; exit 1; }
-          test -n "$KAFKA_USERNAME" || { echo "Kafka username secret is required"; exit 1; }
-          test -n "$KAFKA_PASSWORD" || { echo "Kafka password secret is required"; exit 1; }
-          python3 - <<'PY'
-          import hashlib
-          import os
-
-          brokers = os.environ.get("KAFKA_BROKERS", "")
-          safe = brokers.replace(".", "[.]").replace(":", "[:]").replace(",", ", ")
-          print(f"KAFKA_BROKERS_SANITIZED={safe}")
-          print(f"KAFKA_BROKERS_SHA256={hashlib.sha256(brokers.encode()).hexdigest()}")
-          PY
-          case ",$KAFKA_BROKERS," in
-            *,180.66.240.243:50004,*)
-              echo "KAFKA_BROKERS still contains old broker endpoint 180.66.240.243:50004"
-              exit 1
-              ;;
-            *,127.0.0.1:*|*,localhost:*|*,0.0.0.0:*|*,[::1]:*)
-              echo "KAFKA_BROKERS must be a public IP/domain endpoint, not a loopback address"
-              exit 1
-              ;;
-          esac
-
       - name: Validate ClickHouse settings
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -133,27 +99,16 @@ jobs:
 
       - name: Collect R package ecosystem
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
-          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
           CH_DATABASE: Data_R_Package_Raw
-          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
-          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
-          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
-          KAFKA_WRITE_CHUNK_SIZE: ${{ vars.RPKG_KAFKA_WRITE_CHUNK_SIZE || '100' }}
-          RPKG_CLICKHOUSE_FALLBACK_ENABLED: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_ENABLED || 'true' }}
-          RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE || '10' }}
-          RPKG_CLICKHOUSE_FALLBACK_ATTEMPTS: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_ATTEMPTS || '3' }}
-          RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC: ${{ vars.RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC || 'false' }}
+          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.RPROJECT_CLICKHOUSE_CHUNK_SIZE || '50' }}
+          RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.RPROJECT_CLICKHOUSE_ATTEMPTS || '3' }}
+          RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC: ${{ vars.RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC || 'false' }}
           RPKG_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RPKG_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
-          RPKG_KAFKA_TOPIC: ${{ vars.RPKG_KAFKA_TOPIC || 'rpkg.events' }}
           RPKG_JOB: ${{ steps.opts.outputs.r_package_job }}
           RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}
           RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '50' }}
@@ -189,21 +144,12 @@ jobs:
 
       - name: Collect public R YouTube signals
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
-          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
-          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
-          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
-          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
           CH_DATABASE: Data_R_Community_Service
-          R_YOUTUBE_KAFKA_TOPIC: ${{ vars.R_YOUTUBE_KAFKA_TOPIC || 'r.youtube.events' }}
           R_YOUTUBE_JOB: ${{ steps.opts.outputs.r_youtube_job }}
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '200' }}
           R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '20' }}
@@ -227,12 +173,6 @@ jobs:
 
       - name: Collect R-bloggers
         env:
-          KAFKA_TOPIC: webr.events
-          KAFKA_CLIENT_ID: statground-rblogger-crawler
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
           TRANSLATE_ENABLED: ${{ vars.RBLOGGER_TRANSLATE_ENABLED || 'true' }}
@@ -261,15 +201,6 @@ jobs:
 
       - name: Collect R Foundation public Mastodon RSS
         env:
-          KAFKA_TOPIC: webr.events
-          KAFKA_CLIENT_ID: statground-mastodon-rss-collector
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
-          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
-          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
-          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
           MASTODON_INSTANCE: ${{ vars.MASTODON_INSTANCE || 'https://fosstodon.org' }}
@@ -334,17 +265,8 @@ jobs:
             --report data/collected/r/latest_report.json \
             --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS"
 
-      - name: Publish R Community events to Kafka
+      - name: Publish R Community events to ClickHouse
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
-          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
-          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
-          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
-          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
-          R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
           R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
           R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || 'community:stackoverflow:r,community:posit:latest-r-filtered,reddit:r/rstats,reddit:r/rprogramming' }}
           R_COMMUNITY_PRIORITY_SOURCE_IDS: ${{ vars.R_COMMUNITY_PRIORITY_SOURCE_IDS || 'community:posit:events' }}
@@ -366,7 +288,6 @@ jobs:
           go run ./cmd/rproject-collector community \
             --jsonl data/collected/r/latest.jsonl \
             --report data/collected/r/latest_report.json \
-            --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --limit "$R_COMMUNITY_EVENT_LIMIT" \
             --translate="$R_COMMUNITY_TRANSLATE_ENABLED" \
             --translation-limit "$R_COMMUNITY_TRANSLATION_LIMIT" \
@@ -392,15 +313,6 @@ jobs:
 
       - name: Generate R Community daily digests
         env:
-          KAFKA_BROKERS: ${{ secrets.KAFKA_BROKERS2 }}
-          KAFKA_USERNAME: ${{ secrets.KAFKA_USERNAME2 }}
-          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD2 }}
-          KAFKA_SECURITY_PROTOCOL: ${{ secrets.KAFKA_SECURITY_PROTOCOL || 'SASL_PLAINTEXT' }}
-          KAFKA_SASL_MECHANISM: ${{ secrets.KAFKA_SASL_MECHANISM || 'PLAIN' }}
-          KAFKA_CREATE_TOPIC: ${{ vars.KAFKA_CREATE_TOPIC || 'true' }}
-          KAFKA_TOPIC_PARTITIONS: ${{ vars.KAFKA_TOPIC_PARTITIONS || '3' }}
-          KAFKA_TOPIC_REPLICATION_FACTOR: ${{ vars.KAFKA_TOPIC_REPLICATION_FACTOR || '1' }}
-          R_COMMUNITY_KAFKA_TOPIC: ${{ vars.R_COMMUNITY_KAFKA_TOPIC || 'r.community.events' }}
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
           R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS: ${{ vars.R_COMMUNITY_DIGEST_EXCLUDED_SOURCE_IDS || 'mastodon:group:rstats' }}
@@ -409,7 +321,7 @@ jobs:
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
           R_COMMUNITY_DIGEST_LATEST_PER_SOURCE: ${{ vars.R_COMMUNITY_DIGEST_LATEST_PER_SOURCE || 'true' }}
           R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE: ${{ vars.R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE || 'true' }}
-          R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'true' }}
+          R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'false' }}
           R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -422,7 +334,6 @@ jobs:
           GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
         run: |
           go run ./cmd/rproject-collector community-digest \
-            --topic "$R_COMMUNITY_KAFKA_TOPIC" \
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --items-per-digest "$R_COMMUNITY_DIGEST_ITEMS_PER_DIGEST" \
             --missing-only="$R_COMMUNITY_DIGEST_MISSING_ONLY" \

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +70,7 @@ type Config struct {
 	AITimeout             time.Duration `json:"ai_timeout"`
 	RebuildLimit          int           `json:"rebuild_limit"`
 	RebuildBatchSize      int           `json:"rebuild_batch_size"`
+	PublishMode           string        `json:"publish_mode"`
 	Kafka                 KafkaConfig      `json:"kafka"`
 	ClickHouse            ClickHouseConfig `json:"clickhouse"`
 }
@@ -156,7 +158,7 @@ type StaleRawArticle struct {
 }
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "validate configuration without crawling or publishing Kafka")
+	dryRun := flag.Bool("dry-run", false, "validate configuration without crawling or publishing")
 	rebuildBoard := flag.Bool("rebuild-board", false, "retranslate all active raw rows and rebuild ClickHouse board rows")
 	flag.Parse()
 
@@ -186,15 +188,22 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		return nil, errors.New("TRANSLATE_ENABLED is true, but no AI provider key is configured")
 	}
 	publisher := NewKafkaPublisher(cfg.Kafka)
-	if err := publisher.Validate(ctx); err != nil {
-		return nil, err
+	if usesKafkaPublishMode(cfg.PublishMode) {
+		if err := publisher.Validate(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if usesClickHousePublishMode(cfg.PublishMode) {
+		if err := validateClickHouseConfig(cfg.ClickHouse); err != nil {
+			return nil, err
+		}
 	}
 	if dryRun {
 		return map[string]any{
 			"ok":                      true,
 			"dry_run":                 true,
 			"ai_providers":            ai.providers,
-			"kafka_topic":             cfg.Kafka.Topic,
+			"publish_mode":            cfg.PublishMode,
 			"stale_translation_limit": cfg.StaleTranslationLimit,
 			"config":                  cfg,
 		}, nil
@@ -368,8 +377,18 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		"language_code": "en",
 	}, doneAt))
 
-	if err := publisher.Publish(ctx, events); err != nil {
-		return nil, err
+	directCounts := map[string]int{}
+	if usesClickHousePublishMode(cfg.PublishMode) {
+		counts, err := clickHouse.InsertRbloggerEvents(ctx, events, cfg.Kafka.WriteChunkSize)
+		if err != nil {
+			return nil, err
+		}
+		directCounts = counts
+	}
+	if usesKafkaPublishMode(cfg.PublishMode) {
+		if err := publisher.Publish(ctx, events); err != nil {
+			return nil, err
+		}
 	}
 
 	ok := (!cfg.FailOnListError || len(listErrors) == 0) && (!cfg.FailOnCrawlError || len(crawlErrors) == 0) && (!cfg.FailOnTranslationErr || len(translationErrors) == 0)
@@ -382,7 +401,9 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		"published_board":    publishedBoard,
 		"stale_candidates":   staleCandidates,
 		"stale_published":    stalePublished,
-		"kafka_events":       len(events),
+		"publish_mode":       cfg.PublishMode,
+		"published_events":   len(events),
+		"direct_tables":      directCounts,
 		"list_errors":        listErrors,
 		"crawl_errors":       crawlErrors,
 		"translation_errors": translationErrors,
@@ -485,6 +506,7 @@ func runBoardRebuild(ctx context.Context, cfg Config, dryRun bool) (map[string]a
 }
 
 func loadConfig(rebuildBoard bool) (Config, error) {
+	publishMode := normalizePublishMode(envString("RPROJECT_PUBLISH_MODE", envString("R_DATA_PUBLISH_MODE", "clickhouse")))
 	kafkaCfg := KafkaConfig{
 		Brokers:         splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
 		Username:        firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
@@ -500,10 +522,10 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		ProducerSource:  envString("PRODUCER_SOURCE", "github_actions"),
 		ProducerIP:      envString("PRODUCER_IP", "::"),
 	}
-	if !rebuildBoard && len(kafkaCfg.Brokers) == 0 {
+	if !rebuildBoard && usesKafkaPublishMode(publishMode) && len(kafkaCfg.Brokers) == 0 {
 		return Config{}, errors.New("KAFKA_BROKERS is required")
 	}
-	if !rebuildBoard && strings.TrimSpace(kafkaCfg.Topic) == "" {
+	if !rebuildBoard && usesKafkaPublishMode(publishMode) && strings.TrimSpace(kafkaCfg.Topic) == "" {
 		return Config{}, errors.New("KAFKA_TOPIC is required")
 	}
 	clickHouseCfg := ClickHouseConfig{
@@ -517,15 +539,9 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 	}
 	staleLimit := maxInt(0, envInt("STALE_TRANSLATION_LIMIT", envInt("RBLOGGER_STALE_TRANSLATION_LIMIT", 20)))
 	translateEnabled := envBool("TRANSLATE_ENABLED", true)
-	if rebuildBoard || (translateEnabled && staleLimit > 0) {
-		if strings.TrimSpace(clickHouseCfg.Host) == "" {
-			return Config{}, errors.New("CH_HOST is required when ClickHouse reads or board rebuilds are enabled")
-		}
-		if strings.TrimSpace(clickHouseCfg.User) == "" {
-			return Config{}, errors.New("CH_USER is required when ClickHouse reads or board rebuilds are enabled")
-		}
-		if strings.TrimSpace(clickHouseCfg.Password) == "" {
-			return Config{}, errors.New("CH_PASSWORD is required when ClickHouse reads or board rebuilds are enabled")
+	if rebuildBoard || usesClickHousePublishMode(publishMode) || (translateEnabled && staleLimit > 0) {
+		if err := validateClickHouseConfig(clickHouseCfg); err != nil {
+			return Config{}, err
 		}
 	}
 	return Config{
@@ -543,9 +559,46 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		AITimeout:            time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second,
 		RebuildLimit:         maxInt(0, envInt("RBLOGGER_REBUILD_LIMIT", 0)),
 		RebuildBatchSize:     maxInt(1, envInt("RBLOGGER_REBUILD_BATCH_SIZE", 50)),
+		PublishMode:          publishMode,
 		Kafka:                kafkaCfg,
 		ClickHouse:           clickHouseCfg,
 	}, nil
+}
+
+func normalizePublishMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "clickhouse", "db", "direct":
+		return "clickhouse"
+	case "kafka":
+		return "kafka"
+	case "dual", "both", "clickhouse+kafka", "db+kafka":
+		return "dual"
+	default:
+		return "clickhouse"
+	}
+}
+
+func usesClickHousePublishMode(value string) bool {
+	value = normalizePublishMode(value)
+	return value == "clickhouse" || value == "dual"
+}
+
+func usesKafkaPublishMode(value string) bool {
+	value = normalizePublishMode(value)
+	return value == "kafka" || value == "dual"
+}
+
+func validateClickHouseConfig(cfg ClickHouseConfig) error {
+	if strings.TrimSpace(cfg.Host) == "" {
+		return errors.New("CH_HOST is required when ClickHouse reads or direct writes are enabled")
+	}
+	if strings.TrimSpace(cfg.User) == "" {
+		return errors.New("CH_USER is required when ClickHouse reads or direct writes are enabled")
+	}
+	if strings.TrimSpace(cfg.Password) == "" {
+		return errors.New("CH_PASSWORD is required when ClickHouse reads or direct writes are enabled")
+	}
+	return nil
 }
 
 func (c Config) publicLogConfig() map[string]any {
@@ -561,9 +614,7 @@ func (c Config) publicLogConfig() map[string]any {
 		"rblogger_page_url":         c.RbloggerPageURL,
 		"translation_model":         c.TranslationModel,
 		"stale_translation_limit":   c.StaleTranslationLimit,
-		"kafka_topic":               c.Kafka.Topic,
-		"kafka_client_id":           c.Kafka.ClientID,
-		"kafka_security_protocol":   c.Kafka.SecurityProtocol,
+		"publish_mode":              c.PublishMode,
 		"clickhouse_host":           c.ClickHouse.Host,
 		"clickhouse_database":       c.ClickHouse.Database,
 	}
@@ -935,6 +986,149 @@ func (r *ClickHouseReader) InsertBoardPayloads(ctx context.Context, payloads []m
 		}
 	}
 	return nil
+}
+
+func (r *ClickHouseReader) InsertRbloggerEvents(ctx context.Context, events []KafkaEvent, batchSize int) (map[string]int, error) {
+	counts := map[string]int{}
+	rowsByTable := map[string][]map[string]any{}
+	for _, event := range events {
+		payload, err := decodeEventPayload(event)
+		if err != nil {
+			return counts, err
+		}
+		table, row, err := rbloggerEventDirectRow(event, payload)
+		if err != nil {
+			return counts, err
+		}
+		rowsByTable[table] = append(rowsByTable[table], row)
+	}
+	tables := make([]string, 0, len(rowsByTable))
+	for table := range rowsByTable {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	for _, table := range tables {
+		rows := rowsByTable[table]
+		if err := r.insertRows(ctx, table, rows, batchSize); err != nil {
+			return counts, err
+		}
+		counts[table] += len(rows)
+	}
+	return counts, nil
+}
+
+func (r *ClickHouseReader) insertRows(ctx context.Context, table string, rows []map[string]any, batchSize int) error {
+	batchSize = maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", batchSize))
+	for _, batch := range chunkPayloads(rows, batchSize) {
+		var body strings.Builder
+		body.WriteString(fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = 0, insert_deduplicate = 1 FORMAT JSONEachRow\n", table))
+		for _, row := range batch {
+			line, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			body.Write(line)
+			body.WriteByte('\n')
+		}
+		if err := r.post(ctx, body.String()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeEventPayload(event KafkaEvent) (map[string]any, error) {
+	payload := map[string]any{}
+	if strings.TrimSpace(event.Payload) == "" {
+		return payload, nil
+	}
+	if err := json.Unmarshal([]byte(event.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("invalid event payload event_type=%s: %w", event.EventType, err)
+	}
+	return payload, nil
+}
+
+func rbloggerEventDirectRow(event KafkaEvent, payload map[string]any) (string, map[string]any, error) {
+	switch event.EventType {
+	case "webr.rblogger.log.v1":
+		return "Data_R_Community_Log.r_blogger_log", rbloggerLogRow(event, payload), nil
+	case "webr.rblogger.raw.v1":
+		return "Data_R_Community_Raw.r_blogger_article_raw", rbloggerRawRow(event, payload), nil
+	case "webr.rblogger.board.v1":
+		return "Data_R_Community_Service.r_blogger_board", rbloggerBoardRow(event, payload), nil
+	default:
+		return "", nil, fmt.Errorf("direct ClickHouse R-bloggers publish does not support event_type=%q", event.EventType)
+	}
+}
+
+func rbloggerLogRow(event KafkaEvent, payload map[string]any) map[string]any {
+	return map[string]any{
+		"uuid":          firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
+		"created_at":    nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
+		"created_log":   nullableJSON(payload["created_log"]),
+		"language_code": firstNonEmpty(stringValue(payload["language_code"]), "en"),
+	}
+}
+
+func rbloggerRawRow(event KafkaEvent, payload map[string]any) map[string]any {
+	createdLog := mapValue(payload["created_log"])
+	articleLog := mapValue(createdLog["article"])
+	return map[string]any{
+		"uuid":                  firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
+		"created_at":            nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
+		"created_log":           nullableJSON(payload["created_log"]),
+		"updated_at":            nullableString(stringValue(payload["updated_at"])),
+		"updated_log":           nullableJSON(payload["updated_log"]),
+		"active":                nullableUInt8(payload["active"]),
+		"github_path":           nullableString(stringValue(payload["github_path"])),
+		"title":                 nullableString(stringValue(payload["title"])),
+		"content":               nullableString(stringValue(payload["content"])),
+		"url":                   nullableString(firstNonEmpty(stringValue(payload["url"]), event.URL)),
+		"url_hash":              firstNonEmpty(stringValue(payload["url_hash"]), hashString(firstNonEmpty(stringValue(payload["url"]), event.URL))),
+		"language_code":         firstNonEmpty(stringValue(payload["language_code"]), "en"),
+		"canonical_url":         firstNonEmpty(stringValue(payload["canonical_url"]), stringValue(articleLog["canonical_url"])),
+		"html_title":            firstNonEmpty(stringValue(payload["html_title"]), stringValue(articleLog["html_title"])),
+		"h1_title":              firstNonEmpty(stringValue(payload["h1_title"]), stringValue(articleLog["h1_title"])),
+		"meta_description":      firstNonEmpty(stringValue(payload["meta_description"]), stringValue(articleLog["meta_description"])),
+		"meta_keywords":         firstNonEmpty(stringValue(payload["meta_keywords"]), stringValue(articleLog["meta_keywords"])),
+		"og_title":              firstNonEmpty(stringValue(payload["og_title"]), stringValue(articleLog["og_title"])),
+		"og_description":        firstNonEmpty(stringValue(payload["og_description"]), stringValue(articleLog["og_description"])),
+		"og_image":              firstNonEmpty(stringValue(payload["og_image"]), stringValue(articleLog["og_image"])),
+		"twitter_title":         firstNonEmpty(stringValue(payload["twitter_title"]), stringValue(articleLog["twitter_title"])),
+		"twitter_description":   firstNonEmpty(stringValue(payload["twitter_description"]), stringValue(articleLog["twitter_description"])),
+		"article_headline":      firstNonEmpty(stringValue(payload["article_headline"]), stringValue(articleLog["article_headline"])),
+		"article_section":       firstNonEmpty(stringValue(payload["article_section"]), stringValue(articleLog["article_section"])),
+		"article_tags_json":     jsonString(firstNonEmptyValue(payload["article_tags"], articleLog["article_tags"]), "[]"),
+		"article_author":        firstNonEmpty(stringValue(payload["article_author"]), stringValue(articleLog["article_author"])),
+		"article_published_at":  nullableString(firstNonEmpty(stringValue(payload["article_published"]), stringValue(articleLog["article_published"]))),
+		"article_modified_at":   nullableString(firstNonEmpty(stringValue(payload["article_modified"]), stringValue(articleLog["article_modified"]))),
+		"word_count":            uint32Value(firstNonEmptyValue(payload["word_count"], articleLog["word_count"])),
+		"reading_time_min":      float32Value(firstNonEmptyValue(payload["reading_time_min"], articleLog["reading_time_min"])),
+		"internal_links_json":   jsonString(firstNonEmptyValue(payload["internal_links"], articleLog["internal_links"]), "[]"),
+		"external_links_json":   jsonString(firstNonEmptyValue(payload["external_links"], articleLog["external_links"]), "[]"),
+		"images_json":           jsonString(firstNonEmptyValue(payload["images"], articleLog["images"]), "[]"),
+		"main_text_excerpt":     firstNonEmpty(stringValue(payload["main_text_excerpt"]), stringValue(articleLog["main_text_excerpt"])),
+		"raw_article_json":      jsonString(articleLog, "{}"),
+	}
+}
+
+func rbloggerBoardRow(event KafkaEvent, payload map[string]any) map[string]any {
+	title := stringValue(payload["title"])
+	content := stringValue(payload["content"])
+	if strings.TrimSpace(content) == "" {
+		content = title
+	}
+	return map[string]any{
+		"uuid":          firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
+		"title":         nullableString(title),
+		"content":       nullableString(content),
+		"active":        nullableUInt8(payload["active"]),
+		"created_at":    nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
+		"updated_at":    nullableString(stringValue(payload["updated_at"])),
+		"created_log":   nullableJSON(payload["created_log"]),
+		"updated_log":   nullableJSON(payload["updated_log"]),
+		"language_code": firstNonEmpty(stringValue(payload["language_code"]), "ko"),
+	}
 }
 
 func (r *ClickHouseReader) queryRows(ctx context.Context, query string) ([]map[string]any, error) {
@@ -2200,6 +2394,28 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func firstNonEmptyValue(values ...any) any {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		if strings.TrimSpace(stringValue(value)) != "" {
+			return value
+		}
+		switch typed := value.(type) {
+		case []any:
+			if len(typed) > 0 {
+				return value
+			}
+		case map[string]any:
+			if len(typed) > 0 {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
 func kafkaSecurityUsesTLS(value string) bool {
 	value = strings.ToUpper(strings.TrimSpace(value))
 	return value == "SSL" || value == "SASL_SSL" || envBool("KAFKA_TLS", false)
@@ -2220,6 +2436,134 @@ func stringValue(v any) string {
 	default:
 		return fmt.Sprint(x)
 	}
+}
+
+func mapValue(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+func nullableString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "<nil>" {
+		return nil
+	}
+	return value
+}
+
+func nullableJSON(value any) any {
+	if value == nil {
+		return nil
+	}
+	if strings.TrimSpace(stringValue(value)) == "" && len(mapValue(value)) == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableUInt8(value any) any {
+	if value == nil || strings.TrimSpace(stringValue(value)) == "" {
+		return nil
+	}
+	return uint8Value(value)
+}
+
+func uint8Value(value any) int {
+	if boolValue(value) {
+		return 1
+	}
+	n := int64Value(value)
+	if n < 0 {
+		return 0
+	}
+	if n > 255 {
+		return 255
+	}
+	return int(n)
+}
+
+func uint32Value(value any) uint32 {
+	n := int64Value(value)
+	if n < 0 {
+		return 0
+	}
+	if n > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(n)
+}
+
+func float32Value(value any) float32 {
+	switch typed := value.(type) {
+	case float32:
+		return typed
+	case float64:
+		return float32(typed)
+	case int:
+		return float32(typed)
+	case int64:
+		return float32(typed)
+	}
+	if n, err := strconv.ParseFloat(strings.TrimSpace(stringValue(value)), 32); err == nil {
+		return float32(n)
+	}
+	return 0
+}
+
+func int64Value(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case uint:
+		return int64(typed)
+	case uint64:
+		if typed <= uint64(^uint64(0)>>1) {
+			return int64(typed)
+		}
+	case float64:
+		return int64(typed)
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(stringValue(value)), 10, 64); err == nil {
+		return n
+	}
+	return 0
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "y":
+			return true
+		}
+	}
+	return false
+}
+
+func jsonString(value any, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	if raw := strings.TrimSpace(stringValue(value)); raw != "" && (strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[")) {
+		return raw
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fallback
+	}
+	out := strings.TrimSpace(string(body))
+	if out == "" || out == "null" {
+		return fallback
+	}
+	return out
 }
 
 func firstN(values []string, n int) []string {

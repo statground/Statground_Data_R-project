@@ -198,6 +198,7 @@ type publisher struct {
 	security           string
 	clientID           string
 	dryRun             bool
+	publishMode        string
 	writeTimeout       time.Duration
 	chunkSize          int
 	createTopic        bool
@@ -7670,6 +7671,7 @@ func newPublisher(topic, clientID string, dryRun bool) *publisher {
 		security:           envString("KAFKA_SECURITY_PROTOCOL", ""),
 		clientID:           envString("KAFKA_CLIENT_ID", clientID),
 		dryRun:             dryRun,
+		publishMode:        normalizePublishMode(envString("RPROJECT_PUBLISH_MODE", envString("R_DATA_PUBLISH_MODE", "clickhouse"))),
 		writeTimeout:       time.Duration(maxInt(1, envInt("KAFKA_WRITE_TIMEOUT", envInt("KAFKA_WRITE_TIMEOUT_SECONDS", 60)))) * time.Second,
 		chunkSize:          maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 100)),
 		createTopic:        envBool("KAFKA_CREATE_TOPIC", envBool("KAFKA_ALLOW_TOPIC_CREATE", true)),
@@ -7685,8 +7687,29 @@ func newPublisher(topic, clientID string, dryRun bool) *publisher {
 	}
 }
 
+func normalizePublishMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "clickhouse", "db", "direct":
+		return "clickhouse"
+	case "kafka":
+		return "kafka"
+	case "dual", "both", "clickhouse+kafka", "db+kafka":
+		return "dual"
+	default:
+		return "clickhouse"
+	}
+}
+
+func (p *publisher) usesClickHouse() bool {
+	return p.publishMode == "clickhouse" || p.publishMode == "dual"
+}
+
+func (p *publisher) usesKafka() bool {
+	return p.publishMode == "kafka" || p.publishMode == "dual"
+}
+
 func (p *publisher) validate(ctx context.Context) error {
-	if p.dryRun {
+	if p.dryRun || !p.usesKafka() {
 		return nil
 	}
 	if p.topic == "" {
@@ -7781,19 +7804,31 @@ func (p *publisher) createKafkaTopic(ctx context.Context, dialer *kafka.Dialer) 
 }
 
 func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) error {
+	if p.dryRun {
+		for _, event := range events {
+			body, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(body))
+		}
+		return nil
+	}
+	if p.usesClickHouse() {
+		target, err := insertGenericRawEventsDirect(ctx, events)
+		if err != nil {
+			return fmt.Errorf("ClickHouse direct publish failed target=%s: %s", target.label, publicClickHouseError(err))
+		}
+		if len(events) > 0 {
+			fmt.Printf("[clickhouse] direct publish succeeded target=%s table=%s events=%d\n", target.label, target.table, len(events))
+		}
+		if !p.usesKafka() {
+			return nil
+		}
+	}
 	fallbackEnabled := p.packageClickHouseFallbackEnabled(events)
 	directFallback := false
 	for _, chunk := range chunkGenericEvents(events, p.chunkSize) {
-		if p.dryRun {
-			for _, event := range chunk {
-				body, err := json.Marshal(event)
-				if err != nil {
-					return err
-				}
-				fmt.Println(string(body))
-			}
-			continue
-		}
 		if directFallback {
 			if err := insertPackageRawEventsFallback(ctx, chunk); err != nil {
 				return fmt.Errorf("ClickHouse package raw fallback failed: %s", publicClickHouseError(err))
@@ -7943,6 +7978,151 @@ func genericEventsToMessages(events []genericEvent) ([]kafka.Message, error) {
 	return messages, nil
 }
 
+type genericDirectTarget struct {
+	label          string
+	table          string
+	includePackage bool
+}
+
+func insertGenericRawEventsDirect(ctx context.Context, events []genericEvent) (genericDirectTarget, error) {
+	target, err := genericEventsDirectTarget(events)
+	if err != nil || len(events) == 0 {
+		return target, err
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return target, err
+	}
+	chunkSize := maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", minInt(envInt("KAFKA_WRITE_CHUNK_SIZE", 100), 10))))
+	for _, chunk := range chunkGenericEvents(events, chunkSize) {
+		if err := insertGenericRawEventChunkWithSplit(ctx, cfg, target, chunk); err != nil {
+			return target, err
+		}
+	}
+	return target, nil
+}
+
+func genericEventsDirectTarget(events []genericEvent) (genericDirectTarget, error) {
+	if len(events) == 0 {
+		return genericDirectTarget{}, nil
+	}
+	target := genericDirectTarget{}
+	for _, event := range events {
+		next, err := genericEventDirectTarget(event)
+		if err != nil {
+			return target, err
+		}
+		if target.table == "" {
+			target = next
+			continue
+		}
+		if target.table != next.table {
+			return target, fmt.Errorf("mixed direct ClickHouse targets are not supported: %s and %s", target.table, next.table)
+		}
+	}
+	return target, nil
+}
+
+func genericEventDirectTarget(event genericEvent) (genericDirectTarget, error) {
+	switch {
+	case strings.HasPrefix(event.EventType, "rpkg."):
+		return genericDirectTarget{label: "package", table: "Data_R_Package_Raw.r_package_event_raw", includePackage: true}, nil
+	case strings.HasPrefix(event.EventType, "r.youtube."):
+		return genericDirectTarget{label: "youtube", table: "Data_R_Community_Raw.r_youtube_event_raw", includePackage: true}, nil
+	case strings.HasPrefix(event.EventType, "r.community."):
+		return genericDirectTarget{label: "community", table: "Data_R_Community_Raw.r_community_event_raw"}, nil
+	default:
+		return genericDirectTarget{}, fmt.Errorf("direct ClickHouse publish does not support event_type=%q", event.EventType)
+	}
+}
+
+func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQueryConfig, target genericDirectTarget, events []genericEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(genericRawEventInsertPrefix(cfg, target.table))
+	now := time.Now().UTC()
+	for _, event := range events {
+		row := genericRawEventDirectRow(event, now, target.includePackage)
+		body, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+	}
+	err := execClickHouseDirectChunk(ctx, cfg, b.String(), target.label, len(events))
+	if err == nil {
+		return nil
+	}
+	if len(events) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+		mid := len(events) / 2
+		fmt.Printf("[clickhouse] direct publish split target=%s events=%d reason=%s\n", target.label, len(events), publicClickHouseError(err))
+		if splitErr := insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[:mid]); splitErr != nil {
+			return splitErr
+		}
+		return insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[mid:])
+	}
+	return err
+}
+
+func genericRawEventInsertPrefix(cfg clickHouseQueryConfig, table string) string {
+	sync := 0
+	if cfg.InsertDistributedSync {
+		sync = 1
+	}
+	return fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = %d, insert_deduplicate = 1 FORMAT JSONEachRow\n", table, sync)
+}
+
+func genericRawEventDirectRow(event genericEvent, now time.Time, includePackage bool) map[string]any {
+	observedAt := parseKSTTime(event.ObservedAt, now)
+	collectedAt := parseKSTTime(event.CollectedAt, now)
+	row := map[string]any{
+		"uuid":           event.EventID,
+		"event_id":       event.EventID,
+		"event_type":     event.EventType,
+		"schema_version": event.SchemaVersion,
+		"source":         event.Source,
+		"source_url":     event.SourceURL,
+		"repository":     event.Repository,
+		"observed_at":    formatKST(observedAt),
+		"collected_at":   formatKST(collectedAt),
+		"payload_hash":   event.PayloadHash,
+		"payload":        event.Payload,
+		"ingested_at":    formatKST(now),
+	}
+	if includePackage {
+		row["package_name"] = event.PackageName
+		row["package_version"] = event.PackageVersion
+	}
+	return row
+}
+
+func execClickHouseDirectChunk(ctx context.Context, cfg clickHouseQueryConfig, query, label string, eventCount int) error {
+	attempts := maxInt(1, envInt("RPROJECT_CLICKHOUSE_ATTEMPTS", envInt("RPKG_CLICKHOUSE_FALLBACK_ATTEMPTS", 3)))
+	backoff := time.Duration(envFloat("RPROJECT_CLICKHOUSE_BACKOFF_SECONDS", envFloat("RPKG_CLICKHOUSE_FALLBACK_BACKOFF_SECONDS", 2.0)) * float64(time.Second))
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err := cfg.exec(ctx, query)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("[clickhouse] direct publish retry succeeded target=%s attempt=%d events=%d\n", label, attempt, eventCount)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt == attempts || !retryableClickHouseFallbackError(err) {
+			return err
+		}
+		fmt.Printf("[clickhouse] direct publish retry target=%s attempt=%d/%d events=%d reason=%s\n", label, attempt+1, attempts, eventCount, publicClickHouseError(err))
+		if sleepErr := sleepContext(ctx, backoff); sleepErr != nil {
+			return fmt.Errorf("clickhouse direct retry wait stopped: %w; last_error=%s", sleepErr, publicClickHouseError(lastErr))
+		}
+	}
+	return lastErr
+}
+
 func insertPackageRawEventsFallback(ctx context.Context, events []genericEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -8087,19 +8267,280 @@ func packageRawEventFallbackRow(event genericEvent, now time.Time) map[string]an
 }
 
 func (p *publisher) publishWebR(ctx context.Context, events []webREvent) error {
+	if p.dryRun {
+		for _, event := range events {
+			body, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(body))
+		}
+		return nil
+	}
+	if p.usesClickHouse() {
+		counts, err := insertWebREventsDirect(ctx, events)
+		if err != nil {
+			return fmt.Errorf("ClickHouse direct Web-R publish failed: %s", publicClickHouseError(err))
+		}
+		if len(events) > 0 {
+			fmt.Printf("[clickhouse] direct Web-R publish succeeded events=%d tables=%s\n", len(events), directCountSummary(counts))
+		}
+		if !p.usesKafka() {
+			return nil
+		}
+	}
 	messages := make([]kafka.Message, 0, len(events))
 	for _, event := range events {
 		body, err := json.Marshal(event)
 		if err != nil {
 			return err
 		}
-		if p.dryRun {
-			fmt.Println(string(body))
-			continue
-		}
 		messages = append(messages, kafka.Message{Key: []byte(firstNonEmpty(event.URL, event.EventUUID)), Value: body, Time: time.Now()})
 	}
 	return p.write(ctx, messages)
+}
+
+func insertWebREventsDirect(ctx context.Context, events []webREvent) (map[string]int, error) {
+	counts := map[string]int{}
+	if len(events) == 0 {
+		return counts, nil
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return counts, err
+	}
+	rowsByTable := map[string][]map[string]any{}
+	for _, event := range events {
+		payload, err := decodeWebREventPayload(event)
+		if err != nil {
+			return counts, err
+		}
+		table, row, err := webREventDirectRow(event, payload)
+		if err != nil {
+			return counts, err
+		}
+		rowsByTable[table] = append(rowsByTable[table], row)
+	}
+	tables := make([]string, 0, len(rowsByTable))
+	for table := range rowsByTable {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	for _, table := range tables {
+		rows := rowsByTable[table]
+		if err := insertDirectRows(ctx, cfg, table, rows); err != nil {
+			return counts, err
+		}
+		counts[table] += len(rows)
+	}
+	return counts, nil
+}
+
+func decodeWebREventPayload(event webREvent) (map[string]any, error) {
+	payload := map[string]any{}
+	if strings.TrimSpace(event.Payload) == "" {
+		return payload, nil
+	}
+	if err := json.Unmarshal([]byte(event.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("invalid Web-R event payload event_type=%s: %w", event.EventType, err)
+	}
+	return payload, nil
+}
+
+func webREventDirectRow(event webREvent, payload map[string]any) (string, map[string]any, error) {
+	switch event.EventType {
+	case "webr.rblogger.log.v1":
+		return "Data_R_Community_Log.r_blogger_log", rbloggerLogDirectRow(event, payload), nil
+	case "webr.rblogger.raw.v1":
+		return "Data_R_Community_Raw.r_blogger_article_raw", rbloggerRawDirectRow(event, payload), nil
+	case "webr.rblogger.board.v1":
+		return "Data_R_Community_Service.r_blogger_board", webRBoardDirectRow(event, payload, "ko"), nil
+	case "webr.mastodon.log.v1":
+		return "Data_R_Community_Log.mastodon_log", mastodonLogDirectRow(event, payload), nil
+	case "webr.mastodon.raw.v1":
+		row, err := mastodonRawDirectRow(event, payload)
+		return "Data_R_Community_Raw.mastodon_status_raw", row, err
+	case "webr.mastodon.board.v1":
+		return "Data_R_Community_Service.mastodon_board", webRBoardDirectRow(event, payload, "ko"), nil
+	default:
+		return "", nil, fmt.Errorf("direct ClickHouse Web-R publish does not support event_type=%q", event.EventType)
+	}
+}
+
+func rbloggerLogDirectRow(event webREvent, payload map[string]any) map[string]any {
+	return map[string]any{
+		"uuid":          firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
+		"created_at":    nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
+		"created_log":   nullableDirectJSON(payload["created_log"]),
+		"language_code": firstNonEmpty(stringAny(payload["language_code"]), "en"),
+	}
+}
+
+func mastodonLogDirectRow(event webREvent, payload map[string]any) map[string]any {
+	return map[string]any{
+		"uuid":          firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
+		"created_at":    nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
+		"created_log":   nullableDirectJSON(payload["created_log"]),
+		"language_code": firstNonEmpty(stringAny(payload["language_code"]), "en"),
+	}
+}
+
+func rbloggerRawDirectRow(event webREvent, payload map[string]any) map[string]any {
+	createdLog := mapAny(payload["created_log"])
+	articleLog := mapAny(createdLog["article"])
+	return map[string]any{
+		"uuid":                  firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
+		"created_at":            nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
+		"created_log":           nullableDirectJSON(payload["created_log"]),
+		"updated_at":            nullableDirectString(stringAny(payload["updated_at"])),
+		"updated_log":           nullableDirectJSON(payload["updated_log"]),
+		"active":                nullableDirectUInt8(payload["active"]),
+		"github_path":           nullableDirectString(stringAny(payload["github_path"])),
+		"title":                 nullableDirectString(stringAny(payload["title"])),
+		"content":               nullableDirectString(stringAny(payload["content"])),
+		"url":                   nullableDirectString(firstNonEmpty(stringAny(payload["url"]), event.URL)),
+		"url_hash":              firstNonEmpty(stringAny(payload["url_hash"]), shaHex(firstNonEmpty(stringAny(payload["url"]), event.URL))),
+		"language_code":         firstNonEmpty(stringAny(payload["language_code"]), "en"),
+		"canonical_url":         firstNonEmpty(stringAny(payload["canonical_url"]), stringAny(articleLog["canonical_url"])),
+		"html_title":            firstNonEmpty(stringAny(payload["html_title"]), stringAny(articleLog["html_title"])),
+		"h1_title":              firstNonEmpty(stringAny(payload["h1_title"]), stringAny(articleLog["h1_title"])),
+		"meta_description":      firstNonEmpty(stringAny(payload["meta_description"]), stringAny(articleLog["meta_description"])),
+		"meta_keywords":         firstNonEmpty(stringAny(payload["meta_keywords"]), stringAny(articleLog["meta_keywords"])),
+		"og_title":              firstNonEmpty(stringAny(payload["og_title"]), stringAny(articleLog["og_title"])),
+		"og_description":        firstNonEmpty(stringAny(payload["og_description"]), stringAny(articleLog["og_description"])),
+		"og_image":              firstNonEmpty(stringAny(payload["og_image"]), stringAny(articleLog["og_image"])),
+		"twitter_title":         firstNonEmpty(stringAny(payload["twitter_title"]), stringAny(articleLog["twitter_title"])),
+		"twitter_description":   firstNonEmpty(stringAny(payload["twitter_description"]), stringAny(articleLog["twitter_description"])),
+		"article_headline":      firstNonEmpty(stringAny(payload["article_headline"]), stringAny(articleLog["article_headline"])),
+		"article_section":       firstNonEmpty(stringAny(payload["article_section"]), stringAny(articleLog["article_section"])),
+		"article_tags_json":     directJSONString(firstNonEmptyAny(payload["article_tags"], articleLog["article_tags"]), "[]"),
+		"article_author":        firstNonEmpty(stringAny(payload["article_author"]), stringAny(articleLog["article_author"])),
+		"article_published_at":  nullableDirectString(firstNonEmpty(stringAny(payload["article_published"]), stringAny(articleLog["article_published"]))),
+		"article_modified_at":   nullableDirectString(firstNonEmpty(stringAny(payload["article_modified"]), stringAny(articleLog["article_modified"]))),
+		"word_count":            directUInt32(firstNonEmptyAny(payload["word_count"], articleLog["word_count"])),
+		"reading_time_min":      directFloat32(firstNonEmptyAny(payload["reading_time_min"], articleLog["reading_time_min"])),
+		"internal_links_json":   directJSONString(firstNonEmptyAny(payload["internal_links"], articleLog["internal_links"]), "[]"),
+		"external_links_json":   directJSONString(firstNonEmptyAny(payload["external_links"], articleLog["external_links"]), "[]"),
+		"images_json":           directJSONString(firstNonEmptyAny(payload["images"], articleLog["images"]), "[]"),
+		"main_text_excerpt":     firstNonEmpty(stringAny(payload["main_text_excerpt"]), stringAny(articleLog["main_text_excerpt"])),
+		"raw_article_json":      directJSONString(articleLog, "{}"),
+	}
+}
+
+func webRBoardDirectRow(event webREvent, payload map[string]any, defaultLanguage string) map[string]any {
+	title := stringAny(payload["title"])
+	content := stringAny(payload["content"])
+	if strings.TrimSpace(content) == "" {
+		content = title
+	}
+	return map[string]any{
+		"uuid":          firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
+		"title":         nullableDirectString(title),
+		"content":       nullableDirectString(content),
+		"active":        nullableDirectUInt8(payload["active"]),
+		"created_at":    nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
+		"updated_at":    nullableDirectString(stringAny(payload["updated_at"])),
+		"created_log":   nullableDirectJSON(payload["created_log"]),
+		"updated_log":   nullableDirectJSON(payload["updated_log"]),
+		"language_code": firstNonEmpty(stringAny(payload["language_code"]), defaultLanguage),
+	}
+}
+
+func mastodonRawDirectRow(event webREvent, payload map[string]any) (map[string]any, error) {
+	rowUUID := stringAny(payload["uuid"])
+	if rowUUID == "" {
+		return nil, fmt.Errorf("mastodon raw event is missing payload.uuid")
+	}
+	now := formatKST(time.Now())
+	return map[string]any{
+		"uuid":                   rowUUID,
+		"event_uuid":             event.EventUUID,
+		"source":                 firstNonEmpty(event.Source, "github_actions"),
+		"host":                   firstNonEmpty(event.Host, "github-actions"),
+		"uuid_user":              nullableDirectString(event.UUIDUser),
+		"ip":                     firstNonEmpty(event.IP, "::"),
+		"url":                    event.URL,
+		"event_type":             event.EventType,
+		"instance_host":          stringAny(payload["instance_host"]),
+		"account_acct":           stringAny(payload["account_acct"]),
+		"account_id":             stringAny(payload["account_id"]),
+		"status_id":              stringAny(payload["status_id"]),
+		"status_uri":             stringAny(payload["status_uri"]),
+		"status_url":             stringAny(payload["status_url"]),
+		"status_created_at":      firstNonEmpty(stringAny(payload["status_created_at"]), stringAny(payload["fetched_at"]), event.CreatedAt, now),
+		"status_edited_at":       nullableDirectString(stringAny(payload["status_edited_at"])),
+		"visibility":             firstNonEmpty(stringAny(payload["visibility"]), "unknown"),
+		"language":               stringAny(payload["language"]),
+		"language_code":          firstNonEmpty(stringAny(payload["language_code"]), "en"),
+		"sensitive":              directUInt8(payload["sensitive"]),
+		"spoiler_text":           stringAny(payload["spoiler_text"]),
+		"content_html":           stringAny(payload["content_html"]),
+		"content_text":           stringAny(payload["content_text"]),
+		"in_reply_to_id":         nullableDirectString(stringAny(payload["in_reply_to_id"])),
+		"in_reply_to_account_id": nullableDirectString(stringAny(payload["in_reply_to_account_id"])),
+		"is_reblog":              directUInt8(payload["is_reblog"]),
+		"reblog_status_id":       nullableDirectString(stringAny(payload["reblog_status_id"])),
+		"replies_count":          directUInt32(payload["replies_count"]),
+		"reblogs_count":          directUInt32(payload["reblogs_count"]),
+		"favourites_count":       directUInt32(payload["favourites_count"]),
+		"active":                 directUInt8(payload["active"]),
+		"tags_json":              directJSONString(payload["tags"], "[]"),
+		"mentions_json":          directJSONString(payload["mentions"], "[]"),
+		"emojis_json":            directJSONString(payload["emojis"], "[]"),
+		"media_attachments_json": directJSONString(payload["media_attachments"], "[]"),
+		"card_json":              directJSONString(payload["card"], "{}"),
+		"poll_json":              directJSONString(payload["poll"], "{}"),
+		"raw_status_json":        directJSONString(payload["raw_status_json"], "{}"),
+		"payload_hash":           directUInt64(payload["payload_hash"]),
+		"image_count":            directUInt8(payload["image_count"]),
+		"image_base64_count":     directUInt8(payload["image_base64_count"]),
+		"has_image_base64":       directUInt8(payload["has_image_base64"]),
+		"fetched_at":             firstNonEmpty(stringAny(payload["fetched_at"]), event.CreatedAt, now),
+		"created_at":             firstNonEmpty(event.CreatedAt, now),
+		"ingested_at":            now,
+		"kafka_topic":            "direct.clickhouse",
+		"kafka_partition":        0,
+		"kafka_offset":           0,
+	}, nil
+}
+
+func insertDirectRows(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) error {
+	chunkSize := maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", 50))
+	for _, chunk := range chunkMapRows(rows, chunkSize) {
+		if err := insertDirectRowsChunkWithSplit(ctx, cfg, table, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(genericRawEventInsertPrefix(cfg, table))
+	for _, row := range rows {
+		body, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+	}
+	err := execClickHouseDirectChunk(ctx, cfg, b.String(), table, len(rows))
+	if err == nil {
+		return nil
+	}
+	if len(rows) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+		mid := len(rows) / 2
+		fmt.Printf("[clickhouse] direct row split table=%s rows=%d reason=%s\n", table, len(rows), publicClickHouseError(err))
+		if splitErr := insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[:mid]); splitErr != nil {
+			return splitErr
+		}
+		return insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[mid:])
+	}
+	return err
 }
 
 func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
@@ -8738,7 +9179,7 @@ func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 		Database:              envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Service")),
 		Secure:                envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
 		Timeout:               time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
-		InsertDistributedSync: envBool("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", false),
+		InsertDistributedSync: envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", envBool("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", false)),
 	}
 	if cfg.Host == "" {
 		return cfg, errors.New("CH_HOST or CLICKHOUSE_HOST is required for DB-backed collectors")
@@ -9125,6 +9566,186 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptyAny(values ...any) any {
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		if strings.TrimSpace(stringAny(value)) != "" {
+			return value
+		}
+		switch typed := value.(type) {
+		case []any:
+			if len(typed) > 0 {
+				return value
+			}
+		case map[string]any:
+			if len(typed) > 0 {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func nullableDirectString(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "<nil>" {
+		return nil
+	}
+	return value
+}
+
+func nullableDirectJSON(value any) any {
+	if value == nil {
+		return nil
+	}
+	if strings.TrimSpace(stringAny(value)) == "" && len(mapAny(value)) == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableDirectUInt8(value any) any {
+	if value == nil || strings.TrimSpace(stringAny(value)) == "" {
+		return nil
+	}
+	return directUInt8(value)
+}
+
+func directUInt8(value any) int {
+	if directBool(value) {
+		return 1
+	}
+	n := directInt64(value)
+	if n < 0 {
+		return 0
+	}
+	if n > 255 {
+		return 255
+	}
+	return int(n)
+}
+
+func directUInt32(value any) uint32 {
+	n := directInt64(value)
+	if n < 0 {
+		return 0
+	}
+	if n > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(n)
+}
+
+func directUInt64(value any) uint64 {
+	switch typed := value.(type) {
+	case uint64:
+		return typed
+	case uint:
+		return uint64(typed)
+	case int:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case int64:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case float64:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case json.Number:
+		if n, err := strconv.ParseUint(typed.String(), 10, 64); err == nil {
+			return n
+		}
+	}
+	if n, err := strconv.ParseUint(strings.TrimSpace(stringAny(value)), 10, 64); err == nil {
+		return n
+	}
+	return 0
+}
+
+func directFloat32(value any) float32 {
+	switch typed := value.(type) {
+	case float32:
+		return typed
+	case float64:
+		return float32(typed)
+	case int:
+		return float32(typed)
+	case int64:
+		return float32(typed)
+	case json.Number:
+		if n, err := strconv.ParseFloat(typed.String(), 32); err == nil {
+			return float32(n)
+		}
+	}
+	if n, err := strconv.ParseFloat(strings.TrimSpace(stringAny(value)), 32); err == nil {
+		return float32(n)
+	}
+	return 0
+}
+
+func directInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case uint:
+		return int64(typed)
+	case uint64:
+		if typed <= uint64(^uint64(0)>>1) {
+			return int64(typed)
+		}
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return n
+		}
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(stringAny(value)), 10, 64); err == nil {
+		return n
+	}
+	return 0
+}
+
+func directBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "y":
+			return true
+		}
+	}
+	return false
+}
+
+func directJSONString(value any, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	if raw := strings.TrimSpace(stringAny(value)); raw != "" && (strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[")) {
+		return raw
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fallback
+	}
+	out := strings.TrimSpace(string(body))
+	if out == "" || out == "null" {
+		return fallback
+	}
+	return out
 }
 
 func envString(name, fallback string) string {
@@ -9587,6 +10208,40 @@ func chunkGenericEvents(values []genericEvent, size int) [][]genericEvent {
 		chunks = append(chunks, values[start:end])
 	}
 	return chunks
+}
+
+func chunkMapRows(values []map[string]any, size int) [][]map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		size = len(values)
+	}
+	chunks := make([][]map[string]any, 0, (len(values)+size-1)/size)
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		chunks = append(chunks, values[start:end])
+	}
+	return chunks
+}
+
+func directCountSummary(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s:%d", key, counts[key]))
+	}
+	return strings.Join(parts, ",")
 }
 
 func isLoopbackBroker(raw string) bool {
