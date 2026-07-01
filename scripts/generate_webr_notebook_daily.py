@@ -1414,7 +1414,7 @@ def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, An
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=40) as response:
+        with urllib.request.urlopen(request, timeout=clickhouse_http_timeout(env)) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read(300).decode("utf-8", errors="replace")
@@ -1425,18 +1425,33 @@ def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, An
 
 
 def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -> None:
-    sql = f"INSERT INTO {table} FORMAT JSONEachRow\n" + json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-    request = urllib.request.Request(clickhouse_url(env), data=sql.encode("utf-8"), method="POST")
-    request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
-    request.add_header("Content-Type", "text/plain; charset=utf-8")
-    try:
-        with urllib.request.urlopen(request, timeout=40) as response:
-            response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(300).decode("utf-8", errors="replace")
-        raise SystemExit(f"ClickHouse insert failed: HTTP {exc.code}: {redact_detail(env, detail)}") from exc
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse insert failed: {exc.__class__.__name__}") from exc
+    sql = f"INSERT INTO {table} SETTINGS insert_deduplicate = 1 FORMAT JSONEachRow\n" + json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+    attempts = max(1, env_int(env, "WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS", 1))
+    backoff = max(0.0, env_float(env, "WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS", 2.0))
+    last_message = ""
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(clickhouse_url(env), data=sql.encode("utf-8"), method="POST")
+        request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
+        request.add_header("Content-Type", "text/plain; charset=utf-8")
+        try:
+            with urllib.request.urlopen(request, timeout=clickhouse_http_timeout(env)) as response:
+                response.read()
+            if attempt > 1:
+                print(f"ClickHouse insert retry succeeded attempt={attempt}")
+            return
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(300).decode("utf-8", errors="replace")
+            sanitized = redact_detail(env, detail)
+            last_message = f"HTTP {exc.code}: {sanitized}"
+            retryable = is_retryable_clickhouse_insert_error(exc.code, sanitized)
+        except urllib.error.URLError as exc:
+            last_message = exc.__class__.__name__
+            retryable = True
+        if attempt >= attempts or not retryable:
+            raise SystemExit(f"ClickHouse insert failed: {last_message}")
+        print(f"ClickHouse insert retry attempt={attempt + 1}/{attempts} reason={short_clickhouse_reason(last_message)}")
+        if backoff:
+            time.sleep(backoff)
 
 
 def clickhouse_url(env: dict[str, str]) -> str:
@@ -1449,6 +1464,42 @@ def clickhouse_url(env: dict[str, str]) -> str:
         )
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def clickhouse_http_timeout(env: dict[str, str]) -> float:
+    return max(10.0, env_float(env, "WEBR_NOTEBOOK_DAILY_HTTP_TIMEOUT", 40.0))
+
+
+def env_int(env: dict[str, str], key: str, default: int) -> int:
+    try:
+        return int(str(env.get(key, "") or "").strip() or default)
+    except ValueError:
+        return default
+
+
+def env_float(env: dict[str, str], key: str, default: float) -> float:
+    try:
+        return float(str(env.get(key, "") or "").strip() or default)
+    except ValueError:
+        return default
+
+
+def is_retryable_clickhouse_insert_error(status_code: int, detail: str) -> bool:
+    upper = detail.upper()
+    return status_code in {408, 429, 500, 502, 503, 504} or "TIMEOUT" in upper or "TOO_MANY_SIMULTANEOUS" in upper
+
+
+def short_clickhouse_reason(message: str) -> str:
+    upper = message.upper()
+    if "TIMEOUT" in upper or "TIMED OUT" in upper:
+        return "timeout"
+    if "TOO_MANY_SIMULTANEOUS" in upper:
+        return "server-busy"
+    if message.startswith("HTTP 429"):
+        return "rate-limited"
+    if message.startswith("HTTP 5"):
+        return "server-error"
+    return "temporary-error"
 
 
 def first_env(env: dict[str, str], *keys: str) -> str:

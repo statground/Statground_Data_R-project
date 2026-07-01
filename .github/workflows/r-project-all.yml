@@ -2,7 +2,7 @@ name: R Project Data Collection
 
 on:
   schedule:
-    - cron: "56 3,15 * * *"
+    - cron: "21 */12 * * *"
   workflow_dispatch:
     inputs:
       r_package_job:
@@ -25,6 +25,18 @@ on:
         description: "Only keep R Community items newer than N days when published_at exists. Use -1 for no date filtering."
         required: false
         default: "14"
+      webr_notebook_date:
+        description: "Web-R Notebook series date in Asia/Seoul, YYYY-MM-DD. Empty means today."
+        required: false
+        default: ""
+      webr_notebook_force_new:
+        description: "Create another Web-R Notebook post even when today's generated post already exists."
+        required: false
+        default: "false"
+      webr_notebook_dry_run:
+        description: "Run webR and build the notebook row without inserting it."
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -77,15 +89,29 @@ jobs:
           cache: pip
           cache-dependency-path: scripts/requirements.txt
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install Python collector dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r scripts/requirements.txt
 
+      - name: Install webR for Node
+        run: npm install --no-save webr
+
       - name: Install yt-dlp metadata fallback
         run: |
           python -m pip install --user yt-dlp
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate Web-R Notebook style templates
+        run: |
+          python scripts/generate_webr_notebook_daily.py \
+            --runner scripts/webr_notebook_runner.mjs \
+            --validate-style-templates \
+            --output /tmp/webr_notebook_style_validation.json
 
       - name: Validate ClickHouse settings
         env:
@@ -323,6 +349,11 @@ jobs:
           R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE: ${{ vars.R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE || 'true' }}
           R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'false' }}
           R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
+          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_CHUNK_SIZE || '1' }}
+          RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_ATTEMPTS || '4' }}
+          RPROJECT_CLICKHOUSE_BACKOFF_SECONDS: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_BACKOFF_SECONDS || '3' }}
+          RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_SPLIT_ON_TIMEOUT || 'true' }}
+          CH_TIMEOUT: ${{ vars.R_COMMUNITY_DIGEST_CH_TIMEOUT || '180' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -363,6 +394,49 @@ jobs:
             --since-days "$R_COMMUNITY_DIGEST_SINCE_DAYS" \
             --attempts 36 \
             --sleep 10
+
+      - name: Generate and insert Web-R Notebook
+        id: generate_notebook
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          WEBR_NOTEBOOK_DAILY_CH_MAX_EXECUTION_TIME: ${{ vars.WEBR_NOTEBOOK_DAILY_CH_MAX_EXECUTION_TIME || '120' }}
+          WEBR_NOTEBOOK_DAILY_CH_MAX_THREADS: ${{ vars.WEBR_NOTEBOOK_DAILY_CH_MAX_THREADS || '1' }}
+          WEBR_NOTEBOOK_DAILY_HTTP_TIMEOUT: ${{ vars.WEBR_NOTEBOOK_DAILY_HTTP_TIMEOUT || '150' }}
+          WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS: ${{ vars.WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS || '3' }}
+          WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS: ${{ vars.WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS || '5' }}
+        run: |
+          args=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.webr_notebook_date }}" ]]; then
+            args+=(--date "${{ inputs.webr_notebook_date }}")
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.webr_notebook_force_new }}" == "true" ]]; then
+            args+=(--force-new)
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.webr_notebook_dry_run }}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          python scripts/generate_webr_notebook_daily.py \
+            --runner scripts/webr_notebook_runner.mjs \
+            --output /tmp/webr_notebook_daily_result.json \
+            "${args[@]}"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(Path("/tmp/webr_notebook_daily_result.json").read_text(encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for key in ("inserted", "dry_run", "skipped", "notebook_uuid", "share_uuid", "title", "url"):
+                  value = result.get(key, "")
+                  if isinstance(value, bool):
+                      value = "true" if value else "false"
+                  print(f"{key}={value}", file=out)
+          print(json.dumps(result, ensure_ascii=False))
+          PY
 
       - name: Validate Web-R CDN2 publish settings
         env:
