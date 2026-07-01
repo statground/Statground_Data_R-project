@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import html
 import json
 import os
 import re
@@ -35,6 +36,17 @@ RECENT_TOPIC_LOOKBACK = 8
 RECENT_PAIR_LOOKBACK = 16
 SIMILARITY_THRESHOLD = 0.42
 R_SET_SEED_MAX = 2_147_483_647
+DEFAULT_SOURCE_CONTEXT_LOOKBACK_DAYS = 21
+DEFAULT_SOURCE_CONTEXT_LIMIT = 24
+SOURCE_CONTEXT_TOPIC_PREFIX = "source-context-"
+SOURCE_CONTEXT_COLORS = [
+    ("#2563eb", "#dc2626"),
+    ("#0f766e", "#f97316"),
+    ("#166534", "#b45309"),
+    ("#0369a1", "#c2410c"),
+    ("#4f46e5", "#db2777"),
+    ("#0e7490", "#a21caf"),
+]
 STOP_TOKENS = {
     "action",
     "active",
@@ -100,6 +112,7 @@ class Topic:
     amplitude: float
     noise: float
     threshold: float
+    source_context: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -394,13 +407,15 @@ def main() -> int:
         emit_result(result, args.output)
         return 0
 
-    spec = build_notebook_spec(series_date, existing_titles, recent_rows, force_new=args.force_new)
+    topic_pool = build_notebook_topic_pool(env, series_date)
+    spec = build_notebook_spec(series_date, existing_titles, recent_rows, topic_pool=topic_pool, force_new=args.force_new)
     runner_result = run_webr_runner(repo_root / args.runner, spec)
     row = build_clickhouse_row(spec, runner_result)
 
     if not args.dry_run:
         insert_json_each_row(env, "webr_webr.notebook", row)
 
+    topic_source_context = spec.get("topic", {}).get("source_context") or {}
     result = {
         "schema": "web-r.notebook.daily-result.v1",
         "inserted": not args.dry_run,
@@ -412,6 +427,7 @@ def main() -> int:
         "series_date": series_date,
         "url": f"/webr/notebook/view/{row['uuid_share']}/",
         "topic": spec["topic"]["key"],
+        "topic_source": topic_source_context.get("context_kind", "curated_static"),
         "style": spec["style"]["key"],
         "similarity_score": spec.get("similarity_guard", {}).get("max_similarity"),
         "similarity_matched_title": spec.get("similarity_guard", {}).get("matched_title", ""),
@@ -618,7 +634,283 @@ def max_recent_similarity(spec: dict[str, Any], recent_rows: list[dict[str, Any]
     return max_score, matched_title
 
 
-def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows: list[dict[str, Any]], *, force_new: bool) -> dict[str, Any]:
+def build_notebook_topic_pool(env: dict[str, str], series_date: str) -> list[Topic]:
+    if not env_bool(env, "WEBR_NOTEBOOK_SOURCE_CONTEXT_ENABLED", True):
+        return TOPICS
+
+    dynamic_topics: list[Topic] = []
+    seen_keys: set[str] = set()
+    for row in load_notebook_source_context_rows(env, series_date):
+        topic = topic_from_source_context(row)
+        if topic is None or topic.key in seen_keys:
+            continue
+        dynamic_topics.append(topic)
+        seen_keys.add(topic.key)
+
+    if dynamic_topics:
+        print(f"[notebook] source context topic candidates={len(dynamic_topics)}", file=sys.stderr)
+        return dynamic_topics + TOPICS
+
+    print("[notebook] source context topic candidates=0 fallback=curated_static", file=sys.stderr)
+    return TOPICS
+
+
+def load_notebook_source_context_rows(env: dict[str, str], series_date: str) -> list[dict[str, Any]]:
+    lookback_days = max(1, min(120, env_int(env, "WEBR_NOTEBOOK_SOURCE_LOOKBACK_DAYS", DEFAULT_SOURCE_CONTEXT_LOOKBACK_DAYS)))
+    limit = max(0, min(80, env_int(env, "WEBR_NOTEBOOK_SOURCE_LIMIT", DEFAULT_SOURCE_CONTEXT_LIMIT)))
+    if limit == 0:
+        return []
+
+    cutoff_date = (datetime.strptime(series_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    cutoff_dt = f"{cutoff_date} 00:00:00"
+    per_source_limit = max(4, limit)
+
+    digest_sql = f"""
+SELECT
+    'community_digest' AS context_kind,
+    source_type,
+    source_id,
+    source_name,
+    platform,
+    source_url,
+    title,
+    summary,
+    toString(digest_uuid) AS context_id,
+    toString(digest_date) AS published_at,
+    toString(item_count) AS item_count,
+    toString(deduped_item_count) AS deduped_item_count
+  FROM Data_R_Community_Service.v_r_community_daily_digest_latest
+ WHERE digest_date >= toDate({quote_clickhouse_string(cutoff_date)})
+   AND notEmpty(title)
+ ORDER BY digest_date DESC, updated_at DESC
+ LIMIT {per_source_limit}
+ FORMAT JSONEachRow
+"""
+    item_sql = f"""
+SELECT
+    'community_item' AS context_kind,
+    source_type,
+    source_id,
+    source_name,
+    platform,
+    source_url,
+    canonical_url AS canonical_url,
+    title,
+    summary,
+    toString(item_uuid) AS context_id,
+    toString(coalesce(original_published_at, published_at, collected_at)) AS published_at,
+    '' AS item_count,
+    '' AS deduped_item_count
+  FROM Data_R_Community_Service.r_community_item_read_current
+ WHERE active = 1
+   AND collected_at >= toDateTime64({quote_clickhouse_string(cutoff_dt)}, 3, 'Asia/Seoul')
+   AND notEmpty(title)
+ ORDER BY collected_at DESC
+ LIMIT {per_source_limit}
+ FORMAT JSONEachRow
+"""
+    package_sql = f"""
+SELECT
+    'package_profile' AS context_kind,
+    'package_index' AS source_type,
+    package_name AS source_id,
+    repository AS source_name,
+    'r-package' AS platform,
+    '' AS source_url,
+    concat(package_name, ' ', latest_version) AS title,
+    if(notEmpty(description), description, title) AS summary,
+    package_name AS context_id,
+    toString(last_observed_at) AS published_at,
+    '' AS item_count,
+    '' AS deduped_item_count
+ FROM Data_R_Package_Service.package_current
+ WHERE last_observed_at >= toDateTime64({quote_clickhouse_string(cutoff_dt)}, 3, 'Asia/Seoul')
+   AND notEmpty(package_name)
+ ORDER BY last_observed_at DESC, cityHash64(package_name, {quote_clickhouse_string(series_date)}) ASC
+ LIMIT {max(4, min(12, per_source_limit))}
+ FORMAT JSONEachRow
+"""
+    groups = [
+        optional_clickhouse_json_each_row(env, digest_sql, "community-digest"),
+        optional_clickhouse_json_each_row(env, item_sql, "community-item"),
+        optional_clickhouse_json_each_row(env, package_sql, "package-profile"),
+    ]
+    return interleave_context_rows(groups, limit)
+
+
+def optional_clickhouse_json_each_row(env: dict[str, str], sql: str, label: str) -> list[dict[str, Any]]:
+    try:
+        return clickhouse_json_each_row(env, sql)
+    except SystemExit:
+        print(f"[notebook] source context skipped={label} reason=clickhouse-query-error", file=sys.stderr)
+        return []
+
+
+def interleave_context_rows(groups: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    max_len = max((len(group) for group in groups), default=0)
+    for index in range(max_len):
+        for group in groups:
+            if index >= len(group):
+                continue
+            row = group[index]
+            identity = source_context_identity(row)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(row)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def topic_from_source_context(row: dict[str, Any]) -> Topic | None:
+    title = clean_source_text(row.get("title"), 120)
+    if not title:
+        return None
+    summary = clean_source_text(row.get("summary"), 180)
+    source_name = clean_source_text(row.get("source_name"), 48) or clean_source_text(row.get("platform"), 32) or "R community"
+    source_type = clean_source_text(row.get("source_type"), 48)
+    platform = clean_source_text(row.get("platform"), 32)
+    context_kind = clean_source_text(row.get("context_kind"), 32) or "community_item"
+    context_id = clean_source_text(row.get("context_id"), 80)
+    source_id = clean_source_text(row.get("source_id"), 80)
+    published_at = clean_source_text(row.get("published_at"), 32)
+    source_url = clean_source_url(row)
+    identity = source_context_identity(row)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    seed = int(digest[:12], 16)
+    color, accent = SOURCE_CONTEXT_COLORS[seed % len(SOURCE_CONTEXT_COLORS)]
+    context_label = source_context_label(context_kind, source_type, platform)
+    entity = source_context_entity(context_kind, source_type, source_name, title, source_id)
+    metric = source_context_metric(context_kind, source_type)
+    question = source_context_question(context_kind, source_type)
+    title_hint = shorten_text(title, 56)
+    source_phrase = f"{source_name}의 공개 글감" if source_name else "최근 R 공개 글감"
+    background = (
+        f"최근 수집된 {source_phrase} `{title_hint}`은 {context_label}을 작은 데이터 질문으로 바꿔 볼 만한 단서입니다. "
+        "이 Notebook은 원문을 복제하지 않고, 그 맥락에서 보이는 관심 방향을 재현용 예제 데이터로 바꿔 분석합니다."
+    )
+    if summary:
+        background += " 수집 요약은 주제 선택의 힌트로만 사용하고, 아래 분석 값은 모두 재현 가능한 예제 데이터입니다."
+
+    return Topic(
+        key=f"{SOURCE_CONTEXT_TOPIC_PREFIX}{digest[:14]}",
+        title=f"R ecosystem source pulse {digest[:4]}",
+        metric=metric,
+        entity=entity,
+        question=question,
+        source_note=f"최근 R ecosystem/community 수집 컨텍스트 `{title_hint}`에서 얻은 재현용 관심도 지표",
+        background=background,
+        color=color,
+        accent=accent,
+        base=34 + (seed % 96),
+        slope=round((((seed >> 8) % 90) - 25) / 100, 2),
+        amplitude=5 + ((seed >> 16) % 16),
+        noise=round(2.4 + ((seed >> 24) % 72) / 10, 1),
+        threshold=round(1.24 + ((seed >> 32) % 28) / 100, 2),
+        source_context={
+            "context_kind": context_kind,
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_name": source_name,
+            "platform": platform,
+            "context_id": context_id,
+            "source_title": title,
+            "source_url": source_url,
+            "published_at": published_at,
+        },
+    )
+
+
+def source_context_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        clean_source_text(row.get(key), 160)
+        for key in ("context_kind", "source_type", "source_id", "context_id", "title")
+    )
+
+
+def source_context_label(context_kind: str, source_type: str, platform: str) -> str:
+    combined = f"{context_kind} {source_type} {platform}".lower()
+    if "package" in combined:
+        return "패키지 업데이트와 유지보수 신호"
+    if "qna" in combined or "stackoverflow" in combined or "question" in combined:
+        return "질문과 답변의 관심 흐름"
+    if "digest" in combined:
+        return "커뮤니티 요약에서 보이는 반복 주제"
+    if "forum" in combined or "community" in combined:
+        return "커뮤니티 토론의 방향"
+    if "social" in combined or "fediverse" in combined or "mastodon" in combined:
+        return "소셜 커뮤니티 반응"
+    return "R 에코시스템 공개 글감"
+
+
+def source_context_entity(context_kind: str, source_type: str, source_name: str, title: str, source_id: str) -> str:
+    combined = f"{context_kind} {source_type}".lower()
+    if "package" in combined:
+        package = source_id or (title.split()[0] if title.split() else title)
+        package = shorten_text(package, 26)
+        return f"{package} 패키지 업데이트"
+    if "qna" in combined or "question" in combined:
+        return f"{shorten_text(source_name, 24)} 질문 흐름"
+    if "digest" in combined:
+        return f"{shorten_text(source_name, 24)} 커뮤니티 요약"
+    if "social" in combined or "fediverse" in combined:
+        return "R 커뮤니티 반응"
+    return f"{shorten_text(source_name, 24)} 에코시스템 글감"
+
+
+def source_context_metric(context_kind: str, source_type: str) -> str:
+    combined = f"{context_kind} {source_type}".lower()
+    if "package" in combined:
+        return "simulated package update attention"
+    if "qna" in combined or "question" in combined:
+        return "simulated question attention"
+    if "digest" in combined:
+        return "simulated community digest attention"
+    if "social" in combined or "fediverse" in combined:
+        return "simulated community reaction"
+    return "simulated ecosystem attention"
+
+
+def source_context_question(context_kind: str, source_type: str) -> str:
+    combined = f"{context_kind} {source_type}".lower()
+    if "package" in combined:
+        return "최근 패키지 업데이트 신호가 기준선에서 벗어났는가?"
+    if "qna" in combined or "question" in combined:
+        return "질문과 답변 흐름이 특정 주제에 집중되고 있는가?"
+    if "digest" in combined:
+        return "커뮤니티 요약에서 반복되는 관심이 실제 신호처럼 보이는가?"
+    if "social" in combined or "fediverse" in combined:
+        return "소셜 반응이 짧은 관심 급등으로 이어질 수 있는가?"
+    return "최근 공개 글감이 R 에코시스템 관심 이동으로 이어질 수 있는가?"
+
+
+def clean_source_url(row: dict[str, Any]) -> str:
+    for key in ("canonical_url", "source_url"):
+        value = clean_source_text(row.get(key), 260)
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""
+
+
+def clean_source_text(value: Any, max_len: int) -> str:
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("`", "'")
+    return shorten_text(text, max_len)
+
+
+def shorten_text(value: str, max_len: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max(0, max_len - 1)].rstrip() + "…"
+
+
+def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows: list[dict[str, Any]], *, topic_pool: list[Topic], force_new: bool) -> dict[str, Any]:
     base_seed = int(hashlib.sha256(f"webr-notebook:{series_date}".encode("utf-8")).hexdigest()[:8], 16)
     recent_styles = recent_notebook_style_keys(recent_rows)
     recent_topics = recent_notebook_topic_keys(recent_rows)
@@ -634,6 +926,7 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
             existing_titles=existing_titles,
             recent_styles=recent_styles,
             recent_topics=recent_topics,
+            topic_pool=topic_pool,
             seed=seed,
             attempt=attempt,
             force_new=force_new,
@@ -683,15 +976,16 @@ def build_candidate_notebook_spec(
     existing_titles: set[str],
     recent_styles: list[str],
     recent_topics: list[str],
+    topic_pool: list[Topic],
     seed: int,
     attempt: int,
     force_new: bool,
 ) -> dict[str, Any]:
     style = choose_style(seed + attempt * 2, recent_styles)
-    topic = choose_topic(seed, recent_topics, attempt)
+    topic = choose_topic(seed, recent_topics, attempt, topic_pool)
     title = build_public_title(topic, style, existing_titles, seed + attempt)
     description = (
-        f"{series_date} Web-R Notebook 자동 연재 글입니다. "
+        f"{series_date} R ecosystem/community Notebook 자동 연재 글입니다. "
         f"{topic.source_note}를 만들고, `{style.label}` 형식으로 {topic.entity} 데이터를 분석합니다."
     )
 
@@ -734,14 +1028,40 @@ def choose_style(seed: int, recent_styles: list[str]) -> NotebookStyle:
     return STYLES[seed % len(STYLES)]
 
 
-def choose_topic(seed: int, recent_topics: list[str], attempt: int) -> Topic:
+def choose_topic(seed: int, recent_topics: list[str], attempt: int, topic_pool: list[Topic]) -> Topic:
     recent = {topic for topic in recent_topics[:RECENT_TOPIC_LOOKBACK] if topic}
-    start = ((seed // max(1, len(STYLES))) + attempt * 2) % len(TOPICS)
-    for offset in range(len(TOPICS)):
-        candidate = TOPICS[(start + offset) % len(TOPICS)]
+    pool = topic_pool or TOPICS
+    source_topics = [topic for topic in pool if topic.source_context]
+    curated_topics = [topic for topic in pool if not topic.source_context]
+    if source_topics:
+        source_start = ((seed // max(1, len(STYLES))) + attempt * 2) % len(source_topics)
+        for offset in range(len(source_topics)):
+            candidate = source_topics[(source_start + offset) % len(source_topics)]
+            if candidate.key not in recent:
+                return candidate
+
+    fallback_pool = curated_topics or pool
+    start = ((seed // max(1, len(STYLES))) + attempt * 2) % len(fallback_pool)
+    for offset in range(len(fallback_pool)):
+        candidate = fallback_pool[(start + offset) % len(fallback_pool)]
         if candidate.key not in recent:
             return candidate
-    return TOPICS[start]
+    return fallback_pool[start]
+
+
+def source_context_markdown(topic: Topic) -> str:
+    context = topic.source_context or {}
+    title = str(context.get("source_title", "") or "").strip()
+    source_name = str(context.get("source_name", "") or "").strip()
+    published_at = str(context.get("published_at", "") or "").strip()
+    if not title:
+        return ""
+    published_note = f" ({published_at[:10]})" if published_at else ""
+    source_label = f"{source_name}의 " if source_name else ""
+    return (
+        f"참고 컨텍스트는 {source_label}`{shorten_text(title, 72)}`{published_note}입니다. "
+        "원문 링크나 본문을 복제하지 않고, 주제 신호만 작은 분석 프레임으로 가져옵니다."
+    )
 
 
 def build_style_cells(
@@ -789,6 +1109,8 @@ def build_style_cells(
         )
         r_summary = build_summary_r_code(topic)
 
+    context_note = source_context_markdown(topic)
+    context_block = f"{context_note}\n\n" if context_note else ""
     return [
         {
             "id": 1,
@@ -796,9 +1118,10 @@ def build_style_cells(
             "source": (
                 f"### {title}\n\n"
                 f"{topic.background}\n\n"
+                f"{context_block}"
                 f"{style.question_prefix} 오늘의 질문은 **{topic.question}** 입니다.\n\n"
                 f"{style.formula_note}\n\n"
-                f"아래에서는 {topic.source_note}를 만든 뒤, WebR 안에서 그대로 다시 실행할 수 있는 base R 코드로 작은 분석을 진행합니다."
+                f"아래에서는 {topic.source_note}를 만든 뒤, 브라우저 WebR에서 실행 가능한 base R 코드로 작은 분석을 진행합니다."
             ),
         },
         {"id": 2, "mode": "r", "source": r_setup, "plot_path": plot_path},
@@ -1302,6 +1625,7 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         for cell in spec["cells"]
         if cell["mode"] == "r"
     ]
+    topic_source_context = spec.get("topic", {}).get("source_context") or {}
     meta = {
         "version": "split-v1",
         "activeCellId": 2,
@@ -1316,6 +1640,7 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "source_repo": "Statground_Data_R-project",
         "series_date": spec["series_date"],
         "topic": spec["topic"]["key"],
+        "topic_source_context": topic_source_context,
         "style": spec["style"]["key"],
         "candidate_attempt": spec.get("candidate_attempt", 0),
         "similarity_guard": spec.get("similarity_guard", {}),
@@ -1331,6 +1656,7 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "created_at_kst": now,
         "series_date": spec["series_date"],
         "topic": spec["topic"]["key"],
+        "topic_source_context": topic_source_context,
         "style": spec["style"]["key"],
         "candidate_attempt": spec.get("candidate_attempt", 0),
         "similarity_guard": spec.get("similarity_guard", {}),
@@ -1468,6 +1794,13 @@ def clickhouse_url(env: dict[str, str]) -> str:
 
 def clickhouse_http_timeout(env: dict[str, str]) -> float:
     return max(10.0, env_float(env, "WEBR_NOTEBOOK_DAILY_HTTP_TIMEOUT", 40.0))
+
+
+def env_bool(env: dict[str, str], key: str, default: bool) -> bool:
+    raw = str(env.get(key, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
 
 
 def env_int(env: dict[str, str], key: str, default: int) -> int:
