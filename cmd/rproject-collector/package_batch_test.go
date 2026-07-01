@@ -243,6 +243,24 @@ func TestRetryableClickHouseFallbackError(t *testing.T) {
 	if retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 403: not enough privileges")) {
 		t.Fatal("permission errors should not be retried")
 	}
+	replicaUnavailable := errors.New("ClickHouse HTTP 500: Code: 242. DB::Exception: Table is in readonly mode because Keeper connection loss")
+	if !retryableClickHouseFallbackError(replicaUnavailable) {
+		t.Fatal("replica/Keeper state errors should be retried")
+	}
+	if splittableClickHouseFallbackError(replicaUnavailable) {
+		t.Fatal("replica/Keeper state errors should not be split into smaller chunks")
+	}
+	if got := publicClickHouseError(replicaUnavailable); got != "clickhouse-replica-unavailable" {
+		t.Fatalf("publicClickHouseError = %q, want clickhouse-replica-unavailable", got)
+	}
+	transportClosed := errors.New("Post http://clickhouse:8123/: unexpected EOF")
+	if !retryableClickHouseFallbackError(transportClosed) || publicClickHouseError(transportClosed) != "clickhouse-network" {
+		t.Fatal("HTTP transport close/EOF should be retryable network failure")
+	}
+	contract := errors.New("ClickHouse HTTP 500: DB::Exception: Unknown identifier status_id")
+	if retryableClickHouseFallbackError(contract) || isTransientClickHousePublishFailure(contract) {
+		t.Fatal("schema/contract errors must remain fatal")
+	}
 }
 
 func TestPackageRawEventInsertPrefixDefaultsToAsyncDistributedInsert(t *testing.T) {
@@ -285,6 +303,37 @@ func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
 	auth := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-permission")
 	if shouldDeferYouTubePublishFailure(auth) {
 		t.Fatal("YouTube permission errors must remain fatal")
+	}
+}
+
+func TestWebRDirectOutboxHelpers(t *testing.T) {
+	t.Setenv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN", "")
+	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	body := genericRawEventInsertPrefix(clickHouseQueryConfig{}, "Data_R_Community_Log.mastodon_log") + "{\"uuid\":\"u1\"}\n"
+	rowsJSON := directRowsJSONFromInsertBody(body)
+	if rowsJSON != "{\"uuid\":\"u1\"}" {
+		t.Fatalf("directRowsJSONFromInsertBody = %q", rowsJSON)
+	}
+	statement := webRDirectInsertStatementFromRowsJSON(clickHouseQueryConfig{}, "Data_R_Community_Log.mastodon_log", rowsJSON)
+	if !strings.Contains(statement, "INSERT INTO Data_R_Community_Log.mastodon_log") || !strings.HasSuffix(statement, "\n") {
+		t.Fatalf("unexpected replay statement: %q", statement)
+	}
+	if got := webRDirectTableLabel("Data_R_Community_Log.mastodon_log"); got != "mastodon-log" {
+		t.Fatalf("webRDirectTableLabel = %q, want mastodon-log", got)
+	}
+	transient := errors.New("ClickHouse HTTP 500: Code: 667. DB::Exception: Table is not initialized yet. (NOT_INITIALIZED)")
+	if !shouldEnqueueWebRDirectOutbox(transient) {
+		t.Fatal("Mastodon/Web-R transient insert failures should be queued to outbox")
+	}
+	if !shouldDeferWebRDirectOutboxFailure(errors.New("Post http://clickhouse:8123/: unexpected EOF")) {
+		t.Fatal("transient outbox enqueue failure should be fail-open by default")
+	}
+	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	if shouldDeferWebRDirectOutboxFailure(errors.New("Post http://clickhouse:8123/: unexpected EOF")) {
+		t.Fatal("Mastodon/Web-R outbox defer should respect opt-out env")
+	}
+	if shouldEnqueueWebRDirectOutbox(errors.New("ClickHouse HTTP 500: DB::Exception: Unknown identifier status_id")) {
+		t.Fatal("schema errors must not be queued to outbox")
 	}
 }
 

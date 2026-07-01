@@ -36,6 +36,7 @@ const (
 	defaultYouTubeTopic           = "r.youtube.events"
 	defaultCommunityTopic         = "r.community.events"
 	defaultWebRTopic              = "webr.events"
+	rProjectDirectOutboxTable     = "Data_R_Community_Log.r_project_direct_insert_outbox"
 	userAgent                     = "StatgroundBot/1.0 (+https://www.statground.net; R ecosystem collector)"
 	youtubeBoilerplateDescription = "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
 )
@@ -2587,6 +2588,14 @@ func runMastodon(ctx context.Context, args []string) error {
 			return err
 		}
 		chCfg = &cfg
+	}
+	if chCfg != nil && !*dryRun {
+		drained, err := drainWebRDirectOutbox(ctx, *chCfg, envInt("MASTODON_DIRECT_OUTBOX_DRAIN_LIMIT", envInt("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", 25)))
+		if err != nil {
+			fmt.Printf("[warn] Mastodon direct outbox drain skipped: %s\n", publicClickHouseError(err))
+		} else if drained > 0 {
+			fmt.Printf("[clickhouse] drained Mastodon/Web-R direct outbox chunks=%d\n", drained)
+		}
 	}
 	dedup := emptyMastodonDedupState()
 	if chCfg != nil && !*backfillOnly {
@@ -7923,6 +7932,7 @@ func isTransientPublishFailure(err error) bool {
 		strings.Contains(message, "clickhouse-auth") ||
 		strings.Contains(message, "clickhouse-permission") ||
 		strings.Contains(message, "clickhouse-request-error") ||
+		clickHouseContractErrorText(message) ||
 		strings.Contains(message, "kafka-auth") ||
 		strings.Contains(message, "not authorized") ||
 		strings.Contains(message, "authorization failed") {
@@ -7937,6 +7947,8 @@ func isTransientPublishFailure(err error) bool {
 		strings.Contains(message, "clickhouse-timeout") ||
 		strings.Contains(message, "clickhouse-network") ||
 		strings.Contains(message, "clickhouse-not-initialized") ||
+		strings.Contains(message, "clickhouse-replica-unavailable") ||
+		clickHouseReplicaStateErrorText(message) ||
 		strings.Contains(message, "clickhouse-server-error")
 }
 
@@ -7957,6 +7969,8 @@ func publishFailureReason(err error) string {
 		chReason = "clickhouse-network"
 	case strings.Contains(msg, "clickhouse-not-initialized"):
 		chReason = "clickhouse-not-initialized"
+	case strings.Contains(msg, "clickhouse-replica-unavailable"):
+		chReason = "clickhouse-replica-unavailable"
 	case strings.Contains(msg, "clickhouse-server-error"):
 		chReason = "clickhouse-server-error"
 	}
@@ -8266,14 +8280,28 @@ func retryableClickHouseFallbackError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if clickHouseContractErrorText(msg) {
+		return false
+	}
 	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "deadline exceeded") ||
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "transport connection broken") ||
+		strings.Contains(msg, "connection closed") ||
+		strings.Contains(msg, "closed connection") ||
+		strings.Contains(msg, "server closed") ||
+		strings.Contains(msg, "stream closed") ||
+		strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "no route to host") ||
 		strings.Contains(msg, "network is unreachable") ||
 		strings.Contains(msg, "temporary failure in name resolution") ||
+		clickHouseReplicaStateErrorText(msg) ||
 		clickHouseTableNotInitializedErrorText(msg) ||
 		strings.Contains(msg, "clickhouse http 5")
 }
@@ -8282,10 +8310,38 @@ func splittableClickHouseFallbackError(err error) bool {
 	if err == nil || !retryableClickHouseFallbackError(err) {
 		return false
 	}
-	return !clickHouseTableNotInitializedErrorText(strings.ToLower(err.Error()))
+	msg := strings.ToLower(err.Error())
+	return !clickHouseTableNotInitializedErrorText(msg) && !clickHouseReplicaStateErrorText(msg)
+}
+
+func clickHouseContractErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "unknown_identifier") ||
+		strings.Contains(message, "unknown_table") ||
+		strings.Contains(message, "unknown_database") ||
+		strings.Contains(message, "no such column") ||
+		strings.Contains(message, "missing columns") ||
+		strings.Contains(message, "type_mismatch") ||
+		strings.Contains(message, "cannot parse") ||
+		strings.Contains(message, "cannot convert") ||
+		strings.Contains(message, "syntax_error") ||
+		strings.Contains(message, "syntax error")
+}
+
+func clickHouseReplicaStateErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "table_is_read_only") ||
+		strings.Contains(message, "table is read-only") ||
+		strings.Contains(message, "table is read only") ||
+		strings.Contains(message, "table is readonly") ||
+		strings.Contains(message, "is in readonly mode") ||
+		strings.Contains(message, "keeper_exception") ||
+		strings.Contains(message, "coordination error") ||
+		strings.Contains(message, "connection loss")
 }
 
 func clickHouseTableNotInitializedErrorText(message string) bool {
+	message = strings.ToLower(message)
 	return strings.Contains(message, "not_initialized") ||
 		strings.Contains(message, "not initialized") ||
 		strings.Contains(message, "table is not initialized")
@@ -8586,7 +8642,192 @@ func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConf
 		}
 		return insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[mid:])
 	}
+	if shouldEnqueueWebRDirectOutbox(err) {
+		label := webRDirectTableLabel(table)
+		if outboxErr := enqueueWebRDirectOutbox(ctx, cfg, table, label, b.String(), len(rows), err); outboxErr == nil {
+			fmt.Printf("[clickhouse] queued Web-R direct outbox target=%s rows=%d reason=%s\n", label, len(rows), publicClickHouseError(err))
+			return nil
+		} else {
+			fmt.Printf("[warn] Web-R direct outbox enqueue failed target=%s rows=%d error=%s\n", label, len(rows), publicClickHouseError(outboxErr))
+			if shouldDeferWebRDirectOutboxFailure(outboxErr) {
+				fmt.Printf("[webr] publish_deferred target=%s rows=%d reason=%s outbox_error=%s\n", label, len(rows), publicClickHouseError(err), publicClickHouseError(outboxErr))
+				return nil
+			}
+		}
+	}
 	return err
+}
+
+func shouldEnqueueWebRDirectOutbox(err error) bool {
+	return isTransientClickHousePublishFailure(err)
+}
+
+func shouldDeferWebRDirectOutboxFailure(err error) bool {
+	if !webRDirectTransientFailOpen() {
+		return false
+	}
+	return isTransientClickHousePublishFailure(err)
+}
+
+func webRDirectTransientFailOpen() bool {
+	if value, ok := os.LookupEnv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN"); ok && strings.TrimSpace(value) != "" {
+		return envBoolValue(value)
+	}
+	return envBool("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", true)
+}
+
+func enqueueWebRDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, table, label, insertBody string, rowCount int, sourceErr error) error {
+	rowsJSON := directRowsJSONFromInsertBody(insertBody)
+	if strings.TrimSpace(rowsJSON) == "" {
+		return errors.New("Web-R direct outbox rows_json is empty")
+	}
+	payloadHash := shaHex(table + "\n" + rowsJSON)
+	exists, err := pendingWebRDirectOutboxExists(cfg, table, payloadHash)
+	if err != nil {
+		return err
+	}
+	if exists {
+		fmt.Printf("[clickhouse] Web-R direct outbox already has pending chunk target=%s rows=%d hash=%s\n", label, rowCount, payloadHash[:12])
+		return nil
+	}
+	row := map[string]any{
+		"outbox_uuid":  uuid7(),
+		"created_at":   formatKST(nowKST()),
+		"target_table": table,
+		"target_label": label,
+		"rows_json":    ensureDirectRowsTrailingNewline(rowsJSON),
+		"row_count":    rowCount,
+		"payload_hash": payloadHash,
+		"source_error": publicClickHouseError(sourceErr),
+	}
+	line, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf("INSERT INTO %s FORMAT JSONEachRow\n%s\n", rProjectDirectOutboxTable, line)
+	return cfg.exec(ctx, query)
+}
+
+func pendingWebRDirectOutboxExists(cfg clickHouseQueryConfig, table, payloadHash string) (bool, error) {
+	query := fmt.Sprintf(`
+SELECT count() AS count
+FROM %s
+WHERE target_table = %s
+  AND payload_hash = %s
+  AND replayed_at IS NULL
+FORMAT JSONEachRow`, rProjectDirectOutboxTable, clickHouseQuoteString(table), clickHouseQuoteString(payloadHash))
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		return false, err
+	}
+	if len(rows) == 0 {
+		return false, nil
+	}
+	return intAny(rows[0]["count"]) > 0, nil
+}
+
+func drainWebRDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, limit int) (int, error) {
+	limit = maxInt(0, limit)
+	if limit == 0 {
+		return 0, nil
+	}
+	query := fmt.Sprintf(`
+SELECT toString(outbox_uuid) AS outbox_uuid, target_table, target_label, rows_json, row_count
+FROM %s
+WHERE replayed_at IS NULL
+ORDER BY created_at ASC, outbox_uuid ASC
+LIMIT %d
+FORMAT JSONEachRow`, rProjectDirectOutboxTable, limit)
+	rows, err := cfg.queryJSONEachRow(query)
+	if err != nil {
+		return 0, err
+	}
+	drained := 0
+	for _, row := range rows {
+		outboxUUID := stringAny(row["outbox_uuid"])
+		table := stringAny(row["target_table"])
+		label := firstNonEmpty(stringAny(row["target_label"]), webRDirectTableLabel(table))
+		rowsJSON := stringAny(row["rows_json"])
+		rowCount := int(intAny(row["row_count"]))
+		if outboxUUID == "" || table == "" || strings.TrimSpace(rowsJSON) == "" {
+			continue
+		}
+		body := webRDirectInsertStatementFromRowsJSON(cfg, table, rowsJSON)
+		if err := execClickHouseDirectChunk(ctx, cfg, body, label, rowCount); err != nil {
+			_ = markWebRDirectOutboxReplay(ctx, cfg, outboxUUID, false, err)
+			return drained, err
+		}
+		if err := markWebRDirectOutboxReplay(ctx, cfg, outboxUUID, true, nil); err != nil {
+			return drained, err
+		}
+		fmt.Printf("[clickhouse] Web-R direct outbox replayed uuid=%s target=%s rows=%d\n", outboxUUID, label, rowCount)
+		drained++
+	}
+	return drained, nil
+}
+
+func markWebRDirectOutboxReplay(ctx context.Context, cfg clickHouseQueryConfig, outboxUUID string, success bool, replayErr error) error {
+	now := formatKST(nowKST())
+	if success {
+		query := fmt.Sprintf(`
+ALTER TABLE %s
+UPDATE
+    replay_attempt = replay_attempt + 1,
+    last_replay_at = toDateTime64(%s, 3, 'Asia/Seoul'),
+    replayed_at = toDateTime64(%s, 3, 'Asia/Seoul'),
+    replay_error = ''
+WHERE outbox_uuid = toUUID(%s)
+SETTINGS mutations_sync = 1`, rProjectDirectOutboxTable, clickHouseQuoteString(now), clickHouseQuoteString(now), clickHouseQuoteString(outboxUUID))
+		return cfg.exec(ctx, query)
+	}
+	query := fmt.Sprintf(`
+ALTER TABLE %s
+UPDATE
+    replay_attempt = replay_attempt + 1,
+    last_replay_at = toDateTime64(%s, 3, 'Asia/Seoul'),
+    replay_error = %s
+WHERE outbox_uuid = toUUID(%s)
+SETTINGS mutations_sync = 1`, rProjectDirectOutboxTable, clickHouseQuoteString(now), clickHouseQuoteString(publicClickHouseError(replayErr)), clickHouseQuoteString(outboxUUID))
+	return cfg.exec(ctx, query)
+}
+
+func webRDirectInsertStatementFromRowsJSON(cfg clickHouseQueryConfig, table, rowsJSON string) string {
+	return genericRawEventInsertPrefix(cfg, table) + ensureDirectRowsTrailingNewline(rowsJSON)
+}
+
+func directRowsJSONFromInsertBody(body string) string {
+	idx := strings.IndexByte(body, '\n')
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(body[idx+1:])
+}
+
+func ensureDirectRowsTrailingNewline(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return value + "\n"
+}
+
+func webRDirectTableLabel(table string) string {
+	switch table {
+	case "Data_R_Community_Log.r_blogger_log":
+		return "rblogger-log"
+	case "Data_R_Community_Raw.r_blogger_article_raw":
+		return "rblogger-raw"
+	case "Data_R_Community_Service.r_blogger_board":
+		return "rblogger-board"
+	case "Data_R_Community_Log.mastodon_log":
+		return "mastodon-log"
+	case "Data_R_Community_Raw.mastodon_status_raw":
+		return "mastodon-raw"
+	case "Data_R_Community_Service.mastodon_board":
+		return "mastodon-board"
+	default:
+		return "webr-typed"
+	}
 }
 
 func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
@@ -9053,16 +9294,30 @@ func publicClickHouseError(err error) string {
 		return "clickhouse-timeout"
 	case clickHouseTableNotInitializedErrorText(msg):
 		return "clickhouse-not-initialized"
+	case strings.Contains(msg, "clickhouse-replica-unavailable"),
+		clickHouseReplicaStateErrorText(msg):
+		return "clickhouse-replica-unavailable"
 	case strings.Contains(msg, "401"),
 		strings.Contains(msg, "authentication"),
 		strings.Contains(msg, "unauthorized"):
 		return "clickhouse-auth"
 	case strings.Contains(msg, "403"),
-		strings.Contains(msg, "not enough privileges"),
-		strings.Contains(msg, "readonly"):
+		strings.Contains(msg, "not enough privileges"):
 		return "clickhouse-permission"
+	case strings.Contains(msg, "clickhouse-request-error"),
+		clickHouseContractErrorText(msg):
+		return "clickhouse-request-error"
 	case strings.Contains(msg, "connection refused"),
 		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "unexpected eof"),
+		strings.Contains(msg, "eof"),
+		strings.Contains(msg, "broken pipe"),
+		strings.Contains(msg, "transport connection broken"),
+		strings.Contains(msg, "connection closed"),
+		strings.Contains(msg, "closed connection"),
+		strings.Contains(msg, "server closed"),
+		strings.Contains(msg, "stream closed"),
+		strings.Contains(msg, "use of closed network connection"),
 		strings.Contains(msg, "no such host"),
 		strings.Contains(msg, "no route to host"),
 		strings.Contains(msg, "network is unreachable"),
