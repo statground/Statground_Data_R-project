@@ -2543,6 +2543,10 @@ func runYouTube(ctx context.Context, args []string) error {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
 		if err := pub.publishGeneric(ctx, events); err != nil {
+			if shouldDeferYouTubePublishFailure(err) {
+				fmt.Printf("[youtube] publish_deferred job=%s events=%d reason=%s\n", currentJob, len(events), publishFailureReason(err))
+				continue
+			}
 			return fmt.Errorf("%s publish: %w", currentJob, err)
 		}
 		fmt.Printf("job=%s published=%d\n", currentJob, len(events))
@@ -7897,13 +7901,28 @@ func shouldUsePackageClickHouseFallback(err error, eventCount int) bool {
 }
 
 func shouldDeferPackagePublishFailure(err error) bool {
-	if err == nil || !envBool("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
+	if !envBool("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
+		return false
+	}
+	return isTransientPublishFailure(err)
+}
+
+func shouldDeferYouTubePublishFailure(err error) bool {
+	if !envBool("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+		return false
+	}
+	return isTransientPublishFailure(err)
+}
+
+func isTransientPublishFailure(err error) bool {
+	if err == nil {
 		return false
 	}
 	message := strings.ToLower(err.Error())
 	if isKafkaAuthOrPermissionErrorText(message) ||
 		strings.Contains(message, "clickhouse-auth") ||
 		strings.Contains(message, "clickhouse-permission") ||
+		strings.Contains(message, "clickhouse-request-error") ||
 		strings.Contains(message, "kafka-auth") ||
 		strings.Contains(message, "not authorized") ||
 		strings.Contains(message, "authorization failed") {
@@ -7917,10 +7936,15 @@ func shouldDeferPackagePublishFailure(err error) bool {
 		reason == "temporary-kafka-error" ||
 		strings.Contains(message, "clickhouse-timeout") ||
 		strings.Contains(message, "clickhouse-network") ||
+		strings.Contains(message, "clickhouse-not-initialized") ||
 		strings.Contains(message, "clickhouse-server-error")
 }
 
 func packagePublishFailureReason(err error) string {
+	return publishFailureReason(err)
+}
+
+func publishFailureReason(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -7931,10 +7955,15 @@ func packagePublishFailureReason(err error) string {
 		chReason = "clickhouse-timeout"
 	case strings.Contains(msg, "clickhouse-network"):
 		chReason = "clickhouse-network"
+	case strings.Contains(msg, "clickhouse-not-initialized"):
+		chReason = "clickhouse-not-initialized"
 	case strings.Contains(msg, "clickhouse-server-error"):
 		chReason = "clickhouse-server-error"
 	}
 	kReason := kafkaRetryReason(err)
+	if chReason != "" && strings.Contains(msg, "clickhouse") && kReason == "temporary-kafka-error" {
+		kReason = ""
+	}
 	if chReason == "" {
 		return kReason
 	}
@@ -8059,7 +8088,7 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 	if err == nil {
 		return nil
 	}
-	if len(events) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+	if len(events) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && splittableClickHouseFallbackError(err) {
 		mid := len(events) / 2
 		fmt.Printf("[clickhouse] direct publish split target=%s events=%d reason=%s\n", target.label, len(events), publicClickHouseError(err))
 		if splitErr := insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[:mid]); splitErr != nil {
@@ -8189,7 +8218,7 @@ func insertPackageRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 	if err == nil {
 		return nil
 	}
-	if len(events) > 1 && envBool("RPKG_CLICKHOUSE_FALLBACK_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+	if len(events) > 1 && envBool("RPKG_CLICKHOUSE_FALLBACK_SPLIT_ON_TIMEOUT", true) && splittableClickHouseFallbackError(err) {
 		mid := len(events) / 2
 		fmt.Printf("[clickhouse] package raw fallback split events=%d reason=%s\n", len(events), publicClickHouseError(err))
 		if splitErr := insertPackageRawEventChunkWithSplit(ctx, cfg, events[:mid]); splitErr != nil {
@@ -8245,7 +8274,21 @@ func retryableClickHouseFallbackError(err error) bool {
 		strings.Contains(msg, "no route to host") ||
 		strings.Contains(msg, "network is unreachable") ||
 		strings.Contains(msg, "temporary failure in name resolution") ||
+		clickHouseTableNotInitializedErrorText(msg) ||
 		strings.Contains(msg, "clickhouse http 5")
+}
+
+func splittableClickHouseFallbackError(err error) bool {
+	if err == nil || !retryableClickHouseFallbackError(err) {
+		return false
+	}
+	return !clickHouseTableNotInitializedErrorText(strings.ToLower(err.Error()))
+}
+
+func clickHouseTableNotInitializedErrorText(message string) bool {
+	return strings.Contains(message, "not_initialized") ||
+		strings.Contains(message, "not initialized") ||
+		strings.Contains(message, "table is not initialized")
 }
 
 func packageRawEventFallbackRow(event genericEvent, now time.Time) map[string]any {
@@ -8535,7 +8578,7 @@ func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConf
 	if err == nil {
 		return nil
 	}
-	if len(rows) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && retryableClickHouseFallbackError(err) {
+	if len(rows) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && splittableClickHouseFallbackError(err) {
 		mid := len(rows) / 2
 		fmt.Printf("[clickhouse] direct row split table=%s rows=%d reason=%s\n", table, len(rows), publicClickHouseError(err))
 		if splitErr := insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[:mid]); splitErr != nil {
@@ -9008,6 +9051,8 @@ func publicClickHouseError(err error) string {
 		strings.Contains(msg, "timeout"),
 		strings.Contains(msg, "deadline exceeded"):
 		return "clickhouse-timeout"
+	case clickHouseTableNotInitializedErrorText(msg):
+		return "clickhouse-not-initialized"
 	case strings.Contains(msg, "401"),
 		strings.Contains(msg, "authentication"),
 		strings.Contains(msg, "unauthorized"):

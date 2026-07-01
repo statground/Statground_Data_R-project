@@ -176,6 +176,13 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
           CH_DATABASE: Data_R_Community_Service
+          CH_TIMEOUT: ${{ vars.R_YOUTUBE_CH_TIMEOUT || '120' }}
+          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.R_YOUTUBE_CLICKHOUSE_CHUNK_SIZE || '10' }}
+          RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.R_YOUTUBE_CLICKHOUSE_ATTEMPTS || '6' }}
+          RPROJECT_CLICKHOUSE_BACKOFF_SECONDS: ${{ vars.R_YOUTUBE_CLICKHOUSE_BACKOFF_SECONDS || '10' }}
+          RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT: ${{ vars.R_YOUTUBE_CLICKHOUSE_SPLIT_ON_TIMEOUT || 'true' }}
+          R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_YOUTUBE_DB_SEEDS_REQUIRED: ${{ vars.R_YOUTUBE_DB_SEEDS_REQUIRED || 'false' }}
           R_YOUTUBE_JOB: ${{ steps.opts.outputs.r_youtube_job }}
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '200' }}
           R_YOUTUBE_PAGE_LIMIT: ${{ vars.R_YOUTUBE_PAGE_LIMIT || '20' }}

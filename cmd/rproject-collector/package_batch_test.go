@@ -227,6 +227,19 @@ func TestRetryableClickHouseFallbackError(t *testing.T) {
 	if !retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 500: timeout exceeded")) {
 		t.Fatal("expected ClickHouse HTTP 5xx timeout to be retryable")
 	}
+	notInitialized := errors.New("ClickHouse HTTP 500: Code: 667. DB::Exception: Table is not initialized yet. (NOT_INITIALIZED)")
+	if !retryableClickHouseFallbackError(notInitialized) {
+		t.Fatal("table-not-initialized errors should be retried")
+	}
+	if splittableClickHouseFallbackError(notInitialized) {
+		t.Fatal("table-not-initialized errors should not be split into smaller chunks")
+	}
+	if got := publicClickHouseError(notInitialized); got != "clickhouse-not-initialized" {
+		t.Fatalf("publicClickHouseError = %q, want clickhouse-not-initialized", got)
+	}
+	if got := publishFailureReason(errors.New("ClickHouse direct publish failed target=youtube: clickhouse-not-initialized")); got != "clickhouse-not-initialized" {
+		t.Fatalf("publishFailureReason = %q, want clickhouse-not-initialized", got)
+	}
 	if retryableClickHouseFallbackError(errors.New("ClickHouse HTTP 403: not enough privileges")) {
 		t.Fatal("permission errors should not be retried")
 	}
@@ -256,6 +269,22 @@ func TestShouldDeferPackagePublishFailureOnlyForTransientErrors(t *testing.T) {
 	auth := errors.New("kafka publish failed: SASL authentication failed: invalid credentials")
 	if shouldDeferPackagePublishFailure(auth) {
 		t.Fatal("auth errors must remain fatal")
+	}
+}
+
+func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
+	transient := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-not-initialized")
+	if !shouldDeferYouTubePublishFailure(transient) {
+		t.Fatal("YouTube transient ClickHouse initialization failures should be deferred by default")
+	}
+	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	if shouldDeferYouTubePublishFailure(transient) {
+		t.Fatal("YouTube transient deferral should respect the opt-out env")
+	}
+	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	auth := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-permission")
+	if shouldDeferYouTubePublishFailure(auth) {
+		t.Fatal("YouTube permission errors must remain fatal")
 	}
 }
 
