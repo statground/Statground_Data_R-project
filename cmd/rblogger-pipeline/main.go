@@ -378,10 +378,18 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 	}, doneAt))
 
 	directCounts := map[string]int{}
+	directDeferred := false
+	directFailureReason := ""
 	if usesClickHousePublishMode(cfg.PublishMode) {
 		counts, err := clickHouse.InsertRbloggerEvents(ctx, events, cfg.Kafka.WriteChunkSize)
 		if err != nil {
-			return nil, err
+			if shouldDeferRbloggerPublishFailure(err) {
+				directDeferred = true
+				directFailureReason = rbloggerPublishFailureReason(err)
+				fmt.Printf("[rblogger] publish_deferred events=%d reason=%s\n", len(events), directFailureReason)
+			} else {
+				return nil, err
+			}
 		}
 		directCounts = counts
 	}
@@ -404,6 +412,8 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		"publish_mode":       cfg.PublishMode,
 		"published_events":   len(events),
 		"direct_tables":      directCounts,
+		"direct_deferred":    directDeferred,
+		"direct_failure":     directFailureReason,
 		"list_errors":        listErrors,
 		"crawl_errors":       crawlErrors,
 		"translation_errors": translationErrors,
@@ -1010,9 +1020,9 @@ func (r *ClickHouseReader) InsertRbloggerEvents(ctx context.Context, events []Ka
 	for _, table := range tables {
 		rows := rowsByTable[table]
 		if err := r.insertRows(ctx, table, rows, batchSize); err != nil {
-			return counts, err
+			return counts, fmt.Errorf("ClickHouse R-bloggers direct publish failed target=%s: %s", rbloggerDirectTableLabel(table), publicClickHouseStatementError(err))
 		}
-		counts[table] += len(rows)
+		counts[rbloggerDirectTableLabel(table)] += len(rows)
 	}
 	return counts, nil
 }
@@ -1020,21 +1030,91 @@ func (r *ClickHouseReader) InsertRbloggerEvents(ctx context.Context, events []Ka
 func (r *ClickHouseReader) insertRows(ctx context.Context, table string, rows []map[string]any, batchSize int) error {
 	batchSize = maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", batchSize))
 	for _, batch := range chunkPayloads(rows, batchSize) {
-		var body strings.Builder
-		body.WriteString(fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = 0, insert_deduplicate = 1 FORMAT JSONEachRow\n", table))
-		for _, row := range batch {
-			line, err := json.Marshal(row)
-			if err != nil {
-				return err
-			}
-			body.Write(line)
-			body.WriteByte('\n')
-		}
-		if err := r.post(ctx, body.String()); err != nil {
+		if err := r.insertRowChunkWithSplit(ctx, table, batch); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *ClickHouseReader) insertRowChunkWithSplit(ctx context.Context, table string, rows []map[string]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	body, err := rbloggerInsertRowsStatement(table, rows)
+	if err != nil {
+		return err
+	}
+	err = r.execClickHouseInsertChunk(ctx, table, body, len(rows))
+	if err == nil {
+		return nil
+	}
+	if len(rows) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && splittableClickHouseStatementError(err) {
+		mid := len(rows) / 2
+		label := rbloggerDirectTableLabel(table)
+		fmt.Printf("[clickhouse] rblogger direct insert split target=%s rows=%d reason=%s\n", label, len(rows), publicClickHouseStatementError(err))
+		if splitErr := r.insertRowChunkWithSplit(ctx, table, rows[:mid]); splitErr != nil {
+			return splitErr
+		}
+		return r.insertRowChunkWithSplit(ctx, table, rows[mid:])
+	}
+	return err
+}
+
+func rbloggerInsertRowsStatement(table string, rows []map[string]any) (string, error) {
+	var body strings.Builder
+	insertDistributedSync := 0
+	if envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", false) {
+		insertDistributedSync = 1
+	}
+	body.WriteString(fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = %d, insert_deduplicate = 1 FORMAT JSONEachRow\n", table, insertDistributedSync))
+	for _, row := range rows {
+		line, err := json.Marshal(row)
+		if err != nil {
+			return "", err
+		}
+		body.Write(line)
+		body.WriteByte('\n')
+	}
+	return body.String(), nil
+}
+
+func (r *ClickHouseReader) execClickHouseInsertChunk(ctx context.Context, table, body string, rowCount int) error {
+	attempts := maxInt(1, envInt("RPROJECT_CLICKHOUSE_ATTEMPTS", 3))
+	backoff := envFloatDuration("RPROJECT_CLICKHOUSE_BACKOFF_SECONDS", 2.0)
+	label := rbloggerDirectTableLabel(table)
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err := r.exec(ctx, body)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("[clickhouse] rblogger direct insert retry succeeded target=%s attempt=%d rows=%d\n", label, attempt, rowCount)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt == attempts || !retryableClickHouseStatementError(err) {
+			return err
+		}
+		fmt.Printf("[clickhouse] rblogger direct insert retry target=%s attempt=%d/%d rows=%d reason=%s\n", label, attempt+1, attempts, rowCount, publicClickHouseStatementError(err))
+		if sleepErr := sleepContext(ctx, backoff); sleepErr != nil {
+			return fmt.Errorf("clickhouse direct retry wait stopped: %w; last_error=%s", sleepErr, publicClickHouseStatementError(lastErr))
+		}
+	}
+	return lastErr
+}
+
+func rbloggerDirectTableLabel(table string) string {
+	switch table {
+	case "Data_R_Community_Log.r_blogger_log":
+		return "log"
+	case "Data_R_Community_Raw.r_blogger_article_raw":
+		return "raw"
+	case "Data_R_Community_Service.r_blogger_board":
+		return "board"
+	default:
+		return "unknown"
+	}
 }
 
 func decodeEventPayload(event KafkaEvent) (map[string]any, error) {
@@ -1201,6 +1281,129 @@ func (r *ClickHouseReader) post(ctx context.Context, body string) error {
 		return fmt.Errorf("clickhouse statement failed HTTP %d: %s", resp.StatusCode, string(payload[:minInt(len(payload), 1000)]))
 	}
 	return nil
+}
+
+func retryableClickHouseStatementError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "temporary failure in name resolution") ||
+		clickHouseTableNotInitializedErrorText(msg) ||
+		strings.Contains(msg, "http 5") ||
+		strings.Contains(msg, "clickhouse-server-error")
+}
+
+func splittableClickHouseStatementError(err error) bool {
+	if err == nil || !retryableClickHouseStatementError(err) {
+		return false
+	}
+	return !clickHouseTableNotInitializedErrorText(strings.ToLower(err.Error())) &&
+		!strings.Contains(strings.ToLower(err.Error()), "clickhouse-not-initialized")
+}
+
+func shouldDeferRbloggerPublishFailure(err error) bool {
+	if !envBool("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+		return false
+	}
+	return isTransientClickHousePublishFailure(err)
+}
+
+func isTransientClickHousePublishFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "clickhouse-auth") ||
+		strings.Contains(msg, "clickhouse-permission") ||
+		strings.Contains(msg, "clickhouse-request-error") ||
+		strings.Contains(msg, "not enough privileges") ||
+		strings.Contains(msg, "unauthorized") {
+		return false
+	}
+	return retryableClickHouseStatementError(err) ||
+		strings.Contains(msg, "clickhouse-timeout") ||
+		strings.Contains(msg, "clickhouse-network") ||
+		strings.Contains(msg, "clickhouse-not-initialized") ||
+		strings.Contains(msg, "clickhouse-server-error")
+}
+
+func rbloggerPublishFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	return publicClickHouseStatementError(err)
+}
+
+func publicClickHouseStatementError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, context.DeadlineExceeded),
+		strings.Contains(msg, "clickhouse-timeout"),
+		strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "deadline exceeded"):
+		return "clickhouse-timeout"
+	case strings.Contains(msg, "clickhouse-not-initialized"),
+		clickHouseTableNotInitializedErrorText(msg):
+		return "clickhouse-not-initialized"
+	case strings.Contains(msg, "clickhouse-auth"),
+		strings.Contains(msg, "http 401"),
+		strings.Contains(msg, "authentication"),
+		strings.Contains(msg, "unauthorized"):
+		return "clickhouse-auth"
+	case strings.Contains(msg, "clickhouse-permission"),
+		strings.Contains(msg, "http 403"),
+		strings.Contains(msg, "not enough privileges"),
+		strings.Contains(msg, "readonly"):
+		return "clickhouse-permission"
+	case strings.Contains(msg, "clickhouse-network"),
+		strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "network is unreachable"),
+		strings.Contains(msg, "temporary failure in name resolution"):
+		return "clickhouse-network"
+	case strings.Contains(msg, "clickhouse-server-error"),
+		strings.Contains(msg, "http 5"):
+		return "clickhouse-server-error"
+	case strings.Contains(msg, "clickhouse-request-error"),
+		strings.Contains(msg, "http 4"):
+		return "clickhouse-request-error"
+	default:
+		return "clickhouse-error"
+	}
+}
+
+func clickHouseTableNotInitializedErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "not_initialized") ||
+		strings.Contains(message, "not initialized") ||
+		strings.Contains(message, "table is not initialized")
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (r *ClickHouseReader) endpoint() (string, error) {
