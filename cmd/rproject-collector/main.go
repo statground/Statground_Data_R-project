@@ -7981,6 +7981,9 @@ func publishFailureReason(err error) string {
 	if chReason == "" {
 		return kReason
 	}
+	if kReason == "" {
+		return chReason
+	}
 	return kReason + "+" + chReason
 }
 
@@ -8339,11 +8342,15 @@ func isTransientClickHousePublishFailure(err error) bool {
 func clickHouseContractErrorText(message string) bool {
 	message = strings.ToLower(message)
 	return strings.Contains(message, "unknown_identifier") ||
+		strings.Contains(message, "unknown identifier") ||
 		strings.Contains(message, "unknown_table") ||
+		strings.Contains(message, "unknown table") ||
 		strings.Contains(message, "unknown_database") ||
+		strings.Contains(message, "unknown database") ||
 		strings.Contains(message, "no such column") ||
 		strings.Contains(message, "missing columns") ||
 		strings.Contains(message, "type_mismatch") ||
+		strings.Contains(message, "type mismatch") ||
 		strings.Contains(message, "cannot parse") ||
 		strings.Contains(message, "cannot convert") ||
 		strings.Contains(message, "syntax_error") ||
