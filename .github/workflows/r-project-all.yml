@@ -93,6 +93,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Validate Go collector packages
+        run: go test ./cmd/rproject-collector ./cmd/rblogger-pipeline
+
       - name: Install Python collector dependencies
         run: |
           python -m pip install --upgrade pip

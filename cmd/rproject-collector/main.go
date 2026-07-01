@@ -8314,6 +8314,28 @@ func splittableClickHouseFallbackError(err error) bool {
 	return !clickHouseTableNotInitializedErrorText(msg) && !clickHouseReplicaStateErrorText(msg)
 }
 
+func isTransientClickHousePublishFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "clickhouse-auth") ||
+		strings.Contains(msg, "clickhouse-permission") ||
+		strings.Contains(msg, "clickhouse-request-error") ||
+		clickHouseContractErrorText(msg) {
+		return false
+	}
+	return retryableClickHouseFallbackError(err) ||
+		strings.Contains(msg, "clickhouse-timeout") ||
+		strings.Contains(msg, "clickhouse-not-initialized") ||
+		strings.Contains(msg, "clickhouse-replica-unavailable") ||
+		strings.Contains(msg, "clickhouse-server-error") ||
+		strings.Contains(msg, "clickhouse http 408") ||
+		strings.Contains(msg, "clickhouse http 429") ||
+		strings.Contains(msg, "too_many_simultaneous") ||
+		strings.Contains(msg, "too many simultaneous")
+}
+
 func clickHouseContractErrorText(message string) bool {
 	message = strings.ToLower(message)
 	return strings.Contains(message, "unknown_identifier") ||

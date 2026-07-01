@@ -325,6 +325,12 @@ func TestWebRDirectOutboxHelpers(t *testing.T) {
 	if !shouldEnqueueWebRDirectOutbox(transient) {
 		t.Fatal("Mastodon/Web-R transient insert failures should be queued to outbox")
 	}
+	if !shouldEnqueueWebRDirectOutbox(errors.New("ClickHouse HTTP 429: Code: 202. DB::Exception: Too many simultaneous queries")) {
+		t.Fatal("ClickHouse 429 busy errors should be queued to outbox")
+	}
+	if !shouldEnqueueWebRDirectOutbox(errors.New("ClickHouse HTTP 408: Code: 159. DB::Exception: Timeout exceeded")) {
+		t.Fatal("ClickHouse 408 timeout errors should be queued to outbox")
+	}
 	if !shouldDeferWebRDirectOutboxFailure(errors.New("Post http://clickhouse:8123/: unexpected EOF")) {
 		t.Fatal("transient outbox enqueue failure should be fail-open by default")
 	}
