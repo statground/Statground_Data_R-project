@@ -35,6 +35,17 @@ func TestRbloggerClickHouseNotInitializedClassification(t *testing.T) {
 		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-replica-unavailable", got)
 	}
 
+	transportErr := errors.New(`Post "http://clickhouse.example/": net/http: HTTP/1.x transport connection broken: unexpected EOF`)
+	if !retryableClickHouseStatementError(transportErr) {
+		t.Fatal("ClickHouse transport EOF should be retried")
+	}
+	if !shouldEnqueueRbloggerDirectOutbox(transportErr) {
+		t.Fatal("ClickHouse transport EOF should be preserved in the direct outbox")
+	}
+	if got := publicClickHouseStatementError(transportErr); got != "clickhouse-network" {
+		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-network", got)
+	}
+
 	schemaErr := errors.New("clickhouse statement failed HTTP 500: Code: 47. DB::Exception: Missing columns: 'uuid' while processing query. (UNKNOWN_IDENTIFIER)")
 	if retryableClickHouseStatementError(schemaErr) {
 		t.Fatal("schema/identifier errors must not be retried as transient")

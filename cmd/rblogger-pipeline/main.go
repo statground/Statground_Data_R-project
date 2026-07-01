@@ -1449,10 +1449,20 @@ func retryableClickHouseStatementError(err error) bool {
 		return false
 	}
 	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "deadline exceeded") ||
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "transport connection broken") ||
+		strings.Contains(msg, "connection closed") ||
+		strings.Contains(msg, "closed connection") ||
+		strings.Contains(msg, "server closed") ||
+		strings.Contains(msg, "stream closed") ||
+		strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "no route to host") ||
 		strings.Contains(msg, "network is unreachable") ||
 		strings.Contains(msg, "temporary failure in name resolution") ||
@@ -1540,6 +1550,15 @@ func publicClickHouseStatementError(err error) string {
 	case strings.Contains(msg, "clickhouse-network"),
 		strings.Contains(msg, "connection refused"),
 		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "unexpected eof"),
+		strings.Contains(msg, "eof"),
+		strings.Contains(msg, "broken pipe"),
+		strings.Contains(msg, "transport connection broken"),
+		strings.Contains(msg, "connection closed"),
+		strings.Contains(msg, "closed connection"),
+		strings.Contains(msg, "server closed"),
+		strings.Contains(msg, "stream closed"),
+		strings.Contains(msg, "use of closed network connection"),
 		strings.Contains(msg, "no such host"),
 		strings.Contains(msg, "no route to host"),
 		strings.Contains(msg, "network is unreachable"),
