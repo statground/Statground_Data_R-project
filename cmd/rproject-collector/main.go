@@ -507,6 +507,10 @@ func runCommunity(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := pub.publishGeneric(ctx, events); err != nil {
+		if shouldDeferCommunityPublishFailure(err) {
+			fmt.Printf("[community] publish_deferred events=%d reason=%s\n", len(events), publishFailureReason(err))
+			return nil
+		}
 		return err
 	}
 	if len(translationErrors) > 0 {
@@ -7918,6 +7922,13 @@ func shouldDeferPackagePublishFailure(err error) bool {
 
 func shouldDeferYouTubePublishFailure(err error) bool {
 	if !envBool("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+		return false
+	}
+	return isTransientPublishFailure(err)
+}
+
+func shouldDeferCommunityPublishFailure(err error) bool {
+	if !envBool("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
 		return false
 	}
 	return isTransientPublishFailure(err)

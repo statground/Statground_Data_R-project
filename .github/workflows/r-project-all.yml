@@ -316,6 +316,7 @@ jobs:
             --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS"
 
       - name: Publish R Community events to ClickHouse
+        id: publish_community
         env:
           R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
           R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || 'community:stackoverflow:r,community:posit:latest-r-filtered,reddit:r/rstats,reddit:r/rprogramming' }}
@@ -325,16 +326,23 @@ jobs:
           R_COMMUNITY_TRANSLATION_MODEL: ${{ vars.R_COMMUNITY_TRANSLATION_MODEL || vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR: ${{ vars.R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR || 'true' }}
           R_COMMUNITY_SKIP_EXISTING_CANONICAL: ${{ vars.R_COMMUNITY_SKIP_EXISTING_CANONICAL || 'true' }}
+          R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_DATABASE: Data_R_Community_Service
+          CH_TIMEOUT: ${{ vars.R_COMMUNITY_CH_TIMEOUT || '120' }}
+          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.R_COMMUNITY_CLICKHOUSE_CHUNK_SIZE || '10' }}
+          RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.R_COMMUNITY_CLICKHOUSE_ATTEMPTS || '6' }}
+          RPROJECT_CLICKHOUSE_BACKOFF_SECONDS: ${{ vars.R_COMMUNITY_CLICKHOUSE_BACKOFF_SECONDS || '10' }}
+          RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT: ${{ vars.R_COMMUNITY_CLICKHOUSE_SPLIT_ON_TIMEOUT || 'true' }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GH_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
         run: |
+          set -o pipefail
           go run ./cmd/rproject-collector community \
             --jsonl data/collected/r/latest.jsonl \
             --report data/collected/r/latest_report.json \
@@ -343,9 +351,16 @@ jobs:
             --translation-limit "$R_COMMUNITY_TRANSLATION_LIMIT" \
             --translation-model "$R_COMMUNITY_TRANSLATION_MODEL" \
             --skip-existing-canonical="$R_COMMUNITY_SKIP_EXISTING_CANONICAL" \
-            --fail-on-translation-error="$R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR"
+            --fail-on-translation-error="$R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR" \
+            | tee /tmp/r_community_publish.out
+          if grep -q '^\[community\] publish_deferred' /tmp/r_community_publish.out; then
+            echo "deferred=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Wait for R Community ClickHouse ingestion
+        if: steps.publish_community.outputs.deferred != 'true'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}

@@ -306,6 +306,22 @@ func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
 	}
 }
 
+func TestShouldDeferCommunityPublishFailureOnlyForTransientErrors(t *testing.T) {
+	transient := errors.New("ClickHouse direct publish failed target=community: clickhouse-not-initialized")
+	if !shouldDeferCommunityPublishFailure(transient) {
+		t.Fatal("R Community transient ClickHouse initialization failures should be deferred by default")
+	}
+	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	if shouldDeferCommunityPublishFailure(transient) {
+		t.Fatal("R Community transient deferral should respect the opt-out env")
+	}
+	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	auth := errors.New("ClickHouse direct publish failed target=community: clickhouse-permission")
+	if shouldDeferCommunityPublishFailure(auth) {
+		t.Fatal("R Community permission errors must remain fatal")
+	}
+}
+
 func TestWebRDirectOutboxHelpers(t *testing.T) {
 	t.Setenv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN", "")
 	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
