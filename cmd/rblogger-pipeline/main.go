@@ -1301,7 +1301,7 @@ func rbloggerEventDirectRow(event KafkaEvent, payload map[string]any) (string, m
 func rbloggerLogRow(event KafkaEvent, payload map[string]any) map[string]any {
 	return map[string]any{
 		"uuid":          firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
-		"created_at":    nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
+		"created_at":    firstNullableClickHouseTimeString(stringValue(payload["created_at"]), event.CreatedAt),
 		"created_log":   nullableJSON(payload["created_log"]),
 		"language_code": firstNonEmpty(stringValue(payload["language_code"]), "en"),
 	}
@@ -1312,9 +1312,9 @@ func rbloggerRawRow(event KafkaEvent, payload map[string]any) map[string]any {
 	articleLog := mapValue(createdLog["article"])
 	return map[string]any{
 		"uuid":                  firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
-		"created_at":            nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
+		"created_at":            firstNullableClickHouseTimeString(stringValue(payload["created_at"]), event.CreatedAt),
 		"created_log":           nullableJSON(payload["created_log"]),
-		"updated_at":            nullableString(stringValue(payload["updated_at"])),
+		"updated_at":            nullableClickHouseTimeString(stringValue(payload["updated_at"])),
 		"updated_log":           nullableJSON(payload["updated_log"]),
 		"active":                nullableUInt8(payload["active"]),
 		"github_path":           nullableString(stringValue(payload["github_path"])),
@@ -1337,8 +1337,8 @@ func rbloggerRawRow(event KafkaEvent, payload map[string]any) map[string]any {
 		"article_section":       firstNonEmpty(stringValue(payload["article_section"]), stringValue(articleLog["article_section"])),
 		"article_tags_json":     jsonString(firstNonEmptyValue(payload["article_tags"], articleLog["article_tags"]), "[]"),
 		"article_author":        firstNonEmpty(stringValue(payload["article_author"]), stringValue(articleLog["article_author"])),
-		"article_published_at":  nullableString(firstNonEmpty(stringValue(payload["article_published"]), stringValue(articleLog["article_published"]))),
-		"article_modified_at":   nullableString(firstNonEmpty(stringValue(payload["article_modified"]), stringValue(articleLog["article_modified"]))),
+		"article_published_at":  nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_published"]), stringValue(articleLog["article_published"]))),
+		"article_modified_at":   nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_modified"]), stringValue(articleLog["article_modified"]))),
 		"word_count":            uint32Value(firstNonEmptyValue(payload["word_count"], articleLog["word_count"])),
 		"reading_time_min":      float32Value(firstNonEmptyValue(payload["reading_time_min"], articleLog["reading_time_min"])),
 		"internal_links_json":   jsonString(firstNonEmptyValue(payload["internal_links"], articleLog["internal_links"]), "[]"),
@@ -1360,8 +1360,8 @@ func rbloggerBoardRow(event KafkaEvent, payload map[string]any) map[string]any {
 		"title":         nullableString(title),
 		"content":       nullableString(content),
 		"active":        nullableUInt8(payload["active"]),
-		"created_at":    nullableString(firstNonEmpty(stringValue(payload["created_at"]), event.CreatedAt)),
-		"updated_at":    nullableString(stringValue(payload["updated_at"])),
+		"created_at":    firstNullableClickHouseTimeString(stringValue(payload["created_at"]), event.CreatedAt),
+		"updated_at":    nullableClickHouseTimeString(stringValue(payload["updated_at"])),
 		"created_log":   nullableJSON(payload["created_log"]),
 		"updated_log":   nullableJSON(payload["updated_log"]),
 		"language_code": firstNonEmpty(stringValue(payload["language_code"]), "ko"),
@@ -1552,6 +1552,9 @@ func publicClickHouseStatementError(err error) string {
 		strings.Contains(msg, "http 429"),
 		clickHouseBusyOrRateLimitedErrorText(msg):
 		return "clickhouse-rate-limited"
+	case strings.Contains(msg, "clickhouse-parse-error"),
+		clickHouseValueParseErrorText(msg):
+		return "clickhouse-parse-error"
 	case strings.Contains(msg, "clickhouse-request-error"),
 		clickHouseContractErrorText(msg):
 		return "clickhouse-request-error"
@@ -1595,6 +1598,15 @@ func clickHouseBusyOrRateLimitedErrorText(message string) bool {
 		strings.Contains(message, "rate_limited") ||
 		strings.Contains(message, "rate limited") ||
 		strings.Contains(message, "rate limit")
+}
+
+func clickHouseValueParseErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "cannot parse input") ||
+		strings.Contains(message, "cannot parse") ||
+		strings.Contains(message, "cannot convert") ||
+		strings.Contains(message, "cannot_read_all_data") ||
+		strings.Contains(message, "cannot_parse_input_assertion_failed")
 }
 
 func clickHouseContractErrorText(message string) bool {
@@ -2580,36 +2592,86 @@ func nowKST() time.Time {
 }
 
 func formatClickHouseTime(t time.Time) string {
-	loc, err := time.LoadLocation("Asia/Seoul")
-	if err == nil {
-		t = t.In(loc)
-	}
+	t = t.In(clickHouseLocation())
 	return t.Format("2006-01-02 15:04:05.000")
 }
 
 func parseClickHouseTime(value string, fallback time.Time) time.Time {
-	value = normalizeClickHouseTimeString(value)
-	if value == "" {
-		return fallback
-	}
-	loc, err := time.LoadLocation("Asia/Seoul")
-	if err != nil {
-		loc = time.FixedZone("KST", 9*3600)
-	}
-	for _, layout := range []string{
-		"2006-01-02 15:04:05.000",
-		"2006-01-02 15:04:05",
-		time.RFC3339Nano,
-		time.RFC3339,
-	} {
-		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
-			return t
-		}
-		if t, err := time.Parse(layout, value); err == nil {
-			return t.In(loc)
-		}
+	if t, ok := parseBestEffortClickHouseTime(value); ok {
+		return t
 	}
 	return fallback
+}
+
+func nullableClickHouseTimeString(value string) any {
+	if normalized := clickHouseTimeString(value); normalized != "" {
+		return normalized
+	}
+	return nil
+}
+
+func firstNullableClickHouseTimeString(values ...string) any {
+	for _, value := range values {
+		if normalized := clickHouseTimeString(value); normalized != "" {
+			return normalized
+		}
+	}
+	return nil
+}
+
+func clickHouseTimeString(value string) string {
+	if t, ok := parseBestEffortClickHouseTime(value); ok {
+		return formatClickHouseTime(t)
+	}
+	return ""
+}
+
+func parseBestEffortClickHouseTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	loc := clickHouseLocation()
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		time.RFC1123Z,
+		time.RFC1123,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.000",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05.000",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.ParseInLocation(layout, value, loc); err == nil {
+			return t, true
+		}
+		if t, err := time.Parse(layout, value); err == nil {
+			return t.In(loc), true
+		}
+	}
+	normalized := normalizeClickHouseTimeString(value)
+	if normalized != value {
+		for _, layout := range []string{
+			"2006-01-02 15:04:05.000",
+			"2006-01-02 15:04:05",
+		} {
+			if t, err := time.ParseInLocation(layout, normalized, loc); err == nil {
+				return t, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func clickHouseLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Seoul")
+	if err != nil {
+		return time.FixedZone("KST", 9*3600)
+	}
+	return loc
 }
 
 func normalizeClickHouseTimeString(value string) string {

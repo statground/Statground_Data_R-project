@@ -71,6 +71,14 @@ func TestRbloggerClickHouseNotInitializedClassification(t *testing.T) {
 		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-timeout", got)
 	}
 
+	parseErr := errors.New(`Code: 27. DB::Exception: Cannot parse input: expected '"' before: '+00:00'`)
+	if retryableClickHouseStatementError(parseErr) || shouldEnqueueRbloggerDirectOutbox(parseErr) {
+		t.Fatal("ClickHouse parse errors must remain fatal")
+	}
+	if got := publicClickHouseStatementError(parseErr); got != "clickhouse-parse-error" {
+		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-parse-error", got)
+	}
+
 	schemaErr := errors.New("clickhouse statement failed HTTP 500: Code: 47. DB::Exception: Missing columns: 'uuid' while processing query. (UNKNOWN_IDENTIFIER)")
 	if retryableClickHouseStatementError(schemaErr) {
 		t.Fatal("schema/identifier errors must not be retried as transient")
@@ -105,6 +113,34 @@ func TestRbloggerPublishFailureDefersOnlyTransientErrors(t *testing.T) {
 	permission := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-permission")
 	if shouldDeferRbloggerPublishFailure(permission) {
 		t.Fatal("permission errors must remain fatal")
+	}
+}
+
+func TestRbloggerRawRowNormalizesArticleDatesForDirectInsert(t *testing.T) {
+	event := KafkaEvent{
+		EventUUID: "11111111-1111-4111-8111-111111111111",
+		URL:       "https://www.r-bloggers.com/2026/07/example/",
+		CreatedAt: "2026-07-02T00:00:00.123456Z",
+	}
+	payload := map[string]any{
+		"created_log": map[string]any{
+			"article": map[string]any{
+				"article_published": "2026-07-02T00:00:00+00:00",
+				"article_modified":  "not a timestamp",
+			},
+		},
+		"url":      event.URL,
+		"url_hash": "hash-1",
+	}
+	row := rbloggerRawRow(event, payload)
+	if got := row["created_at"]; got != "2026-07-02 09:00:00.123" {
+		t.Fatalf("created_at = %v, want normalized KST time", got)
+	}
+	if got := row["article_published_at"]; got != "2026-07-02 09:00:00.000" {
+		t.Fatalf("article_published_at = %v, want normalized KST time", got)
+	}
+	if got := row["article_modified_at"]; got != nil {
+		t.Fatalf("invalid article_modified_at should become nil, got %v", got)
 	}
 }
 
