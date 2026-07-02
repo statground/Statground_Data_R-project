@@ -257,6 +257,29 @@ func TestRetryableClickHouseFallbackError(t *testing.T) {
 	if !retryableClickHouseFallbackError(transportClosed) || publicClickHouseError(transportClosed) != "clickhouse-network" {
 		t.Fatal("HTTP transport close/EOF should be retryable network failure")
 	}
+	if splittableClickHouseFallbackError(transportClosed) {
+		t.Fatal("HTTP transport close/EOF should be queued or deferred without chunk splitting")
+	}
+	rateLimited := errors.New("ClickHouse HTTP 429: Code: 202. DB::Exception: Too many simultaneous queries")
+	if !retryableClickHouseFallbackError(rateLimited) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be retryable")
+	}
+	if splittableClickHouseFallbackError(rateLimited) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be queued or deferred without chunk splitting")
+	}
+	if !isTransientClickHousePublishFailure(rateLimited) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be treated as transient")
+	}
+	if got := publicClickHouseError(rateLimited); got != "clickhouse-rate-limited" {
+		t.Fatalf("publicClickHouseError = %q, want clickhouse-rate-limited", got)
+	}
+	http408 := errors.New("ClickHouse HTTP 408")
+	if !retryableClickHouseFallbackError(http408) {
+		t.Fatal("ClickHouse HTTP 408 should be retryable")
+	}
+	if got := publicClickHouseError(http408); got != "clickhouse-timeout" {
+		t.Fatalf("publicClickHouseError = %q, want clickhouse-timeout", got)
+	}
 	contract := errors.New("ClickHouse HTTP 500: DB::Exception: Unknown identifier status_id")
 	if retryableClickHouseFallbackError(contract) || isTransientClickHousePublishFailure(contract) {
 		t.Fatal("schema/contract errors must remain fatal")

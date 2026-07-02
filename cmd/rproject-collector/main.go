@@ -8301,20 +8301,11 @@ func retryableClickHouseFallbackError(err error) bool {
 		errors.Is(err, io.EOF) ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "deadline exceeded") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "unexpected eof") ||
-		strings.Contains(msg, "eof") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "transport connection broken") ||
-		strings.Contains(msg, "connection closed") ||
-		strings.Contains(msg, "closed connection") ||
-		strings.Contains(msg, "server closed") ||
-		strings.Contains(msg, "stream closed") ||
-		strings.Contains(msg, "use of closed network connection") ||
-		strings.Contains(msg, "no route to host") ||
-		strings.Contains(msg, "network is unreachable") ||
-		strings.Contains(msg, "temporary failure in name resolution") ||
+		strings.Contains(msg, "clickhouse http 408") ||
+		strings.Contains(msg, "clickhouse http 429") ||
+		strings.Contains(msg, "clickhouse-rate-limited") ||
+		clickHouseBusyOrRateLimitedErrorText(msg) ||
+		clickHouseNetworkErrorText(msg) ||
 		clickHouseReplicaStateErrorText(msg) ||
 		clickHouseTableNotInitializedErrorText(msg) ||
 		strings.Contains(msg, "clickhouse http 5")
@@ -8325,7 +8316,16 @@ func splittableClickHouseFallbackError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return !clickHouseTableNotInitializedErrorText(msg) && !clickHouseReplicaStateErrorText(msg)
+	return !clickHouseTableNotInitializedErrorText(msg) &&
+		!clickHouseReplicaStateErrorText(msg) &&
+		!clickHouseBusyOrRateLimitedErrorText(msg) &&
+		!clickHouseNetworkErrorText(msg) &&
+		!strings.Contains(msg, "clickhouse-rate-limited") &&
+		!strings.Contains(msg, "clickhouse http 429") &&
+		(strings.Contains(msg, "clickhouse-timeout") ||
+			strings.Contains(msg, "timeout") ||
+			strings.Contains(msg, "deadline exceeded") ||
+			strings.Contains(msg, "clickhouse http 408"))
 }
 
 func isTransientClickHousePublishFailure(err error) bool {
@@ -8344,10 +8344,10 @@ func isTransientClickHousePublishFailure(err error) bool {
 		strings.Contains(msg, "clickhouse-not-initialized") ||
 		strings.Contains(msg, "clickhouse-replica-unavailable") ||
 		strings.Contains(msg, "clickhouse-server-error") ||
+		strings.Contains(msg, "clickhouse-rate-limited") ||
 		strings.Contains(msg, "clickhouse http 408") ||
 		strings.Contains(msg, "clickhouse http 429") ||
-		strings.Contains(msg, "too_many_simultaneous") ||
-		strings.Contains(msg, "too many simultaneous")
+		clickHouseBusyOrRateLimitedErrorText(msg)
 }
 
 func clickHouseContractErrorText(message string) bool {
@@ -8385,6 +8385,35 @@ func clickHouseTableNotInitializedErrorText(message string) bool {
 	return strings.Contains(message, "not_initialized") ||
 		strings.Contains(message, "not initialized") ||
 		strings.Contains(message, "table is not initialized")
+}
+
+func clickHouseNetworkErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "eof") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "transport connection broken") ||
+		strings.Contains(message, "connection closed") ||
+		strings.Contains(message, "closed connection") ||
+		strings.Contains(message, "server closed") ||
+		strings.Contains(message, "stream closed") ||
+		strings.Contains(message, "use of closed network connection") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "no route to host") ||
+		strings.Contains(message, "network is unreachable") ||
+		strings.Contains(message, "temporary failure in name resolution")
+}
+
+func clickHouseBusyOrRateLimitedErrorText(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "too_many_simultaneous") ||
+		strings.Contains(message, "too many simultaneous") ||
+		strings.Contains(message, "too many concurrent") ||
+		strings.Contains(message, "rate_limited") ||
+		strings.Contains(message, "rate limited") ||
+		strings.Contains(message, "rate limit")
 }
 
 func packageRawEventFallbackRow(event genericEvent, now time.Time) map[string]any {
@@ -9330,7 +9359,8 @@ func publicClickHouseError(err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded),
 		strings.Contains(msg, "timeout"),
-		strings.Contains(msg, "deadline exceeded"):
+		strings.Contains(msg, "deadline exceeded"),
+		strings.Contains(msg, "clickhouse http 408"):
 		return "clickhouse-timeout"
 	case clickHouseTableNotInitializedErrorText(msg):
 		return "clickhouse-not-initialized"
@@ -9344,24 +9374,14 @@ func publicClickHouseError(err error) string {
 	case strings.Contains(msg, "403"),
 		strings.Contains(msg, "not enough privileges"):
 		return "clickhouse-permission"
+	case strings.Contains(msg, "clickhouse-rate-limited"),
+		strings.Contains(msg, "clickhouse http 429"),
+		clickHouseBusyOrRateLimitedErrorText(msg):
+		return "clickhouse-rate-limited"
 	case strings.Contains(msg, "clickhouse-request-error"),
 		clickHouseContractErrorText(msg):
 		return "clickhouse-request-error"
-	case strings.Contains(msg, "connection refused"),
-		strings.Contains(msg, "connection reset"),
-		strings.Contains(msg, "unexpected eof"),
-		strings.Contains(msg, "eof"),
-		strings.Contains(msg, "broken pipe"),
-		strings.Contains(msg, "transport connection broken"),
-		strings.Contains(msg, "connection closed"),
-		strings.Contains(msg, "closed connection"),
-		strings.Contains(msg, "server closed"),
-		strings.Contains(msg, "stream closed"),
-		strings.Contains(msg, "use of closed network connection"),
-		strings.Contains(msg, "no such host"),
-		strings.Contains(msg, "no route to host"),
-		strings.Contains(msg, "network is unreachable"),
-		strings.Contains(msg, "temporary failure in name resolution"):
+	case clickHouseNetworkErrorText(msg):
 		return "clickhouse-network"
 	case strings.Contains(msg, "clickhouse http 5"):
 		return "clickhouse-server-error"

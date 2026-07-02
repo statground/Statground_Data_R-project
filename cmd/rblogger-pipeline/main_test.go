@@ -39,11 +39,36 @@ func TestRbloggerClickHouseNotInitializedClassification(t *testing.T) {
 	if !retryableClickHouseStatementError(transportErr) {
 		t.Fatal("ClickHouse transport EOF should be retried")
 	}
+	if splittableClickHouseStatementError(transportErr) {
+		t.Fatal("ClickHouse transport EOF should be queued without chunk splitting")
+	}
 	if !shouldEnqueueRbloggerDirectOutbox(transportErr) {
 		t.Fatal("ClickHouse transport EOF should be preserved in the direct outbox")
 	}
 	if got := publicClickHouseStatementError(transportErr); got != "clickhouse-network" {
 		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-network", got)
+	}
+
+	rateLimitedErr := errors.New("clickhouse statement failed HTTP 429: Code: 202. DB::Exception: Too many simultaneous queries")
+	if !retryableClickHouseStatementError(rateLimitedErr) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be retried")
+	}
+	if splittableClickHouseStatementError(rateLimitedErr) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be queued without chunk splitting")
+	}
+	if !shouldEnqueueRbloggerDirectOutbox(rateLimitedErr) {
+		t.Fatal("ClickHouse HTTP 429/server busy should be preserved in the direct outbox")
+	}
+	if got := publicClickHouseStatementError(rateLimitedErr); got != "clickhouse-rate-limited" {
+		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-rate-limited", got)
+	}
+
+	http408Err := errors.New("clickhouse statement failed HTTP 408")
+	if !retryableClickHouseStatementError(http408Err) {
+		t.Fatal("ClickHouse HTTP 408 should be retried")
+	}
+	if got := publicClickHouseStatementError(http408Err); got != "clickhouse-timeout" {
+		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-timeout", got)
 	}
 
 	schemaErr := errors.New("clickhouse statement failed HTTP 500: Code: 47. DB::Exception: Missing columns: 'uuid' while processing query. (UNKNOWN_IDENTIFIER)")
@@ -55,6 +80,11 @@ func TestRbloggerClickHouseNotInitializedClassification(t *testing.T) {
 	}
 	if got := publicClickHouseStatementError(schemaErr); got != "clickhouse-request-error" {
 		t.Fatalf("publicClickHouseStatementError = %q, want clickhouse-request-error", got)
+	}
+
+	spacedIdentifierErr := errors.New("clickhouse statement failed HTTP 500: Code: 47. DB::Exception: Unknown identifier status_id")
+	if retryableClickHouseStatementError(spacedIdentifierErr) || shouldEnqueueRbloggerDirectOutbox(spacedIdentifierErr) {
+		t.Fatal("spaced schema/identifier errors must remain fatal")
 	}
 }
 
@@ -68,6 +98,10 @@ func TestRbloggerPublishFailureDefersOnlyTransientErrors(t *testing.T) {
 		t.Fatal("R-bloggers transient deferral should respect opt-out env")
 	}
 	t.Setenv("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	rateLimited := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-rate-limited")
+	if !shouldDeferRbloggerPublishFailure(rateLimited) {
+		t.Fatal("R-bloggers rate-limited ClickHouse failures should be deferred by default")
+	}
 	permission := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-permission")
 	if shouldDeferRbloggerPublishFailure(permission) {
 		t.Fatal("permission errors must remain fatal")
