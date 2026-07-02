@@ -32,6 +32,41 @@ MANIFEST_SCHEMA = "web-r.r-ecosystem.manifest.plain.v1"
 KEY_PURPOSE = "web-r:r-ecosystem-content:v1"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
+TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
+    "TIMEOUT_EXCEEDED",
+    "NOT_INITIALIZED",
+    "TOO_MANY_SIMULTANEOUS_QUERIES",
+    "KEEPER_EXCEPTION",
+    "TABLE_IS_READ_ONLY",
+    "CLICKHOUSE_NETWORK",
+    "CODE_159",
+    "CODE_202",
+    "CODE_667",
+}
+FATAL_CLICKHOUSE_EXPORT_CATEGORIES = {
+    "ACCESS_DENIED",
+    "UNKNOWN_TABLE",
+    "UNKNOWN_IDENTIFIER",
+    "SYNTAX_ERROR",
+    "NO_SUCH_COLUMN",
+    "TYPE_MISMATCH",
+    "CANNOT_PARSE",
+    "BAD_ARGUMENTS",
+}
+
+
+class ClickHouseExportError(RuntimeError):
+    def __init__(self, query_name: str, status_code: int, category: str, detail: str = "") -> None:
+        self.query_name = safe_query_name(query_name)
+        self.status_code = int(status_code or 0)
+        self.category = clickhouse_error_category(category or detail)
+        self.detail = detail
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        if self.status_code:
+            return f"ClickHouse export query failed ({self.query_name}): HTTP {self.status_code} {self.category}"
+        return f"ClickHouse export query failed ({self.query_name}): {self.category}"
 
 
 def main() -> int:
@@ -49,8 +84,18 @@ def main() -> int:
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
-    community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
-    article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
+    try:
+        community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
+        article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
+    except ClickHouseExportError as exc:
+        if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            print(
+                f"[warn] R ecosystem CDN export deferred query={exc.query_name} reason={exc.category}",
+                file=sys.stderr,
+            )
+            print(json.dumps(deferred_export_result(exc), ensure_ascii=False))
+            return 0
+        raise SystemExit(str(exc)) from exc
 
     payloads: dict[str, dict[str, Any]] = {}
     manifest_items: dict[str, dict[str, str]] = {}
@@ -146,7 +191,7 @@ def main() -> int:
     }
 
     if args.dry_run:
-        print(json.dumps({"community": len(community_rows), "article": len(article_rows), "export": len(payloads), "duplicates": duplicate_count}, ensure_ascii=False))
+        print(json.dumps(export_result(len(community_rows), len(article_rows), len(payloads), duplicate_count), ensure_ascii=False))
         return 0
 
     for uuid, payload in payloads.items():
@@ -159,8 +204,31 @@ def main() -> int:
     encrypted_manifest = encrypt_document(manifest, key, manifest_path, language, "")
     write_json_atomic(cdn_root / manifest_path, encrypted_manifest)
 
-    print(json.dumps({"community": len(community_rows), "article": len(article_rows), "export": len(payloads), "duplicates": duplicate_count}, ensure_ascii=False))
+    print(json.dumps(export_result(len(community_rows), len(article_rows), len(payloads), duplicate_count), ensure_ascii=False))
     return 0
+
+
+def export_result(community_count: int, article_count: int, export_count: int, duplicate_count: int) -> dict[str, Any]:
+    return {
+        "community": community_count,
+        "article": article_count,
+        "export": export_count,
+        "duplicates": duplicate_count,
+        "export_deferred": False,
+    }
+
+
+def deferred_export_result(exc: ClickHouseExportError) -> dict[str, Any]:
+    result = export_result(0, 0, 0, 0)
+    result.update(
+        {
+            "export_deferred": True,
+            "deferred_query": exc.query_name,
+            "deferred_reason": exc.category,
+            "deferred_http_status": exc.status_code,
+        }
+    )
+    return result
 
 
 def register_payload(payloads: dict[str, dict[str, Any]], manifest_items: dict[str, dict[str, str]], uuid: str, kind: str, language: str, published_at: str, payload: dict[str, Any], meta: dict[str, str]) -> None:
@@ -278,21 +346,25 @@ def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") ->
     url = build_clickhouse_url(
         env,
         default_format="JSONEachRow",
-        max_execution_time=env.get("R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME", "60"),
+        max_execution_time=env.get("R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME", "120"),
         max_threads=env.get("R_ECOSYSTEM_CDN_CH_MAX_THREADS", "2"),
     )
     request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=int(env.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", "75"))) as response:
+        with urllib.request.urlopen(request, timeout=int(env.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", "150"))) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read(800).decode("utf-8", errors="replace")
         category = clickhouse_error_category(detail)
-        raise SystemExit(f"ClickHouse export query failed ({safe_query_name(query_name)}): HTTP {exc.code} {category}") from exc
+        raise ClickHouseExportError(query_name, exc.code, category, detail) from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse export query failed ({safe_query_name(query_name)}): {exc.__class__.__name__}") from exc
+        raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except TimeoutError as exc:
+        raise ClickHouseExportError(query_name, 0, "TIMEOUT_EXCEEDED", str(exc)) from exc
+    except OSError as exc:
+        raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
     rows: list[dict[str, Any]] = []
     for line in body.splitlines():
         line = line.strip()
@@ -307,15 +379,25 @@ def safe_query_name(value: str) -> str:
 
 
 def clickhouse_error_category(detail: str) -> str:
-    upper = text(detail).upper()
+    upper = text(detail).strip().upper()
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", upper) or re.fullmatch(r"CODE_\d+", upper):
+        return upper
     for marker in (
         "TIMEOUT_EXCEEDED",
+        "NOT_INITIALIZED",
         "MEMORY_LIMIT_EXCEEDED",
         "TOO_MANY_SIMULTANEOUS_QUERIES",
+        "KEEPER_EXCEPTION",
+        "TABLE_IS_READ_ONLY",
         "ACCESS_DENIED",
         "UNKNOWN_TABLE",
         "UNKNOWN_IDENTIFIER",
         "SYNTAX_ERROR",
+        "NO_SUCH_COLUMN",
+        "TYPE_MISMATCH",
+        "CANNOT_PARSE",
+        "BAD_ARGUMENTS",
+        "CLICKHOUSE_NETWORK",
     ):
         if marker in upper:
             return marker
@@ -327,6 +409,27 @@ def clickhouse_error_category(detail: str) -> str:
     if match:
         return f"CODE_{match.group(1)}"
     return "CLICKHOUSE_ERROR"
+
+
+def is_transient_clickhouse_export_failure(status_code: int, category: str, detail: str = "") -> bool:
+    category = clickhouse_error_category(category or detail)
+    detail_upper = text(detail).upper()
+    if category in FATAL_CLICKHOUSE_EXPORT_CATEGORIES:
+        return False
+    if any(marker in detail_upper for marker in FATAL_CLICKHOUSE_EXPORT_CATEGORIES):
+        return False
+    if category in TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES:
+        return True
+    if "TIMEOUT" in detail_upper or "NOT INITIALIZED" in detail_upper or "SERVER IS OVERLOADED" in detail_upper:
+        return True
+    return int(status_code or 0) in {408, 429, 500, 502, 503, 504}
+
+
+def env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
+    value = text(env.get(key, "")).strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "y", "on"}
 
 
 def community_sql(limit: int) -> str:

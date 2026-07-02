@@ -17,7 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from clickhouse_http import build_clickhouse_url
-from export_r_ecosystem_cdn import fetch_json_rows, load_env, text
+from export_r_ecosystem_cdn import ClickHouseExportError, fetch_json_rows, load_env, text
 from export_r_package_cdn import (
     looks_korean,
     package_news_display_fields,
@@ -39,7 +39,10 @@ def main() -> int:
 
     repo_root = Path.cwd()
     env = load_env(repo_root / args.env)
-    rows = fetch_json_rows(env, source_sql(args.limit))
+    try:
+        rows = fetch_json_rows(env, source_sql(args.limit))
+    except ClickHouseExportError as exc:
+        raise SystemExit(str(exc)) from exc
     repaired = [row for row in (repair_row(row) for row in rows) if row]
 
     if args.dry_run:

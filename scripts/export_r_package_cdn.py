@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from export_r_ecosystem_cdn import (
     CONTENT_SCHEMA,
+    ClickHouseExportError,
     derive_key,
     encrypt_document,
     fetch_json_rows,
@@ -121,10 +122,13 @@ def main() -> int:
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
-    package_rows = fetch_json_rows(env, package_sql(args.package_limit), query_name="r_package_packages")
-    news_rows = fetch_json_rows(env, package_news_sql(args.news_limit), query_name="r_package_news")
-    version_rows = fetch_json_rows(env, package_version_sql(), query_name="r_package_versions")
-    detail_groups = fetch_package_detail_groups(env)
+    try:
+        package_rows = fetch_json_rows(env, package_sql(args.package_limit), query_name="r_package_packages")
+        news_rows = fetch_json_rows(env, package_news_sql(args.news_limit), query_name="r_package_news")
+        version_rows = fetch_json_rows(env, package_version_sql(), query_name="r_package_versions")
+        detail_groups = fetch_package_detail_groups(env)
+    except ClickHouseExportError as exc:
+        raise SystemExit(str(exc)) from exc
 
     packages: dict[str, dict[str, Any]] = {}
     detail_paths_by_package: dict[str, str] = {}

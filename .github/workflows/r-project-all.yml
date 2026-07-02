@@ -536,6 +536,10 @@ jobs:
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
           R_PACKAGE_REQUIRED_NEWS_SOURCES: ${{ vars.R_PACKAGE_REQUIRED_NEWS_SOURCES || 'official:r-mail:r-packages' }}
           R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES: ${{ vars.R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES || 'CRAN,Bioconductor,R-universe' }}
+          R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME || '120' }}
+          R_ECOSYSTEM_CDN_HTTP_TIMEOUT: ${{ vars.R_ECOSYSTEM_CDN_HTTP_TIMEOUT || '150' }}
+          R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
+          R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
         run: |
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
@@ -718,13 +722,17 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
         run: |
-          python scripts/record_web_r_cdn_release.py \
-            --report web_r_cdn2_contents_export_report.json \
-            --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
-            --repo statground/web-r_CDN2_contents \
-            --branch main \
-            --scope web-r-content \
-            --language ko
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 content export was deferred; keeping the existing content release pointer."
+          else
+            python scripts/record_web_r_cdn_release.py \
+              --report web_r_cdn2_contents_export_report.json \
+              --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
+              --repo statground/web-r_CDN2_contents \
+              --branch main \
+              --scope web-r-content \
+              --language ko
+          fi
           python scripts/record_web_r_cdn_release.py \
             --report web_r_cdn2_packages_export_report.json \
             --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
@@ -748,12 +756,16 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
         run: |
-          python scripts/verify_web_r_cdn_release.py \
-            --scope web-r-content \
-            --language ko \
-            --repo statground/web-r_CDN2_contents \
-            --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
-            --manifest contents/ko/index.json
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 content export was deferred; skipping content release pointer verification."
+          else
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-content \
+              --language ko \
+              --repo statground/web-r_CDN2_contents \
+              --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
+              --manifest contents/ko/index.json
+          fi
           python scripts/verify_web_r_cdn_release.py \
             --scope web-r-packages \
             --language ko \
