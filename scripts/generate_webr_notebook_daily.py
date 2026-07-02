@@ -412,13 +412,20 @@ def main() -> int:
     runner_result = run_webr_runner(repo_root / args.runner, spec)
     row = build_clickhouse_row(spec, runner_result)
 
+    insert_state = {
+        "inserted": not args.dry_run,
+        "insert_deferred": False,
+        "insert_failure": "",
+    }
     if not args.dry_run:
-        insert_json_each_row(env, "webr_webr.notebook", row)
+        insert_state = insert_json_each_row(env, "webr_webr.notebook", row)
 
     topic_source_context = spec.get("topic", {}).get("source_context") or {}
     result = {
         "schema": "web-r.notebook.daily-result.v1",
-        "inserted": not args.dry_run,
+        "inserted": bool(insert_state.get("inserted")),
+        "insert_deferred": bool(insert_state.get("insert_deferred")),
+        "insert_failure": insert_state.get("insert_failure", ""),
         "dry_run": args.dry_run,
         "skipped": False,
         "notebook_uuid": row["uuid"],
@@ -1750,11 +1757,12 @@ def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, An
     return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
-def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -> None:
+def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -> dict[str, Any]:
     sql = f"INSERT INTO {table} SETTINGS insert_deduplicate = 1 FORMAT JSONEachRow\n" + json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
-    attempts = max(1, env_int(env, "WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS", 1))
-    backoff = max(0.0, env_float(env, "WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS", 2.0))
+    attempts = max(1, env_int(env, "WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS", 6))
+    backoff = max(0.0, env_float(env, "WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS", 10.0))
     last_message = ""
+    last_retryable = False
     for attempt in range(1, attempts + 1):
         request = urllib.request.Request(clickhouse_url(env), data=sql.encode("utf-8"), method="POST")
         request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
@@ -1764,7 +1772,7 @@ def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -
                 response.read()
             if attempt > 1:
                 print(f"ClickHouse insert retry succeeded attempt={attempt}")
-            return
+            return {"inserted": True, "insert_deferred": False, "insert_failure": ""}
         except urllib.error.HTTPError as exc:
             detail = exc.read(300).decode("utf-8", errors="replace")
             sanitized = redact_detail(env, detail)
@@ -1773,11 +1781,17 @@ def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -
         except urllib.error.URLError as exc:
             last_message = exc.__class__.__name__
             retryable = True
+        last_retryable = retryable
         if attempt >= attempts or not retryable:
+            reason = short_clickhouse_reason(last_message)
+            if last_retryable and env_bool(env, "WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN", True):
+                print(f"[notebook] insert_deferred reason={reason}", file=sys.stderr)
+                return {"inserted": False, "insert_deferred": True, "insert_failure": reason}
             raise SystemExit(f"ClickHouse insert failed: {last_message}")
         print(f"ClickHouse insert retry attempt={attempt + 1}/{attempts} reason={short_clickhouse_reason(last_message)}")
         if backoff:
             time.sleep(backoff)
+    return {"inserted": False, "insert_deferred": True, "insert_failure": short_clickhouse_reason(last_message)}
 
 
 def clickhouse_url(env: dict[str, str]) -> str:
@@ -1819,11 +1833,36 @@ def env_float(env: dict[str, str], key: str, default: float) -> float:
 
 def is_retryable_clickhouse_insert_error(status_code: int, detail: str) -> bool:
     upper = detail.upper()
-    return status_code in {408, 429, 500, 502, 503, 504} or "TIMEOUT" in upper or "TOO_MANY_SIMULTANEOUS" in upper
+    if status_code in {401, 403}:
+        return False
+    if is_clickhouse_insert_contract_error(detail):
+        return False
+    return (
+        status_code in {408, 429, 500, 502, 503, 504}
+        or "TIMEOUT" in upper
+        or "TOO_MANY_SIMULTANEOUS" in upper
+        or "NOT_INITIALIZED" in upper
+        or "NOT INITIALIZED" in upper
+        or "TABLE_IS_READ_ONLY" in upper
+        or "KEEPER_EXCEPTION" in upper
+        or "CONNECTION LOSS" in upper
+    )
 
 
 def short_clickhouse_reason(message: str) -> str:
     upper = message.upper()
+    if "NOT_INITIALIZED" in upper or "NOT INITIALIZED" in upper:
+        return "clickhouse-not-initialized"
+    if "TABLE_IS_READ_ONLY" in upper or "KEEPER_EXCEPTION" in upper or "CONNECTION LOSS" in upper:
+        return "clickhouse-replica-unavailable"
+    if "CANNOT PARSE" in upper or "CANNOT_PARSE" in upper or "CANNOT CONVERT" in upper or "CANNOT_CONVERT" in upper:
+        return "clickhouse-parse-error"
+    if is_clickhouse_insert_contract_error(message):
+        return "clickhouse-request-error"
+    if message.startswith("HTTP 401"):
+        return "clickhouse-auth"
+    if message.startswith("HTTP 403"):
+        return "clickhouse-permission"
     if "TIMEOUT" in upper or "TIMED OUT" in upper:
         return "timeout"
     if "TOO_MANY_SIMULTANEOUS" in upper:
@@ -1833,6 +1872,32 @@ def short_clickhouse_reason(message: str) -> str:
     if message.startswith("HTTP 5"):
         return "server-error"
     return "temporary-error"
+
+
+def is_clickhouse_insert_contract_error(detail: str) -> bool:
+    upper = detail.upper()
+    return any(
+        token in upper
+        for token in (
+            "UNKNOWN_IDENTIFIER",
+            "UNKNOWN IDENTIFIER",
+            "UNKNOWN_TABLE",
+            "UNKNOWN TABLE",
+            "UNKNOWN_DATABASE",
+            "UNKNOWN DATABASE",
+            "NO SUCH COLUMN",
+            "MISSING COLUMNS",
+            "TYPE_MISMATCH",
+            "TYPE MISMATCH",
+            "SYNTAX_ERROR",
+            "SYNTAX ERROR",
+            "CANNOT PARSE",
+            "CANNOT_PARSE",
+            "CANNOT CONVERT",
+            "CANNOT_CONVERT",
+            "CANNOT_READ_ALL_DATA",
+        )
+    )
 
 
 def first_env(env: dict[str, str], *keys: str) -> str:
