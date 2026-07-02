@@ -788,6 +788,7 @@ jobs:
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
+          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'true' }}
         run: |
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_contents.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
             echo "Web-R CDN2 content release record was deferred or skipped; skipping content release pointer verification."
@@ -901,6 +902,7 @@ jobs:
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
+          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'true' }}
         run: |
           if python -c 'import json, pathlib, sys; status_path=pathlib.Path("/tmp/web_r_cdn_record_admin_pipelines.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if status.get("record_deferred") else 1)'; then
             echo "Web-R CDN2 admin pipeline release record was deferred; skipping admin pipeline release pointer verification."

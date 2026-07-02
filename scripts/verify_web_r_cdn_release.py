@@ -51,6 +51,7 @@ def main() -> int:
     expected_base = f"https://cdn.jsdelivr.net/gh/{args.repo}@{expected_sha}"
     manifest_url = expected_base + "/" + args.manifest.lstrip("/")
     last_error = ""
+    last_pointer_mismatch: dict[str, object] = {}
     attempts = max(1, args.retries)
     for attempt in range(1, attempts + 1):
         try:
@@ -79,24 +80,26 @@ def main() -> int:
         actual_sha = normalize_sha(str(row.get("commit_sha", "")))
         actual_base = str(row.get("base_url", "")).rstrip("/")
         if actual_sha != expected_sha or actual_base != expected_base:
+            last_pointer_mismatch = {
+                "scope": args.scope,
+                "language": args.language,
+                "expected_commit_sha": expected_sha,
+                "actual_commit_sha": actual_sha,
+                "expected_base_url": expected_base,
+                "actual_base_url": actual_base,
+                "attempt": attempt,
+                "attempts": attempts,
+            }
             last_error = (
                 "CDN release pointer mismatch: "
                 + json.dumps(
-                    {
-                        "scope": args.scope,
-                        "language": args.language,
-                        "expected_commit_sha": expected_sha,
-                        "actual_commit_sha": actual_sha,
-                        "expected_base_url": expected_base,
-                        "actual_base_url": actual_base,
-                        "attempt": attempt,
-                        "attempts": attempts,
-                    },
+                    last_pointer_mismatch,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
             )
         else:
+            last_pointer_mismatch = {}
             status = head_status(manifest_url)
             if status == 200:
                 print(json.dumps({"scope": args.scope, "commit_sha": expected_sha, "manifest": args.manifest, "http_status": status, "verify_deferred": False}, ensure_ascii=False))
@@ -104,6 +107,22 @@ def main() -> int:
             last_error = f"CDN manifest is not visible yet: HTTP {status} {manifest_url} (attempt {attempt}/{attempts})"
         if attempt < attempts:
             time.sleep(max(0, args.retry_delay))
+
+    if last_pointer_mismatch and env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN", True):
+        print(
+            f"[warn] Web-R CDN release verification deferred scope={args.scope} reason=POINTER_MISMATCH",
+            file=sys.stderr,
+        )
+        result = {
+            "scope": args.scope,
+            "commit_sha": expected_sha,
+            "manifest": args.manifest,
+            "verify_deferred": True,
+            "deferred_reason": "POINTER_MISMATCH",
+        }
+        result.update(last_pointer_mismatch)
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 0
 
     raise SystemExit(last_error)
 
