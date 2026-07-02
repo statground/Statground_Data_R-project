@@ -7,11 +7,30 @@ import argparse
 import base64
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
 
 from clickhouse_http import build_clickhouse_url
+from export_r_ecosystem_cdn import (
+    clickhouse_error_category,
+    env_bool,
+    is_transient_clickhouse_export_failure,
+)
+
+
+class ClickHouseReleaseVerifyError(RuntimeError):
+    def __init__(self, status_code: int, category: str, detail: str = "") -> None:
+        self.status_code = int(status_code or 0)
+        self.category = clickhouse_error_category(category or detail)
+        self.detail = detail
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        if self.status_code:
+            return f"ClickHouse release pointer verification failed: HTTP {self.status_code} {self.category}"
+        return f"ClickHouse release pointer verification failed: {self.category}"
 
 
 def main() -> int:
@@ -34,7 +53,29 @@ def main() -> int:
     last_error = ""
     attempts = max(1, args.retries)
     for attempt in range(1, attempts + 1):
-        row = latest_release_row(args.scope, args.language)
+        try:
+            row = latest_release_row(args.scope, args.language)
+        except ClickHouseReleaseVerifyError as exc:
+            if env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+                print(
+                    f"[warn] Web-R CDN release verification deferred scope={args.scope} reason={exc.category}",
+                    file=sys.stderr,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "scope": args.scope,
+                            "commit_sha": expected_sha,
+                            "manifest": args.manifest,
+                            "verify_deferred": True,
+                            "deferred_reason": exc.category,
+                            "deferred_http_status": exc.status_code,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return 0
+            raise SystemExit(str(exc)) from exc
         actual_sha = normalize_sha(str(row.get("commit_sha", "")))
         actual_base = str(row.get("base_url", "")).rstrip("/")
         if actual_sha != expected_sha or actual_base != expected_base:
@@ -58,7 +99,7 @@ def main() -> int:
         else:
             status = head_status(manifest_url)
             if status == 200:
-                print(json.dumps({"scope": args.scope, "commit_sha": expected_sha, "manifest": args.manifest, "http_status": status}, ensure_ascii=False))
+                print(json.dumps({"scope": args.scope, "commit_sha": expected_sha, "manifest": args.manifest, "http_status": status, "verify_deferred": False}, ensure_ascii=False))
                 return 0
             last_error = f"CDN manifest is not visible yet: HTTP {status} {manifest_url} (attempt {attempt}/{attempts})"
         if attempt < attempts:
@@ -91,17 +132,28 @@ def clickhouse_json_each_row(sql: str, params: dict[str, str]) -> list[dict[str,
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env('CH_USER', 'CLICKHOUSE_USER')}:{first_env('CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode()).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT", "45"))) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        detail = exc.read(300).decode("utf-8", errors="replace")
-        raise SystemExit(f"ClickHouse release pointer verification failed: HTTP {exc.code}: {redact(detail)}") from exc
+        detail = exc.read(800).decode("utf-8", errors="replace")
+        raise ClickHouseReleaseVerifyError(exc.code, clickhouse_error_category(detail), detail) from exc
+    except urllib.error.URLError as exc:
+        raise ClickHouseReleaseVerifyError(0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except TimeoutError as exc:
+        raise ClickHouseReleaseVerifyError(0, "TIMEOUT_EXCEEDED", str(exc)) from exc
+    except OSError as exc:
+        raise ClickHouseReleaseVerifyError(0, "CLICKHOUSE_NETWORK", str(exc)) from exc
     return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
 def clickhouse_url() -> str:
     try:
-        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time="30")
+        return build_clickhouse_url(
+            os.environ,
+            default_format="JSONEachRow",
+            max_execution_time=os.environ.get("WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME", "45"),
+            max_threads=os.environ.get("WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS", "1"),
+        )
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
 

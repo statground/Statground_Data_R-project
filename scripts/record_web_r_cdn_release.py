@@ -17,12 +17,30 @@ from pathlib import Path
 from typing import Any
 
 from clickhouse_http import build_clickhouse_url
+from export_r_ecosystem_cdn import (
+    clickhouse_error_category,
+    env_bool,
+    is_transient_clickhouse_export_failure,
+)
 
 
 DEFAULT_REPO = "statground/web-r_CDN2_contents"
 DEFAULT_BRANCH = "main"
 DEFAULT_SCOPE = "web-r-content"
 DEFAULT_LANGUAGE = "ko"
+
+
+class ClickHouseReleaseRecordError(RuntimeError):
+    def __init__(self, status_code: int, category: str, detail: str = "") -> None:
+        self.status_code = int(status_code or 0)
+        self.category = clickhouse_error_category(category or detail)
+        self.detail = detail
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        if self.status_code:
+            return f"ClickHouse release record insert failed: HTTP {self.status_code} {self.category}"
+        return f"ClickHouse release record insert failed: {self.category}"
 
 
 def main() -> int:
@@ -63,8 +81,30 @@ def main() -> int:
         "version": version,
     }
 
-    insert_json_each_row("Data_R_Community_Service.web_r_cdn_release_log", payload)
-    print(json.dumps({"release_id": release_id, "commit_sha": commit_sha, "item_count": item_count}, ensure_ascii=False))
+    try:
+        insert_json_each_row("Data_R_Community_Service.web_r_cdn_release_log", payload)
+    except ClickHouseReleaseRecordError as exc:
+        if env_bool(os.environ, "WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            print(
+                f"[warn] Web-R CDN release record deferred scope={args.scope} reason={exc.category}",
+                file=sys.stderr,
+            )
+            print(
+                json.dumps(
+                    {
+                        "release_id": release_id,
+                        "commit_sha": commit_sha,
+                        "item_count": item_count,
+                        "record_deferred": True,
+                        "deferred_reason": exc.category,
+                        "deferred_http_status": exc.status_code,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps({"release_id": release_id, "commit_sha": commit_sha, "item_count": item_count, "record_deferred": False}, ensure_ascii=False))
     return 0
 
 
@@ -97,18 +137,27 @@ def insert_json_each_row(table: str, row: dict[str, Any]) -> None:
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=int(os.environ.get("WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT", "45"))) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        detail = exc.read(300).decode("utf-8", errors="replace")
-        raise SystemExit(f"ClickHouse release record insert failed: HTTP {exc.code}: {redact_detail(detail)}") from exc
+        detail = exc.read(800).decode("utf-8", errors="replace")
+        raise ClickHouseReleaseRecordError(exc.code, clickhouse_error_category(detail), detail) from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse release record insert failed: {exc.__class__.__name__}") from exc
+        raise ClickHouseReleaseRecordError(0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except TimeoutError as exc:
+        raise ClickHouseReleaseRecordError(0, "TIMEOUT_EXCEEDED", str(exc)) from exc
+    except OSError as exc:
+        raise ClickHouseReleaseRecordError(0, "CLICKHOUSE_NETWORK", str(exc)) from exc
 
 
 def clickhouse_url() -> str:
     try:
-        return build_clickhouse_url(os.environ, default_format="JSONEachRow", max_execution_time="30")
+        return build_clickhouse_url(
+            os.environ,
+            default_format="JSONEachRow",
+            max_execution_time=os.environ.get("WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME", "45"),
+            max_threads=os.environ.get("WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS", "1"),
+        )
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
 

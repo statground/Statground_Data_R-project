@@ -732,9 +732,14 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
+          WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT || '45' }}
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS || '1' }}
         run: |
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") else 1)'; then
             echo "Web-R CDN2 content export was deferred; keeping the existing content release pointer."
+            printf '%s\n' '{"record_skipped":true,"reason":"export_deferred"}' > /tmp/web_r_cdn_record_contents.json
           else
             python scripts/record_web_r_cdn_release.py \
               --report web_r_cdn2_contents_export_report.json \
@@ -742,10 +747,12 @@ jobs:
               --repo statground/web-r_CDN2_contents \
               --branch main \
               --scope web-r-content \
-              --language ko
+              --language ko > /tmp/web_r_cdn_record_contents.json
+            cat /tmp/web_r_cdn_record_contents.json
           fi
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") else 1)'; then
             echo "Web-R CDN2 package export was deferred; keeping the existing package release pointer."
+            printf '%s\n' '{"record_skipped":true,"reason":"export_deferred"}' > /tmp/web_r_cdn_record_packages.json
           else
             python scripts/record_web_r_cdn_release.py \
               --report web_r_cdn2_packages_export_report.json \
@@ -753,10 +760,12 @@ jobs:
               --repo statground/web-r_CDN2_packages \
               --branch main \
               --scope web-r-packages \
-              --language ko
+              --language ko > /tmp/web_r_cdn_record_packages.json
+            cat /tmp/web_r_cdn_record_packages.json
           fi
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("community") or {}).get("export_deferred") else 1)'; then
             echo "Web-R CDN2 community export was deferred; keeping the existing community release pointer."
+            printf '%s\n' '{"record_skipped":true,"reason":"export_deferred"}' > /tmp/web_r_cdn_record_community.json
           else
             python scripts/record_web_r_cdn_release.py \
               --report web_r_cdn2_community_export_report.json \
@@ -764,7 +773,8 @@ jobs:
               --repo statground/web-r_CDN2_community \
               --branch main \
               --scope web-r-community \
-              --language ko
+              --language ko > /tmp/web_r_cdn_record_community.json
+            cat /tmp/web_r_cdn_record_community.json
           fi
 
       - name: Verify Web-R CDN2 release pointers
@@ -774,9 +784,13 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
+          WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
         run: |
-          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") else 1)'; then
-            echo "Web-R CDN2 content export was deferred; skipping content release pointer verification."
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_contents.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
+            echo "Web-R CDN2 content release record was deferred or skipped; skipping content release pointer verification."
           else
             python scripts/verify_web_r_cdn_release.py \
               --scope web-r-content \
@@ -785,8 +799,8 @@ jobs:
               --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
               --manifest contents/ko/index.json
           fi
-          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") else 1)'; then
-            echo "Web-R CDN2 package export was deferred; skipping package release pointer verification."
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_packages.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
+            echo "Web-R CDN2 package release record was deferred or skipped; skipping package release pointer verification."
           else
             python scripts/verify_web_r_cdn_release.py \
               --scope web-r-packages \
@@ -795,8 +809,8 @@ jobs:
               --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
               --manifest packages/ko/index.json
           fi
-          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("community") or {}).get("export_deferred") else 1)'; then
-            echo "Web-R CDN2 community export was deferred; skipping community release pointer verification."
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_community.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("community") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
+            echo "Web-R CDN2 community release record was deferred or skipped; skipping community release pointer verification."
           else
             python scripts/verify_web_r_cdn_release.py \
               --scope web-r-community \
@@ -862,6 +876,10 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
+          WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT || '45' }}
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS || '1' }}
         run: |
           python scripts/record_web_r_cdn_release.py \
             --report /tmp/admin_pipeline_export.json \
@@ -869,7 +887,8 @@ jobs:
             --repo statground/web-r_CDN2 \
             --branch main \
             --scope web-r-admin-pipelines \
-            --language ko
+            --language ko > /tmp/web_r_cdn_record_admin_pipelines.json
+          cat /tmp/web_r_cdn_record_admin_pipelines.json
 
       - name: Verify Web-R CDN2 admin pipeline snapshot release
         env:
@@ -878,10 +897,18 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
+          WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
         run: |
-          python scripts/verify_web_r_cdn_release.py \
-            --scope web-r-admin-pipelines \
-            --language ko \
-            --repo statground/web-r_CDN2 \
-            --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
-            --manifest admin/pipelines/latest.json
+          if python -c 'import json, pathlib, sys; status_path=pathlib.Path("/tmp/web_r_cdn_record_admin_pipelines.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if status.get("record_deferred") else 1)'; then
+            echo "Web-R CDN2 admin pipeline release record was deferred; skipping admin pipeline release pointer verification."
+          else
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-admin-pipelines \
+              --language ko \
+              --repo statground/web-r_CDN2 \
+              --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
+              --manifest admin/pipelines/latest.json
+          fi
