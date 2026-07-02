@@ -540,6 +540,14 @@ jobs:
           R_ECOSYSTEM_CDN_HTTP_TIMEOUT: ${{ vars.R_ECOSYSTEM_CDN_HTTP_TIMEOUT || '150' }}
           R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
           R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME || '120' }}
+          R_PACKAGE_CDN_HTTP_TIMEOUT: ${{ vars.R_PACKAGE_CDN_HTTP_TIMEOUT || '150' }}
+          R_PACKAGE_CDN_CH_MAX_THREADS: ${{ vars.R_PACKAGE_CDN_CH_MAX_THREADS || '2' }}
+          R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME || '120' }}
+          WEBR_COMMUNITY_CDN_HTTP_TIMEOUT: ${{ vars.WEBR_COMMUNITY_CDN_HTTP_TIMEOUT || '150' }}
+          WEBR_COMMUNITY_CDN_CH_MAX_THREADS: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_THREADS || '2' }}
+          WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
         run: |
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
@@ -562,31 +570,34 @@ jobs:
               for repository in os.environ.get("R_PACKAGE_REQUIRED_RECENT_UPDATE_REPOSITORIES", "").split(",")
               if repository.strip()
           ]
-          package_news_sources = r_package.get("news_sources") or {}
-          missing_package_news_sources = [
-              source
-              for source in required_package_news_sources
-              if int(package_news_sources.get(source) or 0) <= 0
-          ]
-          if missing_package_news_sources:
-              raise SystemExit(
-                  "Package CDN export is missing required package news source(s): "
-                  + ", ".join(missing_package_news_sources)
-              )
-          package_recent_update_counts = {
-              str(repository).strip().lower(): int(count or 0)
-              for repository, count in (r_package.get("package_recent_update_counts") or {}).items()
-          }
-          missing_recent_update_repositories = [
-              repository
-              for repository in required_recent_update_repositories
-              if package_recent_update_counts.get(repository.lower(), 0) <= 0
-          ]
-          if missing_recent_update_repositories:
-              raise SystemExit(
-                  "Package CDN export is missing recent-update package signal(s): "
-                  + ", ".join(missing_recent_update_repositories)
-              )
+          if r_package.get("export_deferred"):
+              print("Package CDN export was deferred; skipping package source completeness guards.")
+          else:
+              package_news_sources = r_package.get("news_sources") or {}
+              missing_package_news_sources = [
+                  source
+                  for source in required_package_news_sources
+                  if int(package_news_sources.get(source) or 0) <= 0
+              ]
+              if missing_package_news_sources:
+                  raise SystemExit(
+                      "Package CDN export is missing required package news source(s): "
+                      + ", ".join(missing_package_news_sources)
+                  )
+              package_recent_update_counts = {
+                  str(repository).strip().lower(): int(count or 0)
+                  for repository, count in (r_package.get("package_recent_update_counts") or {}).items()
+              }
+              missing_recent_update_repositories = [
+                  repository
+                  for repository in required_recent_update_repositories
+                  if package_recent_update_counts.get(repository.lower(), 0) <= 0
+              ]
+              if missing_recent_update_repositories:
+                  raise SystemExit(
+                      "Package CDN export is missing recent-update package signal(s): "
+                      + ", ".join(missing_recent_update_repositories)
+                  )
           reports = {
               "contents": {
                   "schema": "web-r.content-cdn.export-report.v2",
@@ -733,20 +744,28 @@ jobs:
               --scope web-r-content \
               --language ko
           fi
-          python scripts/record_web_r_cdn_release.py \
-            --report web_r_cdn2_packages_export_report.json \
-            --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
-            --repo statground/web-r_CDN2_packages \
-            --branch main \
-            --scope web-r-packages \
-            --language ko
-          python scripts/record_web_r_cdn_release.py \
-            --report web_r_cdn2_community_export_report.json \
-            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-            --repo statground/web-r_CDN2_community \
-            --branch main \
-            --scope web-r-community \
-            --language ko
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 package export was deferred; keeping the existing package release pointer."
+          else
+            python scripts/record_web_r_cdn_release.py \
+              --report web_r_cdn2_packages_export_report.json \
+              --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
+              --repo statground/web-r_CDN2_packages \
+              --branch main \
+              --scope web-r-packages \
+              --language ko
+          fi
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("community") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 community export was deferred; keeping the existing community release pointer."
+          else
+            python scripts/record_web_r_cdn_release.py \
+              --report web_r_cdn2_community_export_report.json \
+              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+              --repo statground/web-r_CDN2_community \
+              --branch main \
+              --scope web-r-community \
+              --language ko
+          fi
 
       - name: Verify Web-R CDN2 release pointers
         env:
@@ -766,24 +785,32 @@ jobs:
               --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
               --manifest contents/ko/index.json
           fi
-          python scripts/verify_web_r_cdn_release.py \
-            --scope web-r-packages \
-            --language ko \
-            --repo statground/web-r_CDN2_packages \
-            --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
-            --manifest packages/ko/index.json
-          python scripts/verify_web_r_cdn_release.py \
-            --scope web-r-community \
-            --language ko \
-            --repo statground/web-r_CDN2_community \
-            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-            --manifest community/ko/index.json
-          python scripts/verify_web_r_cdn_release.py \
-            --scope web-r-community \
-            --language ko \
-            --repo statground/web-r_CDN2_community \
-            --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-            --manifest community/ko/workshop/index.json
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 package export was deferred; skipping package release pointer verification."
+          else
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-packages \
+              --language ko \
+              --repo statground/web-r_CDN2_packages \
+              --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
+              --manifest packages/ko/index.json
+          fi
+          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("community") or {}).get("export_deferred") else 1)'; then
+            echo "Web-R CDN2 community export was deferred; skipping community release pointer verification."
+          else
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-community \
+              --language ko \
+              --repo statground/web-r_CDN2_community \
+              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+              --manifest community/ko/index.json
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-community \
+              --language ko \
+              --repo statground/web-r_CDN2_community \
+              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+              --manifest community/ko/workshop/index.json
+          fi
 
       - name: Checkout Web-R CDN2 admin snapshots
         uses: actions/checkout@v4

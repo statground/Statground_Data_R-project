@@ -17,8 +17,10 @@ from export_r_ecosystem_cdn import (
     ClickHouseExportError,
     derive_key,
     encrypt_document,
+    env_bool,
     fetch_json_rows,
     first_text,
+    is_transient_clickhouse_export_failure,
     load_env,
     normalize_language,
     normalize_uuid,
@@ -128,6 +130,18 @@ def main() -> int:
         version_rows = fetch_json_rows(env, package_version_sql(), query_name="r_package_versions")
         detail_groups = fetch_package_detail_groups(env)
     except ClickHouseExportError as exc:
+        fail_open = env_bool(
+            env,
+            "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+        )
+        if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            print(
+                f"[warn] R package CDN export deferred query={exc.query_name} reason={exc.category}",
+                file=sys.stderr,
+            )
+            print(json.dumps(deferred_package_export_result(exc), ensure_ascii=False))
+            return 0
         raise SystemExit(str(exc)) from exc
 
     packages: dict[str, dict[str, Any]] = {}
@@ -281,17 +295,22 @@ def main() -> int:
     )
 
     if args.dry_run:
-        print(json.dumps({
-            "packages": len(packages),
-            "package_details": len(detail_payloads),
-            "news": len(news_manifest),
-            "news_sources": news_source_counts,
-            "news_latest_by_source": news_latest_by_source,
-            "package_repository_counts": dict(sorted(package_repository_counts.items())),
-            "package_recent_update_counts": dict(sorted(package_recent_update_counts.items())),
-            "package_first_seen_counts": dict(sorted(package_first_seen_counts.items())),
-            "versions": sum(len(v) for v in versions_manifest["versions"].values()),
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                package_export_result(
+                    len(packages),
+                    len(detail_payloads),
+                    len(news_manifest),
+                    news_source_counts,
+                    news_latest_by_source,
+                    package_repository_counts,
+                    package_recent_update_counts,
+                    package_first_seen_counts,
+                    sum(len(v) for v in versions_manifest["versions"].values()),
+                ),
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     for package_key, payload in detail_payloads.items():
@@ -306,20 +325,58 @@ def main() -> int:
     write_json_atomic(cdn_root / manifest_path, encrypt_document(manifest, key, manifest_path, language, "", compress=True))
     versions_path = f"packages/{language}/versions.json"
     write_json_atomic(cdn_root / versions_path, encrypt_document(versions_manifest, key, versions_path, language, "", compress=True))
-    print(json.dumps({
-        "packages": len(packages),
-        "package_details": len(detail_payloads),
-        "news": len(news_manifest),
+    result = package_export_result(
+        len(packages),
+        len(detail_payloads),
+        len(news_manifest),
+        news_source_counts,
+        news_latest_by_source,
+        package_repository_counts,
+        package_recent_update_counts,
+        package_first_seen_counts,
+        sum(len(v) for v in versions_manifest["versions"].values()),
+    )
+    result.update({"manifest": manifest_path, "versions_manifest": versions_path})
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def package_export_result(
+    package_count: int,
+    detail_count: int,
+    news_count: int,
+    news_source_counts: dict[str, int],
+    news_latest_by_source: dict[str, str],
+    package_repository_counts: dict[str, int],
+    package_recent_update_counts: dict[str, int],
+    package_first_seen_counts: dict[str, int],
+    version_count: int,
+) -> dict[str, Any]:
+    return {
+        "packages": package_count,
+        "package_details": detail_count,
+        "news": news_count,
         "news_sources": news_source_counts,
         "news_latest_by_source": news_latest_by_source,
         "package_repository_counts": dict(sorted(package_repository_counts.items())),
         "package_recent_update_counts": dict(sorted(package_recent_update_counts.items())),
         "package_first_seen_counts": dict(sorted(package_first_seen_counts.items())),
-        "versions": sum(len(v) for v in versions_manifest["versions"].values()),
-        "manifest": manifest_path,
-        "versions_manifest": versions_path,
-    }, ensure_ascii=False))
-    return 0
+        "versions": version_count,
+        "export_deferred": False,
+    }
+
+
+def deferred_package_export_result(exc: ClickHouseExportError) -> dict[str, Any]:
+    result = package_export_result(0, 0, 0, {}, {}, {}, {}, {}, 0)
+    result.update(
+        {
+            "export_deferred": True,
+            "deferred_query": exc.query_name,
+            "deferred_reason": exc.category,
+            "deferred_http_status": exc.status_code,
+        }
+    )
+    return result
 
 
 def package_detail_path(language: str, package_name: str) -> str:
@@ -528,6 +585,11 @@ def package_export_env(env: dict[str, str]) -> dict[str, str]:
         values.get("R_PACKAGE_CDN_CH_MAX_THREADS", ""),
         values.get("R_ECOSYSTEM_CDN_CH_MAX_THREADS", ""),
         "2",
+    )
+    values["R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN"] = first_text(
+        values.get("R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN", ""),
+        values.get("R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", ""),
+        "true",
     )
     return values
 

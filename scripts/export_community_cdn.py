@@ -22,6 +22,12 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from clickhouse_http import build_clickhouse_url
+from export_r_ecosystem_cdn import (
+    ClickHouseExportError,
+    clickhouse_error_category,
+    env_bool,
+    is_transient_clickhouse_export_failure,
+)
 
 
 ENCRYPTED_SCHEMA = "web-r.community.encrypted.v1"
@@ -88,11 +94,21 @@ def main() -> int:
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
-    digest_rows = fetch_json_rows(env, digest_sql(args.limit))
-    notebook_rows = fetch_json_rows(env, notebook_sql(args.limit))
-    workshop_rows = fetch_json_rows(env, workshop_sql(args.limit))
-    workshop_event_rows = fetch_json_rows(env, workshop_event_sql(args.limit))
-    workshop_post_rows = fetch_json_rows(env, workshop_post_sql(args.limit))
+    try:
+        digest_rows = fetch_json_rows(env, digest_sql(args.limit), query_name="community_digest")
+        notebook_rows = fetch_json_rows(env, notebook_sql(args.limit), query_name="community_notebook")
+        workshop_rows = fetch_json_rows(env, workshop_sql(args.limit), query_name="community_workshop")
+        workshop_event_rows = fetch_json_rows(env, workshop_event_sql(args.limit), query_name="community_workshop_event")
+        workshop_post_rows = fetch_json_rows(env, workshop_post_sql(args.limit), query_name="community_workshop_post")
+    except ClickHouseExportError as exc:
+        if env_bool(env, "WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            print(
+                f"[warn] Web-R community CDN export deferred query={exc.query_name} reason={exc.category}",
+                file=sys.stderr,
+            )
+            print(json.dumps(deferred_community_export_result(exc), ensure_ascii=False))
+            return 0
+        raise SystemExit(str(exc)) from exc
 
     payloads: dict[str, tuple[str, dict[str, Any]]] = {}
     manifest_items: dict[str, dict[str, Any]] = {}
@@ -228,16 +244,21 @@ def main() -> int:
     current_payload_paths = {rel_path for rel_path, _payload in payloads.values()}
 
     if args.dry_run:
-        print(json.dumps({
-            "digest": len(digest_rows),
-            "notebook": len(notebook_rows),
-            "community_export": len(manifest_items),
-            "workshop": len(workshop_manifest_items),
-            "workshop_posts": sum(len(posts) for posts in workshop_posts.values()),
-            "workshop_export": len(workshop_manifest_items),
-            "export": len(payloads),
-            "duplicates": duplicate_count,
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                community_export_result(
+                    len(digest_rows),
+                    len(notebook_rows),
+                    len(manifest_items),
+                    len(workshop_manifest_items),
+                    sum(len(posts) for posts in workshop_posts.values()),
+                    len(workshop_manifest_items),
+                    len(payloads),
+                    duplicate_count,
+                ),
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     for uuid, (rel_path, payload) in payloads.items():
@@ -254,18 +275,55 @@ def main() -> int:
     if args.limit <= 0:
         pruned_payloads = prune_stale_notebook_payloads(cdn_root, language, current_payload_paths)
 
-    print(json.dumps({
-        "digest": len(digest_rows),
-        "notebook": len(notebook_rows),
-        "community_export": len(manifest_items),
-        "workshop": len(workshop_manifest_items),
-        "workshop_posts": sum(len(posts) for posts in workshop_posts.values()),
-        "workshop_export": len(workshop_manifest_items),
-        "export": len(payloads),
-        "duplicates": duplicate_count,
-        "pruned_payloads": pruned_payloads,
-    }, ensure_ascii=False))
+    result = community_export_result(
+        len(digest_rows),
+        len(notebook_rows),
+        len(manifest_items),
+        len(workshop_manifest_items),
+        sum(len(posts) for posts in workshop_posts.values()),
+        len(workshop_manifest_items),
+        len(payloads),
+        duplicate_count,
+    )
+    result["pruned_payloads"] = pruned_payloads
+    print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def community_export_result(
+    digest_count: int,
+    notebook_count: int,
+    community_export_count: int,
+    workshop_count: int,
+    workshop_post_count: int,
+    workshop_export_count: int,
+    export_count: int,
+    duplicate_count: int,
+) -> dict[str, Any]:
+    return {
+        "digest": digest_count,
+        "notebook": notebook_count,
+        "community_export": community_export_count,
+        "workshop": workshop_count,
+        "workshop_posts": workshop_post_count,
+        "workshop_export": workshop_export_count,
+        "export": export_count,
+        "duplicates": duplicate_count,
+        "export_deferred": False,
+    }
+
+
+def deferred_community_export_result(exc: ClickHouseExportError) -> dict[str, Any]:
+    result = community_export_result(0, 0, 0, 0, 0, 0, 0, 0)
+    result.update(
+        {
+            "export_deferred": True,
+            "deferred_query": exc.query_name,
+            "deferred_reason": exc.category,
+            "deferred_http_status": exc.status_code,
+        }
+    )
+    return result
 
 
 def digest_sql(limit: int) -> str:
@@ -757,7 +815,7 @@ def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language:
     return doc
 
 
-def fetch_json_rows(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
+def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "community") -> list[dict[str, Any]]:
     user = env.get("CLICKHOUSE_USER", "").strip()
     password = env.get("CLICKHOUSE_PASSWORD", "")
     if not user:
@@ -765,17 +823,25 @@ def fetch_json_rows(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
     url = build_clickhouse_url(
         env,
         default_format="JSONEachRow",
-        max_execution_time=env.get("WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME", "60"),
+        max_execution_time=env.get("WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME", "120"),
         max_threads=env.get("WEBR_COMMUNITY_CDN_CH_MAX_THREADS", "2"),
     )
     request = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
     request.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii"))
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
-        with urllib.request.urlopen(request, timeout=int(env.get("WEBR_COMMUNITY_CDN_HTTP_TIMEOUT", "75"))) as response:
+        with urllib.request.urlopen(request, timeout=int(env.get("WEBR_COMMUNITY_CDN_HTTP_TIMEOUT", "150"))) as response:
             body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(800).decode("utf-8", errors="replace")
+        category = clickhouse_error_category(detail)
+        raise ClickHouseExportError(query_name, exc.code, category, detail) from exc
     except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse export query failed: {exc.__class__.__name__}") from exc
+        raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except TimeoutError as exc:
+        raise ClickHouseExportError(query_name, 0, "TIMEOUT_EXCEEDED", str(exc)) from exc
+    except OSError as exc:
+        raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
     rows: list[dict[str, Any]] = []
     for line in body.splitlines():
         line = line.strip()
