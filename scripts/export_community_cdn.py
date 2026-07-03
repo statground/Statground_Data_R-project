@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -838,6 +839,10 @@ def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "community"
         raise ClickHouseExportError(query_name, exc.code, category, detail) from exc
     except urllib.error.URLError as exc:
         raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except http.client.IncompleteRead as exc:
+        raise ClickHouseExportError(query_name, 0, "INCOMPLETE_READ", str(exc)) from exc
+    except http.client.HTTPException as exc:
+        raise ClickHouseExportError(query_name, 0, "HTTP_CLIENT_ERROR", str(exc)) from exc
     except TimeoutError as exc:
         raise ClickHouseExportError(query_name, 0, "TIMEOUT_EXCEEDED", str(exc)) from exc
     except OSError as exc:

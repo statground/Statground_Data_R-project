@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import sys
@@ -144,6 +145,10 @@ def insert_json_each_row(table: str, row: dict[str, Any]) -> None:
         raise ClickHouseReleaseRecordError(exc.code, clickhouse_error_category(detail), detail) from exc
     except urllib.error.URLError as exc:
         raise ClickHouseReleaseRecordError(0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except http.client.IncompleteRead as exc:
+        raise ClickHouseReleaseRecordError(0, "INCOMPLETE_READ", str(exc)) from exc
+    except http.client.HTTPException as exc:
+        raise ClickHouseReleaseRecordError(0, "HTTP_CLIENT_ERROR", str(exc)) from exc
     except TimeoutError as exc:
         raise ClickHouseReleaseRecordError(0, "TIMEOUT_EXCEEDED", str(exc)) from exc
     except OSError as exc:

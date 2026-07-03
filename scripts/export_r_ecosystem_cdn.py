@@ -8,6 +8,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -39,6 +40,8 @@ TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
     "KEEPER_EXCEPTION",
     "TABLE_IS_READ_ONLY",
     "CLICKHOUSE_NETWORK",
+    "INCOMPLETE_READ",
+    "HTTP_CLIENT_ERROR",
     "CODE_159",
     "CODE_202",
     "CODE_667",
@@ -361,6 +364,10 @@ def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") ->
         raise ClickHouseExportError(query_name, exc.code, category, detail) from exc
     except urllib.error.URLError as exc:
         raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
+    except http.client.IncompleteRead as exc:
+        raise ClickHouseExportError(query_name, 0, "INCOMPLETE_READ", str(exc)) from exc
+    except http.client.HTTPException as exc:
+        raise ClickHouseExportError(query_name, 0, "HTTP_CLIENT_ERROR", str(exc)) from exc
     except TimeoutError as exc:
         raise ClickHouseExportError(query_name, 0, "TIMEOUT_EXCEEDED", str(exc)) from exc
     except OSError as exc:
@@ -398,6 +405,8 @@ def clickhouse_error_category(detail: str) -> str:
         "CANNOT_PARSE",
         "BAD_ARGUMENTS",
         "CLICKHOUSE_NETWORK",
+        "INCOMPLETE_READ",
+        "HTTP_CLIENT_ERROR",
     ):
         if marker in upper:
             return marker
