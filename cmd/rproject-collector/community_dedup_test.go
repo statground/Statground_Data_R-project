@@ -78,6 +78,19 @@ func TestCommunitySourceUnavailableError(t *testing.T) {
 	}
 }
 
+func TestRProjectDirectTableLabelsIncludeGenericEventTargets(t *testing.T) {
+	tests := map[string]string{
+		"Data_R_Package_Raw.r_package_event_raw":     "package",
+		"Data_R_Community_Raw.r_community_event_raw": "community",
+		"Data_R_Community_Raw.r_youtube_event_raw":   "youtube",
+	}
+	for table, want := range tests {
+		if got := rProjectDirectTableLabel(table); got != want {
+			t.Fatalf("rProjectDirectTableLabel(%q) = %q, want %q", table, got, want)
+		}
+	}
+}
+
 func TestReadCommunityJSONLEventsAllowsMissingPrioritySource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "latest.jsonl")
 	body := `{"source_id":"community:stackoverflow:r","external_id":"so-1","canonical_url":"https://stackoverflow.com/questions/1","published_at":"2026-05-31T00:00:00Z"}` + "\n"

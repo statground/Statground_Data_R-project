@@ -192,27 +192,28 @@ type communityDigestPlanRecord struct {
 }
 
 type publisher struct {
-	topic              string
-	brokers            []string
-	username           string
-	password           string
-	security           string
-	clientID           string
-	dryRun             bool
-	publishMode        string
-	writeTimeout       time.Duration
-	chunkSize          int
-	createTopic        bool
-	partitions         int
-	replicas           int
-	writerMaxAttempts  int
-	writeAttempts      int
-	writeBackoffMin    time.Duration
-	writeBackoffMax    time.Duration
-	partitionFallback  bool
-	fallbackPartitions []int
-	knownPartitions    []int
-	fallbackTimeout    time.Duration
+	topic               string
+	brokers             []string
+	username            string
+	password            string
+	security            string
+	clientID            string
+	dryRun              bool
+	publishMode         string
+	writeTimeout        time.Duration
+	chunkSize           int
+	createTopic         bool
+	partitions          int
+	replicas            int
+	writerMaxAttempts   int
+	writeAttempts       int
+	writeBackoffMin     time.Duration
+	writeBackoffMax     time.Duration
+	partitionFallback   bool
+	fallbackPartitions  []int
+	knownPartitions     []int
+	fallbackTimeout     time.Duration
+	directOutboxDrained bool
 }
 
 type aiClient struct {
@@ -7835,6 +7836,7 @@ func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) e
 		return nil
 	}
 	if p.usesClickHouse() {
+		p.drainDirectOutbox(ctx)
 		target, err := insertGenericRawEventsDirect(ctx, events)
 		if err != nil {
 			return fmt.Errorf("ClickHouse direct publish failed target=%s: %s", target.label, publicClickHouseError(err))
@@ -7888,6 +7890,30 @@ func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) e
 		}
 	}
 	return nil
+}
+
+func (p *publisher) drainDirectOutbox(ctx context.Context) {
+	if p.directOutboxDrained || p.dryRun || !p.usesClickHouse() {
+		return
+	}
+	p.directOutboxDrained = true
+	limit := envInt("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", 100)
+	if limit <= 0 {
+		return
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		fmt.Printf("[warn] R Project direct outbox drain skipped: %s\n", publicClickHouseError(err))
+		return
+	}
+	drained, err := drainRProjectDirectOutbox(ctx, cfg, limit)
+	if err != nil {
+		fmt.Printf("[warn] R Project direct outbox drain skipped: %s\n", publicClickHouseError(err))
+		return
+	}
+	if drained > 0 {
+		fmt.Printf("[clickhouse] drained R Project direct outbox chunks=%d\n", drained)
+	}
 }
 
 func (p *publisher) packageClickHouseFallbackEnabled(events []genericEvent) bool {
@@ -8124,7 +8150,24 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 		}
 		return insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[mid:])
 	}
+	if shouldEnqueueRProjectDirectOutbox(err) {
+		label := rProjectDirectTableLabel(target.table)
+		if outboxErr := enqueueRProjectDirectOutbox(ctx, cfg, target.table, label, b.String(), len(events), err); outboxErr == nil {
+			fmt.Printf("[clickhouse] queued R Project direct outbox target=%s rows=%d reason=%s\n", label, len(events), publicClickHouseError(err))
+			return fmt.Errorf("clickhouse direct publish deferred target=%s rows=%d reason=%s", label, len(events), publicClickHouseError(err))
+		} else {
+			fmt.Printf("[warn] R Project direct outbox enqueue failed target=%s rows=%d error=%s\n", label, len(events), publicClickHouseError(outboxErr))
+			if isTransientClickHousePublishFailure(outboxErr) {
+				return fmt.Errorf("clickhouse direct publish deferred target=%s rows=%d reason=%s outbox_error=%s", label, len(events), publicClickHouseError(err), publicClickHouseError(outboxErr))
+			}
+			return fmt.Errorf("clickhouse direct publish failed target=%s reason=%s outbox_error=%s", label, publicClickHouseError(err), publicClickHouseError(outboxErr))
+		}
+	}
 	return err
+}
+
+func shouldEnqueueRProjectDirectOutbox(err error) bool {
+	return isTransientClickHousePublishFailure(err)
 }
 
 func genericRawEventInsertPrefix(cfg clickHouseQueryConfig, table string) string {
@@ -8560,41 +8603,41 @@ func rbloggerRawDirectRow(event webREvent, payload map[string]any) map[string]an
 	createdLog := mapAny(payload["created_log"])
 	articleLog := mapAny(createdLog["article"])
 	return map[string]any{
-		"uuid":                  firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
-		"created_at":            nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
-		"created_log":           nullableDirectJSON(payload["created_log"]),
-		"updated_at":            nullableDirectString(stringAny(payload["updated_at"])),
-		"updated_log":           nullableDirectJSON(payload["updated_log"]),
-		"active":                nullableDirectUInt8(payload["active"]),
-		"github_path":           nullableDirectString(stringAny(payload["github_path"])),
-		"title":                 nullableDirectString(stringAny(payload["title"])),
-		"content":               nullableDirectString(stringAny(payload["content"])),
-		"url":                   nullableDirectString(firstNonEmpty(stringAny(payload["url"]), event.URL)),
-		"url_hash":              firstNonEmpty(stringAny(payload["url_hash"]), shaHex(firstNonEmpty(stringAny(payload["url"]), event.URL))),
-		"language_code":         firstNonEmpty(stringAny(payload["language_code"]), "en"),
-		"canonical_url":         firstNonEmpty(stringAny(payload["canonical_url"]), stringAny(articleLog["canonical_url"])),
-		"html_title":            firstNonEmpty(stringAny(payload["html_title"]), stringAny(articleLog["html_title"])),
-		"h1_title":              firstNonEmpty(stringAny(payload["h1_title"]), stringAny(articleLog["h1_title"])),
-		"meta_description":      firstNonEmpty(stringAny(payload["meta_description"]), stringAny(articleLog["meta_description"])),
-		"meta_keywords":         firstNonEmpty(stringAny(payload["meta_keywords"]), stringAny(articleLog["meta_keywords"])),
-		"og_title":              firstNonEmpty(stringAny(payload["og_title"]), stringAny(articleLog["og_title"])),
-		"og_description":        firstNonEmpty(stringAny(payload["og_description"]), stringAny(articleLog["og_description"])),
-		"og_image":              firstNonEmpty(stringAny(payload["og_image"]), stringAny(articleLog["og_image"])),
-		"twitter_title":         firstNonEmpty(stringAny(payload["twitter_title"]), stringAny(articleLog["twitter_title"])),
-		"twitter_description":   firstNonEmpty(stringAny(payload["twitter_description"]), stringAny(articleLog["twitter_description"])),
-		"article_headline":      firstNonEmpty(stringAny(payload["article_headline"]), stringAny(articleLog["article_headline"])),
-		"article_section":       firstNonEmpty(stringAny(payload["article_section"]), stringAny(articleLog["article_section"])),
-		"article_tags_json":     directJSONString(firstNonEmptyAny(payload["article_tags"], articleLog["article_tags"]), "[]"),
-		"article_author":        firstNonEmpty(stringAny(payload["article_author"]), stringAny(articleLog["article_author"])),
-		"article_published_at":  nullableDirectString(firstNonEmpty(stringAny(payload["article_published"]), stringAny(articleLog["article_published"]))),
-		"article_modified_at":   nullableDirectString(firstNonEmpty(stringAny(payload["article_modified"]), stringAny(articleLog["article_modified"]))),
-		"word_count":            directUInt32(firstNonEmptyAny(payload["word_count"], articleLog["word_count"])),
-		"reading_time_min":      directFloat32(firstNonEmptyAny(payload["reading_time_min"], articleLog["reading_time_min"])),
-		"internal_links_json":   directJSONString(firstNonEmptyAny(payload["internal_links"], articleLog["internal_links"]), "[]"),
-		"external_links_json":   directJSONString(firstNonEmptyAny(payload["external_links"], articleLog["external_links"]), "[]"),
-		"images_json":           directJSONString(firstNonEmptyAny(payload["images"], articleLog["images"]), "[]"),
-		"main_text_excerpt":     firstNonEmpty(stringAny(payload["main_text_excerpt"]), stringAny(articleLog["main_text_excerpt"])),
-		"raw_article_json":      directJSONString(articleLog, "{}"),
+		"uuid":                 firstNonEmpty(stringAny(payload["uuid"]), event.EventUUID),
+		"created_at":           nullableDirectString(firstNonEmpty(stringAny(payload["created_at"]), event.CreatedAt)),
+		"created_log":          nullableDirectJSON(payload["created_log"]),
+		"updated_at":           nullableDirectString(stringAny(payload["updated_at"])),
+		"updated_log":          nullableDirectJSON(payload["updated_log"]),
+		"active":               nullableDirectUInt8(payload["active"]),
+		"github_path":          nullableDirectString(stringAny(payload["github_path"])),
+		"title":                nullableDirectString(stringAny(payload["title"])),
+		"content":              nullableDirectString(stringAny(payload["content"])),
+		"url":                  nullableDirectString(firstNonEmpty(stringAny(payload["url"]), event.URL)),
+		"url_hash":             firstNonEmpty(stringAny(payload["url_hash"]), shaHex(firstNonEmpty(stringAny(payload["url"]), event.URL))),
+		"language_code":        firstNonEmpty(stringAny(payload["language_code"]), "en"),
+		"canonical_url":        firstNonEmpty(stringAny(payload["canonical_url"]), stringAny(articleLog["canonical_url"])),
+		"html_title":           firstNonEmpty(stringAny(payload["html_title"]), stringAny(articleLog["html_title"])),
+		"h1_title":             firstNonEmpty(stringAny(payload["h1_title"]), stringAny(articleLog["h1_title"])),
+		"meta_description":     firstNonEmpty(stringAny(payload["meta_description"]), stringAny(articleLog["meta_description"])),
+		"meta_keywords":        firstNonEmpty(stringAny(payload["meta_keywords"]), stringAny(articleLog["meta_keywords"])),
+		"og_title":             firstNonEmpty(stringAny(payload["og_title"]), stringAny(articleLog["og_title"])),
+		"og_description":       firstNonEmpty(stringAny(payload["og_description"]), stringAny(articleLog["og_description"])),
+		"og_image":             firstNonEmpty(stringAny(payload["og_image"]), stringAny(articleLog["og_image"])),
+		"twitter_title":        firstNonEmpty(stringAny(payload["twitter_title"]), stringAny(articleLog["twitter_title"])),
+		"twitter_description":  firstNonEmpty(stringAny(payload["twitter_description"]), stringAny(articleLog["twitter_description"])),
+		"article_headline":     firstNonEmpty(stringAny(payload["article_headline"]), stringAny(articleLog["article_headline"])),
+		"article_section":      firstNonEmpty(stringAny(payload["article_section"]), stringAny(articleLog["article_section"])),
+		"article_tags_json":    directJSONString(firstNonEmptyAny(payload["article_tags"], articleLog["article_tags"]), "[]"),
+		"article_author":       firstNonEmpty(stringAny(payload["article_author"]), stringAny(articleLog["article_author"])),
+		"article_published_at": nullableDirectString(firstNonEmpty(stringAny(payload["article_published"]), stringAny(articleLog["article_published"]))),
+		"article_modified_at":  nullableDirectString(firstNonEmpty(stringAny(payload["article_modified"]), stringAny(articleLog["article_modified"]))),
+		"word_count":           directUInt32(firstNonEmptyAny(payload["word_count"], articleLog["word_count"])),
+		"reading_time_min":     directFloat32(firstNonEmptyAny(payload["reading_time_min"], articleLog["reading_time_min"])),
+		"internal_links_json":  directJSONString(firstNonEmptyAny(payload["internal_links"], articleLog["internal_links"]), "[]"),
+		"external_links_json":  directJSONString(firstNonEmptyAny(payload["external_links"], articleLog["external_links"]), "[]"),
+		"images_json":          directJSONString(firstNonEmptyAny(payload["images"], articleLog["images"]), "[]"),
+		"main_text_excerpt":    firstNonEmpty(stringAny(payload["main_text_excerpt"]), stringAny(articleLog["main_text_excerpt"])),
+		"raw_article_json":     directJSONString(articleLog, "{}"),
 	}
 }
 
@@ -8777,6 +8820,10 @@ func enqueueWebRDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, tab
 	return cfg.exec(ctx, query)
 }
 
+func enqueueRProjectDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, table, label, insertBody string, rowCount int, sourceErr error) error {
+	return enqueueWebRDirectOutbox(ctx, cfg, table, label, insertBody, rowCount, sourceErr)
+}
+
 func pendingWebRDirectOutboxExists(cfg clickHouseQueryConfig, table, payloadHash string) (bool, error) {
 	query := fmt.Sprintf(`
 SELECT count() AS count
@@ -8804,7 +8851,7 @@ func drainWebRDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, limit
 SELECT toString(outbox_uuid) AS outbox_uuid, target_table, target_label, rows_json, row_count
 FROM %s
 WHERE replayed_at IS NULL
-ORDER BY created_at ASC, outbox_uuid ASC
+ORDER BY replay_attempt ASC, created_at ASC, outbox_uuid ASC
 LIMIT %d
 FORMAT JSONEachRow`, rProjectDirectOutboxTable, limit)
 	rows, err := cfg.queryJSONEachRow(query)
@@ -8812,6 +8859,8 @@ FORMAT JSONEachRow`, rProjectDirectOutboxTable, limit)
 		return 0, err
 	}
 	drained := 0
+	failures := 0
+	var firstErr error
 	for _, row := range rows {
 		outboxUUID := stringAny(row["outbox_uuid"])
 		table := stringAny(row["target_table"])
@@ -8824,7 +8873,12 @@ FORMAT JSONEachRow`, rProjectDirectOutboxTable, limit)
 		body := webRDirectInsertStatementFromRowsJSON(cfg, table, rowsJSON)
 		if err := execClickHouseDirectChunk(ctx, cfg, body, label, rowCount); err != nil {
 			_ = markWebRDirectOutboxReplay(ctx, cfg, outboxUUID, false, err)
-			return drained, err
+			failures++
+			if firstErr == nil {
+				firstErr = err
+			}
+			fmt.Printf("[warn] R Project direct outbox replay failed uuid=%s target=%s rows=%d reason=%s\n", outboxUUID, label, rowCount, publicClickHouseError(err))
+			continue
 		}
 		if err := markWebRDirectOutboxReplay(ctx, cfg, outboxUUID, true, nil); err != nil {
 			return drained, err
@@ -8832,7 +8886,14 @@ FORMAT JSONEachRow`, rProjectDirectOutboxTable, limit)
 		fmt.Printf("[clickhouse] Web-R direct outbox replayed uuid=%s target=%s rows=%d\n", outboxUUID, label, rowCount)
 		drained++
 	}
+	if firstErr != nil {
+		return drained, fmt.Errorf("direct outbox replay failed chunks=%d first_error=%s", failures, publicClickHouseError(firstErr))
+	}
 	return drained, nil
+}
+
+func drainRProjectDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, limit int) (int, error) {
+	return drainWebRDirectOutbox(ctx, cfg, limit)
 }
 
 func markWebRDirectOutboxReplay(ctx context.Context, cfg clickHouseQueryConfig, outboxUUID string, success bool, replayErr error) error {
@@ -8882,6 +8943,12 @@ func ensureDirectRowsTrailingNewline(value string) string {
 
 func webRDirectTableLabel(table string) string {
 	switch table {
+	case "Data_R_Package_Raw.r_package_event_raw":
+		return "package"
+	case "Data_R_Community_Raw.r_community_event_raw":
+		return "community"
+	case "Data_R_Community_Raw.r_youtube_event_raw":
+		return "youtube"
 	case "Data_R_Community_Log.r_blogger_log":
 		return "rblogger-log"
 	case "Data_R_Community_Raw.r_blogger_article_raw":
@@ -8897,6 +8964,10 @@ func webRDirectTableLabel(table string) string {
 	default:
 		return "webr-typed"
 	}
+}
+
+func rProjectDirectTableLabel(table string) string {
+	return webRDirectTableLabel(table)
 }
 
 func (p *publisher) write(ctx context.Context, messages []kafka.Message) error {
