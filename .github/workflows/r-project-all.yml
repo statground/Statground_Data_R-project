@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, or cdn"
+        description: "Worker scope: all, package, social, community, community-digest, notebook, or cdn"
         required: false
         type: string
         default: "all"
@@ -51,7 +51,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, or cdn"
+        description: "Worker scope: all, package, social, community, community-digest, notebook, or cdn"
         required: false
         default: "all"
       r_package_job:
@@ -115,7 +115,7 @@ jobs:
         run: |
           scope="${{ inputs.scope || 'all' }}"
           case "$scope" in
-            all|package|social|community|cdn) ;;
+            all|package|social|community|community-digest|notebook|cdn) ;;
             *)
               echo "Unsupported R Project workflow scope: $scope"
               exit 1
@@ -132,7 +132,7 @@ jobs:
           echo "webr_notebook_dry_run=${{ inputs.webr_notebook_dry_run || 'false' }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
-        if: steps.opts.outputs.scope != 'cdn'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
         with:
           go-version-file: go.mod
           cache: true
@@ -145,22 +145,22 @@ jobs:
           cache-dependency-path: scripts/requirements.txt
 
       - uses: actions/setup-node@v4
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'notebook'
         with:
           node-version: "22"
 
       - name: Validate Go collector packages
-        if: steps.opts.outputs.scope != 'cdn'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
         run: go test ./cmd/rproject-collector ./cmd/rblogger-pipeline
 
       - name: Install Python collector dependencies
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'cdn'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'notebook' || steps.opts.outputs.scope == 'cdn'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r scripts/requirements.txt
 
       - name: Install webR for Node
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'notebook'
         run: npm install --no-save webr
 
       - name: Install yt-dlp metadata fallback
@@ -170,7 +170,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate Web-R Notebook style templates
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'notebook'
         run: |
           python scripts/generate_webr_notebook_daily.py \
             --runner scripts/webr_notebook_runner.mjs \
@@ -446,7 +446,7 @@ jobs:
             --sleep 10
 
       - name: Generate R Community daily digests
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community-digest'
         id: community_digest
         env:
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
@@ -491,7 +491,7 @@ jobs:
           fi
 
       - name: Wait for R Community daily digest visibility
-        if: (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community') && steps.community_digest.outputs.deferred != 'true'
+        if: (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community-digest') && steps.community_digest.outputs.deferred != 'true'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -513,7 +513,7 @@ jobs:
             --sleep 10
 
       - name: Generate and insert Web-R Notebook
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'notebook'
         id: generate_notebook
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}

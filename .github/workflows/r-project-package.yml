@@ -2,8 +2,8 @@ name: R Project Package Collection
 
 on:
   schedule:
-    # 09:21 KST. Five hours before the social collector window.
-    - cron: "21 0 * * *"
+    # 00:51 KST. Placed between the late Polymarket and early NAVER windows.
+    - cron: "51 15 * * *"
   workflow_dispatch:
     inputs:
       r_package_job:

@@ -1,13 +1,13 @@
-name: R Project Community Collection
+name: R Project Community Digest
 
 on:
   schedule:
-    # 12:51 KST. Runs after the morning external collectors and before afternoon NAVER.
-    - cron: "51 3 * * *"
+    # 16:51 KST. Runs after community source collection and before notebook generation.
+    - cron: "51 7 * * *"
   workflow_dispatch:
     inputs:
       r_community_since_days:
-        description: "Only keep R Community items newer than N days when published_at exists. Use -1 for no date filtering."
+        description: "Digest source rows newer than N days; -1 means all."
         required: false
         default: "7"
 
@@ -15,10 +15,10 @@ permissions:
   contents: write
 
 jobs:
-  community:
-    name: Community collector
+  digest:
+    name: Community digest
     uses: ./.github/workflows/r-project-all.yml
     with:
-      scope: community
+      scope: community-digest
       r_community_since_days: ${{ inputs.r_community_since_days || vars.R_COMMUNITY_SINCE_DAYS || '7' }}
     secrets: inherit

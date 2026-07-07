@@ -1,0 +1,34 @@
+name: R Project Notebook Generation
+
+on:
+  schedule:
+    # 20:23 KST. Runs after digest generation and before CDN publish.
+    - cron: "23 11 * * *"
+  workflow_dispatch:
+    inputs:
+      webr_notebook_date:
+        description: "Web-R Notebook series date in Asia/Seoul, YYYY-MM-DD. Empty means today."
+        required: false
+        default: ""
+      webr_notebook_force_new:
+        description: "Create another Web-R Notebook post even when today's generated post already exists."
+        required: false
+        default: "false"
+      webr_notebook_dry_run:
+        description: "Run webR and build the notebook row without inserting it."
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  notebook:
+    name: Notebook generation
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: notebook
+      webr_notebook_date: ${{ inputs.webr_notebook_date || '' }}
+      webr_notebook_force_new: ${{ inputs.webr_notebook_force_new || 'false' }}
+      webr_notebook_dry_run: ${{ inputs.webr_notebook_dry_run || 'false' }}
+    secrets: inherit

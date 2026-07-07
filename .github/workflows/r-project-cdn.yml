@@ -2,8 +2,8 @@ name: R Project CDN Publish
 
 on:
   schedule:
-    # 00:21 KST on the following day. Five hours after community collection.
-    - cron: "21 15 * * *"
+    # 23:07 KST. Runs after notebook generation and before the next package window.
+    - cron: "7 14 * * *"
   workflow_dispatch:
 
 permissions:

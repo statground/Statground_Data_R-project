@@ -2,8 +2,8 @@ name: R Project Social Collection
 
 on:
   schedule:
-    # 14:21 KST. Five hours after package and five hours before community.
-    - cron: "21 5 * * *"
+    # 05:31 KST. Separated from package and before the early NAVER/Polymarket windows.
+    - cron: "31 20 * * *"
   workflow_dispatch:
     inputs:
       r_youtube_job:
