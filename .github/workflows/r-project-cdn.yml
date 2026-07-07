@@ -1,0 +1,18 @@
+name: R Project CDN Publish
+
+on:
+  schedule:
+    # 00:21 KST on the following day. Five hours after community collection.
+    - cron: "21 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cdn:
+    name: CDN publish and admin snapshot
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: cdn
+    secrets: inherit

@@ -25,39 +25,59 @@ SNAPSHOT_PATH = "admin/pipelines/latest.json"
 
 PIPELINES = [
     {
-        "key": "r_project_all",
-        "label": "R Project Data Collection",
+        "key": "r_project_package",
+        "label": "R Project Package Collection",
         "repo": "statground/Statground_Data_R-project",
         "repo_label": "Statground_Data_R-project",
-        "workflow_file": "r-project-all.yml",
+        "workflow_file": "r-project-package.yml",
         "output_group": "r_project",
         "stages": [
-            {"key": "prepare", "label": "준비", "matches": ["checkout", "set run options", "install python", "install yt-dlp", "validate kafka", "validate clickhouse"]},
+            {"key": "prepare", "label": "준비", "matches": ["checkout", "set run options", "validate clickhouse"]},
             {"key": "collect_packages", "label": "R 패키지", "matches": ["collect r package ecosystem"]},
-            {"key": "collect_youtube", "label": "YouTube", "matches": ["collect public r youtube"]},
-            {"key": "collect_blogger", "label": "R-bloggers", "matches": ["collect r-bloggers"]},
-            {"key": "collect_mastodon", "label": "Mastodon", "matches": ["collect r foundation public mastodon"]},
-            {"key": "collect_community", "label": "커뮤니티", "matches": ["collect r community sources"]},
-            {"key": "publish_kafka", "label": "Kafka 게시", "matches": ["publish r community events to kafka"]},
-            {"key": "ingest_wait", "label": "수집 반영", "matches": ["wait for r community clickhouse ingestion"]},
-            {"key": "summarize", "label": "요약", "matches": ["generate r community daily digests", "wait for r community daily digest visibility"]},
-            {"key": "cdn_export", "label": "CDN 생성", "matches": ["validate web-r cdn2 publish", "ensure web-r cdn2", "checkout web-r cdn2", "export encrypted web-r cdn2 content"]},
-            {"key": "cdn_publish", "label": "CDN 배치", "matches": ["commit and push web-r cdn2", "record web-r cdn2 releases", "verify web-r cdn2 release"]},
         ],
     },
     {
-        "key": "webr_notebook_daily",
-        "label": "Web-R Notebook Daily Series",
+        "key": "r_project_social",
+        "label": "R Project Social Collection",
         "repo": "statground/Statground_Data_R-project",
         "repo_label": "Statground_Data_R-project",
-        "workflow_file": "webr-notebook-daily.yml",
-        "output_group": "notebook",
+        "workflow_file": "r-project-social.yml",
+        "output_group": "r_project",
         "stages": [
-            {"key": "prepare", "label": "준비", "matches": ["checkout", "install python", "install webr", "validate required"]},
-            {"key": "generate", "label": "Notebook 생성", "matches": ["generate and insert web-r notebook"]},
-            {"key": "cdn_prepare", "label": "CDN 준비", "matches": ["ensure web-r cdn2 community", "checkout web-r cdn2 community"]},
-            {"key": "cdn_export", "label": "CDN 생성", "matches": ["export encrypted web-r cdn2 community"]},
-            {"key": "cdn_publish", "label": "CDN 배치", "matches": ["commit and push web-r cdn2 community", "record web-r cdn2 community release", "verify web-r cdn2 community release"]},
+            {"key": "prepare", "label": "준비", "matches": ["checkout", "set run options", "install yt-dlp", "validate clickhouse"]},
+            {"key": "collect_youtube", "label": "YouTube", "matches": ["collect public r youtube"]},
+            {"key": "collect_blogger", "label": "R-bloggers", "matches": ["collect r-bloggers"]},
+            {"key": "collect_mastodon", "label": "Mastodon", "matches": ["collect r foundation public mastodon"]},
+        ],
+    },
+    {
+        "key": "r_project_community",
+        "label": "R Project Community Collection",
+        "repo": "statground/Statground_Data_R-project",
+        "repo_label": "Statground_Data_R-project",
+        "workflow_file": "r-project-community.yml",
+        "output_group": "r_project",
+        "stages": [
+            {"key": "prepare", "label": "준비", "matches": ["checkout", "set run options", "install python", "install webr", "validate clickhouse"]},
+            {"key": "collect_community", "label": "커뮤니티", "matches": ["collect r community sources"]},
+            {"key": "publish_clickhouse", "label": "ClickHouse 게시", "matches": ["publish r community events to clickhouse"]},
+            {"key": "ingest_wait", "label": "수집 반영", "matches": ["wait for r community clickhouse ingestion"]},
+            {"key": "summarize", "label": "요약", "matches": ["generate r community daily digests", "wait for r community daily digest visibility"]},
+            {"key": "notebook", "label": "Notebook 생성", "matches": ["generate and insert web-r notebook"]},
+        ],
+    },
+    {
+        "key": "r_project_cdn",
+        "label": "R Project CDN Publish",
+        "repo": "statground/Statground_Data_R-project",
+        "repo_label": "Statground_Data_R-project",
+        "workflow_file": "r-project-cdn.yml",
+        "output_group": "r_project",
+        "stages": [
+            {"key": "prepare", "label": "준비", "matches": ["checkout", "set run options", "validate web-r cdn2 publish"]},
+            {"key": "cdn_export", "label": "CDN 생성", "matches": ["validate web-r cdn2 publish", "ensure web-r cdn2", "checkout web-r cdn2", "export encrypted web-r cdn2 content"]},
+            {"key": "cdn_publish", "label": "CDN 배치", "matches": ["commit and push web-r cdn2", "record web-r cdn2 releases", "verify web-r cdn2 release"]},
+            {"key": "admin_snapshot", "label": "운영 스냅샷", "matches": ["export admin pipeline monitor", "commit and push web-r cdn2 admin pipeline snapshot", "record web-r cdn2 admin pipeline snapshot release", "verify web-r cdn2 admin pipeline snapshot release"]},
         ],
     },
     {
@@ -137,7 +157,13 @@ def build_snapshot(language: str) -> dict[str, Any]:
             window_end = ended or datetime.now(timezone.utc)
             if window_end < started:
                 window_end = datetime.now(timezone.utc)
-            windows[str(definition["output_group"])] = (started, window_end + timedelta(minutes=45))
+            output_group = str(definition["output_group"])
+            merged_end = window_end + timedelta(minutes=45)
+            if output_group in windows:
+                previous_start, previous_end = windows[output_group]
+                windows[output_group] = (min(previous_start, started), max(previous_end, merged_end))
+            else:
+                windows[output_group] = (started, merged_end)
 
         recent_runs.extend(run_row(definition, run) for run in runs)
         pipelines.append(

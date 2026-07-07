@@ -1,0 +1,34 @@
+name: R Project Social Collection
+
+on:
+  schedule:
+    # 14:21 KST. Five hours after package and five hours before community.
+    - cron: "21 5 * * *"
+  workflow_dispatch:
+    inputs:
+      r_youtube_job:
+        description: "R YouTube jobs: all, seeds, pages, search, links, videos, transcripts, comments, or backfill-metadata"
+        required: false
+        default: "all"
+      rblogger_rebuild_board:
+        description: "Retranslate all active R-Blogger raw rows into board"
+        required: false
+        default: "false"
+      mastodon_backfill_board:
+        description: "Translate missing or fallback Mastodon board rows only"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  social:
+    name: Social collectors
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: social
+      r_youtube_job: ${{ inputs.r_youtube_job || vars.R_YOUTUBE_JOB || 'all' }}
+      rblogger_rebuild_board: ${{ inputs.rblogger_rebuild_board || 'false' }}
+      mastodon_backfill_board: ${{ inputs.mastodon_backfill_board || 'false' }}
+    secrets: inherit

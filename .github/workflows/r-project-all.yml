@@ -1,10 +1,59 @@
-name: R Project Data Collection
+name: R Project Data Collection Worker
 
 on:
-  schedule:
-    - cron: "21 */12 * * *"
+  workflow_call:
+    inputs:
+      scope:
+        description: "Worker scope: all, package, social, community, or cdn"
+        required: false
+        type: string
+        default: "all"
+      r_package_job:
+        description: "R Package Ecosystem jobs: all or comma-separated jobs"
+        required: false
+        type: string
+        default: "all"
+      r_youtube_job:
+        description: "R YouTube jobs: all, seeds, pages, search, links, videos, transcripts, comments, or backfill-metadata"
+        required: false
+        type: string
+        default: "all"
+      rblogger_rebuild_board:
+        description: "Retranslate all active R-Blogger raw rows into board"
+        required: false
+        type: string
+        default: "false"
+      mastodon_backfill_board:
+        description: "Translate missing or fallback Mastodon board rows only"
+        required: false
+        type: string
+        default: "false"
+      r_community_since_days:
+        description: "Only keep R Community items newer than N days when published_at exists. Use -1 for no date filtering."
+        required: false
+        type: string
+        default: "7"
+      webr_notebook_date:
+        description: "Web-R Notebook series date in Asia/Seoul, YYYY-MM-DD. Empty means today."
+        required: false
+        type: string
+        default: ""
+      webr_notebook_force_new:
+        description: "Create another Web-R Notebook post even when today's generated post already exists."
+        required: false
+        type: string
+        default: "false"
+      webr_notebook_dry_run:
+        description: "Run webR and build the notebook row without inserting it."
+        required: false
+        type: string
+        default: "false"
   workflow_dispatch:
     inputs:
+      scope:
+        description: "Worker scope: all, package, social, community, or cdn"
+        required: false
+        default: "all"
       r_package_job:
         description: "R Package Ecosystem jobs: all or comma-separated jobs"
         required: false
@@ -64,52 +113,64 @@ jobs:
       - name: Set run options
         id: opts
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "r_package_job=${{ inputs.r_package_job }}" >> "$GITHUB_OUTPUT"
-            echo "r_youtube_job=${{ inputs.r_youtube_job }}" >> "$GITHUB_OUTPUT"
-            echo "rblogger_rebuild_board=${{ inputs.rblogger_rebuild_board }}" >> "$GITHUB_OUTPUT"
-            echo "mastodon_backfill_board=${{ inputs.mastodon_backfill_board }}" >> "$GITHUB_OUTPUT"
-            echo "r_community_since_days=${{ inputs.r_community_since_days }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "r_package_job=${{ vars.RPKG_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
-            echo "r_youtube_job=${{ vars.R_YOUTUBE_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
-            echo "rblogger_rebuild_board=false" >> "$GITHUB_OUTPUT"
-            echo "mastodon_backfill_board=false" >> "$GITHUB_OUTPUT"
-            echo "r_community_since_days=${{ vars.R_COMMUNITY_SINCE_DAYS || '7' }}" >> "$GITHUB_OUTPUT"
-          fi
+          scope="${{ inputs.scope || 'all' }}"
+          case "$scope" in
+            all|package|social|community|cdn) ;;
+            *)
+              echo "Unsupported R Project workflow scope: $scope"
+              exit 1
+              ;;
+          esac
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "r_package_job=${{ inputs.r_package_job || vars.RPKG_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
+          echo "r_youtube_job=${{ inputs.r_youtube_job || vars.R_YOUTUBE_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
+          echo "rblogger_rebuild_board=${{ inputs.rblogger_rebuild_board || 'false' }}" >> "$GITHUB_OUTPUT"
+          echo "mastodon_backfill_board=${{ inputs.mastodon_backfill_board || 'false' }}" >> "$GITHUB_OUTPUT"
+          echo "r_community_since_days=${{ inputs.r_community_since_days || vars.R_COMMUNITY_SINCE_DAYS || '7' }}" >> "$GITHUB_OUTPUT"
+          echo "webr_notebook_date=${{ inputs.webr_notebook_date || '' }}" >> "$GITHUB_OUTPUT"
+          echo "webr_notebook_force_new=${{ inputs.webr_notebook_force_new || 'false' }}" >> "$GITHUB_OUTPUT"
+          echo "webr_notebook_dry_run=${{ inputs.webr_notebook_dry_run || 'false' }}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
+        if: steps.opts.outputs.scope != 'cdn'
         with:
           go-version-file: go.mod
           cache: true
 
       - uses: actions/setup-python@v5
+        if: steps.opts.outputs.scope != 'package'
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: scripts/requirements.txt
 
       - uses: actions/setup-node@v4
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         with:
           node-version: "22"
 
       - name: Validate Go collector packages
+        if: steps.opts.outputs.scope != 'cdn'
         run: go test ./cmd/rproject-collector ./cmd/rblogger-pipeline
 
       - name: Install Python collector dependencies
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'cdn'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r scripts/requirements.txt
 
       - name: Install webR for Node
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         run: npm install --no-save webr
 
       - name: Install yt-dlp metadata fallback
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
         run: |
           python -m pip install --user yt-dlp
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate Web-R Notebook style templates
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         run: |
           python scripts/generate_webr_notebook_daily.py \
             --runner scripts/webr_notebook_runner.mjs \
@@ -127,6 +188,7 @@ jobs:
           test -n "$CH_PASSWORD" || { echo "ClickHouse password secret is required"; exit 1; }
 
       - name: Collect R package ecosystem
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -172,6 +234,7 @@ jobs:
         run: go run ./cmd/rproject-collector package --job "$RPKG_JOB"
 
       - name: Collect public R YouTube signals
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -208,6 +271,7 @@ jobs:
         run: go run ./cmd/rproject-collector youtube --job "$R_YOUTUBE_JOB"
 
       - name: Collect R-bloggers
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
         env:
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
@@ -243,6 +307,7 @@ jobs:
           fi
 
       - name: Collect R Foundation public Mastodon RSS
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
         env:
           PRODUCER_SOURCE: github_actions
           PRODUCER_IP: "::"
@@ -276,6 +341,7 @@ jobs:
           fi
 
       - name: Collect R community sources
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         env:
           STATGROUND_USER_AGENT: ${{ vars.STATGROUND_USER_AGENT || 'StatgroundRCollector/1.0 (+https://www.statground.net)' }}
           R_COMMUNITY_REQUEST_DELAY: ${{ vars.R_COMMUNITY_REQUEST_DELAY || '0.5' }}
@@ -288,6 +354,7 @@ jobs:
             --log-level INFO
 
       - name: Show R Community collection report
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         run: |
           python - <<'PY'
           import json
@@ -301,6 +368,7 @@ jobs:
           PY
 
       - name: Validate R Community collection report
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         env:
           R_COMMUNITY_REQUIRED_SOURCE_IDS: ${{ vars.R_COMMUNITY_REQUIRED_SOURCE_IDS || '' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -316,6 +384,7 @@ jobs:
             --required-sources "$R_COMMUNITY_REQUIRED_SOURCE_IDS"
 
       - name: Publish R Community events to ClickHouse
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         id: publish_community
         env:
           R_COMMUNITY_EVENT_LIMIT: ${{ vars.R_COMMUNITY_EVENT_LIMIT || '1000' }}
@@ -360,7 +429,7 @@ jobs:
           fi
 
       - name: Wait for R Community ClickHouse ingestion
-        if: steps.publish_community.outputs.deferred != 'true'
+        if: (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community') && steps.publish_community.outputs.deferred != 'true'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -377,6 +446,7 @@ jobs:
             --sleep 10
 
       - name: Generate R Community daily digests
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         env:
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
@@ -414,6 +484,7 @@ jobs:
             | tee /tmp/r_community_digest.out
 
       - name: Wait for R Community daily digest visibility
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -435,6 +506,7 @@ jobs:
             --sleep 10
 
       - name: Generate and insert Web-R Notebook
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         id: generate_notebook
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -453,13 +525,13 @@ jobs:
           WEBR_NOTEBOOK_SOURCE_LIMIT: ${{ vars.WEBR_NOTEBOOK_SOURCE_LIMIT || '24' }}
         run: |
           args=()
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.webr_notebook_date }}" ]]; then
-            args+=(--date "${{ inputs.webr_notebook_date }}")
+          if [[ -n "${{ steps.opts.outputs.webr_notebook_date }}" ]]; then
+            args+=(--date "${{ steps.opts.outputs.webr_notebook_date }}")
           fi
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.webr_notebook_force_new }}" == "true" ]]; then
+          if [[ "${{ steps.opts.outputs.webr_notebook_force_new }}" == "true" ]]; then
             args+=(--force-new)
           fi
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.webr_notebook_dry_run }}" == "true" ]]; then
+          if [[ "${{ steps.opts.outputs.webr_notebook_dry_run }}" == "true" ]]; then
             args+=(--dry-run)
           fi
           python scripts/generate_webr_notebook_daily.py \
@@ -482,6 +554,7 @@ jobs:
           PY
 
       - name: Validate Web-R CDN2 publish settings
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
@@ -490,6 +563,7 @@ jobs:
           test -n "$R_ECOSYSTEM_CONTENT_KEY" || { echo "R_ECOSYSTEM_CONTENT_KEY secret is required"; exit 1; }
 
       - name: Ensure Web-R CDN2 repositories
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
         run: |
@@ -499,6 +573,7 @@ jobs:
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2 --description "Statground Web-R CDN2 app assets and admin snapshots"
 
       - name: Checkout Web-R CDN2 contents
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         uses: actions/checkout@v4
         with:
           repository: statground/web-r_CDN2_contents
@@ -508,6 +583,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Web-R CDN2 packages
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         uses: actions/checkout@v4
         with:
           repository: statground/web-r_CDN2_packages
@@ -517,6 +593,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Web-R CDN2 community
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         uses: actions/checkout@v4
         with:
           repository: statground/web-r_CDN2_community
@@ -526,6 +603,7 @@ jobs:
           persist-credentials: false
 
       - name: Export encrypted Web-R CDN2 content
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -644,6 +722,7 @@ jobs:
           PY
 
       - name: Commit and push Web-R CDN2 contents
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         id: web_r_cdn2_contents
         working-directory: web-r_CDN2_contents
         env:
@@ -665,6 +744,7 @@ jobs:
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push Web-R CDN2 packages
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         id: web_r_cdn2_packages
         working-directory: web-r_CDN2_packages
         env:
@@ -705,6 +785,7 @@ jobs:
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push Web-R CDN2 community
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         id: web_r_cdn2_community
         working-directory: web-r_CDN2_community
         env:
@@ -726,6 +807,7 @@ jobs:
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Record Web-R CDN2 releases
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -778,6 +860,7 @@ jobs:
           fi
 
       - name: Verify Web-R CDN2 release pointers
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -828,6 +911,7 @@ jobs:
           fi
 
       - name: Checkout Web-R CDN2 admin snapshots
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         uses: actions/checkout@v4
         with:
           repository: statground/web-r_CDN2
@@ -837,6 +921,7 @@ jobs:
           persist-credentials: false
 
       - name: Export admin pipeline monitor CDN snapshot
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -850,6 +935,7 @@ jobs:
           python scripts/export_admin_pipeline_monitor.py --cdn-root web-r_CDN2 --language ko > /tmp/admin_pipeline_export.json
 
       - name: Commit and push Web-R CDN2 admin pipeline snapshot
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         id: web_r_cdn2_admin_pipelines
         working-directory: web-r_CDN2
         env:
@@ -871,6 +957,7 @@ jobs:
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Record Web-R CDN2 admin pipeline snapshot release
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -892,6 +979,7 @@ jobs:
           cat /tmp/web_r_cdn_record_admin_pipelines.json
 
       - name: Verify Web-R CDN2 admin pipeline snapshot release
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
