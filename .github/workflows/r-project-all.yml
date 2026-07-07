@@ -447,6 +447,7 @@ jobs:
 
       - name: Generate R Community daily digests
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        id: community_digest
         env:
           R_COMMUNITY_DIGEST_SINCE_DAYS: ${{ vars.R_COMMUNITY_DIGEST_SINCE_DAYS || steps.opts.outputs.r_community_since_days }}
           R_COMMUNITY_DIGEST_SOURCE_TYPES: ${{ vars.R_COMMUNITY_DIGEST_SOURCE_TYPES || 'community_forum,qna_feed,social_tag,fediverse_group' }}
@@ -456,6 +457,7 @@ jobs:
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
           R_COMMUNITY_DIGEST_LATEST_PER_SOURCE: ${{ vars.R_COMMUNITY_DIGEST_LATEST_PER_SOURCE || 'true' }}
           R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE: ${{ vars.R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE || 'true' }}
+          R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN || 'true' }}
           R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'false' }}
           R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
           RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_CHUNK_SIZE || '1' }}
@@ -482,9 +484,14 @@ jobs:
             --publish-kafka="$R_COMMUNITY_DIGEST_PUBLISH_KAFKA" \
             --plan-output "$R_COMMUNITY_DIGEST_PLAN_OUTPUT" \
             | tee /tmp/r_community_digest.out
+          if grep -q '^\[community-digest\] digest_deferred=true' /tmp/r_community_digest.out; then
+            echo "deferred=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Wait for R Community daily digest visibility
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
+        if: (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community') && steps.community_digest.outputs.deferred != 'true'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}

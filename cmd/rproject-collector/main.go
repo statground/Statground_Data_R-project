@@ -1417,14 +1417,33 @@ func runCommunityDigest(ctx context.Context, args []string) error {
 	}
 	records, err := buildCommunityDigestRecords(ctx, cfg, *sinceDays, *groupLimit, maxInt(1, *itemLimit), *model, *allowFallback, *missingOnly, *latestPerSource)
 	if err != nil {
+		if shouldDeferCommunityDigestFailure(err) {
+			if planErr := writeCommunityDigestPlan(*planOutput, nil); planErr != nil {
+				return planErr
+			}
+			fmt.Printf("[community-digest] digest_deferred=true phase=build reason=%s\n", publicClickHouseError(err))
+			fmt.Printf("inserted=0 table=Data_R_Community_Service.r_community_daily_digest deferred=true\n")
+			return nil
+		}
 		return err
 	}
 	if err := writeCommunityDigestPlan(*planOutput, records); err != nil {
 		return err
 	}
 	if *insertClickHouse {
-		if err := insertCommunityDigestRecords(ctx, cfg, records); err != nil {
+		deferred, err := insertCommunityDigestRecords(ctx, cfg, records)
+		if err != nil {
+			if shouldDeferCommunityDigestFailure(err) {
+				fmt.Printf("[community-digest] digest_deferred=true phase=insert rows=%d reason=%s\n", len(records), publicClickHouseError(err))
+				fmt.Printf("inserted=0 table=Data_R_Community_Service.r_community_daily_digest deferred=true\n")
+				return nil
+			}
 			return err
+		}
+		if deferred {
+			fmt.Printf("[community-digest] digest_deferred=true phase=insert rows=%d reason=clickhouse-outbox-queued\n", len(records))
+			fmt.Printf("inserted=0 table=Data_R_Community_Service.r_community_daily_digest deferred=true\n")
+			return nil
 		}
 		fmt.Printf("inserted=%d table=Data_R_Community_Service.r_community_daily_digest\n", len(records))
 	}
@@ -2348,15 +2367,15 @@ func communityDigestPayloadHash(record communityDigestRecord) string {
 	return shaHex(string(body))
 }
 
-func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, records []communityDigestRecord) error {
+func insertCommunityDigestRecords(ctx context.Context, cfg clickHouseQueryConfig, records []communityDigestRecord) (bool, error) {
 	if len(records) == 0 {
-		return nil
+		return false, nil
 	}
 	rows, err := communityDigestDirectRows(records, nowKST())
 	if err != nil {
-		return err
+		return false, err
 	}
-	return insertDirectRows(ctx, cfg, "Data_R_Community_Service.r_community_daily_digest", rows)
+	return insertDirectRowsWithDeferred(ctx, cfg, "Data_R_Community_Service.r_community_daily_digest", rows)
 }
 
 func communityDigestDirectRows(records []communityDigestRecord, now time.Time) ([]map[string]any, error) {
@@ -7960,6 +7979,13 @@ func shouldDeferCommunityPublishFailure(err error) bool {
 	return isTransientPublishFailure(err)
 }
 
+func shouldDeferCommunityDigestFailure(err error) bool {
+	if !envBool("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", true) {
+		return false
+	}
+	return isTransientClickHousePublishFailure(err)
+}
+
 func isTransientPublishFailure(err error) bool {
 	if err == nil {
 		return false
@@ -8719,55 +8745,65 @@ func mastodonRawDirectRow(event webREvent, payload map[string]any) (map[string]a
 }
 
 func insertDirectRows(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) error {
-	chunkSize := maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", 50))
-	for _, chunk := range chunkMapRows(rows, chunkSize) {
-		if err := insertDirectRowsChunkWithSplit(ctx, cfg, table, chunk); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := insertDirectRowsWithDeferred(ctx, cfg, table, rows)
+	return err
 }
 
-func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) error {
+func insertDirectRowsWithDeferred(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) (bool, error) {
+	chunkSize := maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", 50))
+	anyDeferred := false
+	for _, chunk := range chunkMapRows(rows, chunkSize) {
+		deferred, err := insertDirectRowsChunkWithSplit(ctx, cfg, table, chunk)
+		if err != nil {
+			return anyDeferred, err
+		}
+		anyDeferred = anyDeferred || deferred
+	}
+	return anyDeferred, nil
+}
+
+func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConfig, table string, rows []map[string]any) (bool, error) {
 	if len(rows) == 0 {
-		return nil
+		return false, nil
 	}
 	var b strings.Builder
 	b.WriteString(genericRawEventInsertPrefix(cfg, table))
 	for _, row := range rows {
 		body, err := json.Marshal(row)
 		if err != nil {
-			return err
+			return false, err
 		}
 		b.Write(body)
 		b.WriteByte('\n')
 	}
 	err := execClickHouseDirectChunk(ctx, cfg, b.String(), table, len(rows))
 	if err == nil {
-		return nil
+		return false, nil
 	}
 	if len(rows) > 1 && envBool("RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT", true) && splittableClickHouseFallbackError(err) {
 		mid := len(rows) / 2
 		fmt.Printf("[clickhouse] direct row split table=%s rows=%d reason=%s\n", table, len(rows), publicClickHouseError(err))
-		if splitErr := insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[:mid]); splitErr != nil {
-			return splitErr
+		leftDeferred, splitErr := insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[:mid])
+		if splitErr != nil {
+			return leftDeferred, splitErr
 		}
-		return insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[mid:])
+		rightDeferred, splitErr := insertDirectRowsChunkWithSplit(ctx, cfg, table, rows[mid:])
+		return leftDeferred || rightDeferred, splitErr
 	}
 	if shouldEnqueueWebRDirectOutbox(err) {
 		label := webRDirectTableLabel(table)
 		if outboxErr := enqueueWebRDirectOutbox(ctx, cfg, table, label, b.String(), len(rows), err); outboxErr == nil {
 			fmt.Printf("[clickhouse] queued Web-R direct outbox target=%s rows=%d reason=%s\n", label, len(rows), publicClickHouseError(err))
-			return nil
+			return true, nil
 		} else {
 			fmt.Printf("[warn] Web-R direct outbox enqueue failed target=%s rows=%d error=%s\n", label, len(rows), publicClickHouseError(outboxErr))
 			if shouldDeferWebRDirectOutboxFailure(outboxErr) {
 				fmt.Printf("[webr] publish_deferred target=%s rows=%d reason=%s outbox_error=%s\n", label, len(rows), publicClickHouseError(err), publicClickHouseError(outboxErr))
-				return nil
+				return true, nil
 			}
 		}
 	}
-	return err
+	return false, err
 }
 
 func shouldEnqueueWebRDirectOutbox(err error) bool {
@@ -9659,6 +9695,28 @@ func (cfg clickHouseQueryConfig) endpoint() (string, error) {
 }
 
 func (cfg clickHouseQueryConfig) queryJSONEachRow(query string) ([]map[string]any, error) {
+	attempts := maxInt(1, envInt("RPROJECT_CLICKHOUSE_QUERY_ATTEMPTS", envInt("RPROJECT_CLICKHOUSE_ATTEMPTS", 3)))
+	backoff := time.Duration(envFloat("RPROJECT_CLICKHOUSE_QUERY_BACKOFF_SECONDS", envFloat("RPROJECT_CLICKHOUSE_BACKOFF_SECONDS", 2.0)) * float64(time.Second))
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		rows, err := cfg.queryJSONEachRowOnce(query)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("[clickhouse] query retry succeeded attempt=%d rows=%d\n", attempt, len(rows))
+			}
+			return rows, nil
+		}
+		lastErr = err
+		if attempt == attempts || !retryableClickHouseFallbackError(err) {
+			return nil, err
+		}
+		fmt.Printf("[clickhouse] query retry attempt=%d/%d reason=%s\n", attempt+1, attempts, publicClickHouseError(err))
+		time.Sleep(backoff)
+	}
+	return nil, lastErr
+}
+
+func (cfg clickHouseQueryConfig) queryJSONEachRowOnce(query string) ([]map[string]any, error) {
 	endpoint, err := cfg.endpoint()
 	if err != nil {
 		return nil, err

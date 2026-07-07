@@ -345,6 +345,29 @@ func TestShouldDeferCommunityPublishFailureOnlyForTransientErrors(t *testing.T) 
 	}
 }
 
+func TestShouldDeferCommunityDigestFailureForClickHouseBusyErrors(t *testing.T) {
+	t.Setenv("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", "true")
+	busy := errors.New("ClickHouse HTTP 500: Code: 202. DB::Exception: Too many simultaneous queries. Maximum: 1000. (TOO_MANY_SIMULTANEOUS_QUERIES)")
+	if !retryableClickHouseFallbackError(busy) {
+		t.Fatal("ClickHouse TOO_MANY_SIMULTANEOUS_QUERIES should be retryable")
+	}
+	if !shouldDeferCommunityDigestFailure(busy) {
+		t.Fatal("R Community digest should defer transient ClickHouse busy failures")
+	}
+	if got := publicClickHouseError(busy); got != "clickhouse-rate-limited" {
+		t.Fatalf("publicClickHouseError = %q, want clickhouse-rate-limited", got)
+	}
+	t.Setenv("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", "false")
+	if shouldDeferCommunityDigestFailure(busy) {
+		t.Fatal("R Community digest deferral should respect opt-out env")
+	}
+	t.Setenv("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", "true")
+	contract := errors.New("ClickHouse HTTP 500: DB::Exception: Unknown identifier digest_id")
+	if shouldDeferCommunityDigestFailure(contract) {
+		t.Fatal("R Community digest schema errors must remain fatal")
+	}
+}
+
 func TestWebRDirectOutboxHelpers(t *testing.T) {
 	t.Setenv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN", "")
 	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
