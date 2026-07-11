@@ -100,7 +100,7 @@ env:
   RPROJECT_PUBLISH_MODE: ${{ vars.RPROJECT_PUBLISH_MODE || 'clickhouse' }}
 
 concurrency:
-  group: r-project-data-collection
+  group: r-project-${{ inputs.scope || 'all' }}-${{ inputs.r_package_job || 'default' }}
   cancel-in-progress: true
 
 jobs:
@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set run options
         id: opts
@@ -131,20 +131,20 @@ jobs:
           echo "webr_notebook_force_new=${{ inputs.webr_notebook_force_new || 'false' }}" >> "$GITHUB_OUTPUT"
           echo "webr_notebook_dry_run=${{ inputs.webr_notebook_dry_run || 'false' }}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: steps.opts.outputs.scope != 'package'
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: scripts/requirements.txt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'notebook'
         with:
           node-version: "22"
@@ -182,10 +182,14 @@ jobs:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
         run: |
           test -n "$CH_HOST" || { echo "ClickHouse host secret is required"; exit 1; }
           test -n "$CH_USER" || { echo "ClickHouse user secret is required"; exit 1; }
           test -n "$CH_PASSWORD" || { echo "ClickHouse password secret is required"; exit 1; }
+          if [[ "${CH_SECURE,,}" != "true" && "$CH_SECURE" != "1" ]]; then
+            echo "::warning::ClickHouse transport is not TLS-protected; provision a verified HTTPS endpoint and set CH_SECURE=true"
+          fi
 
       - name: Collect R package ecosystem
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package'
@@ -200,6 +204,7 @@ jobs:
           RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.RPROJECT_CLICKHOUSE_ATTEMPTS || '3' }}
           RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC: ${{ vars.RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC || 'false' }}
           RPKG_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RPKG_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          RPKG_JOB_TIMEOUT_SECONDS: ${{ vars.RPKG_JOB_TIMEOUT_SECONDS || '7200' }}
           RPKG_JOB: ${{ steps.opts.outputs.r_package_job }}
           RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}
           RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '50' }}
@@ -581,7 +586,7 @@ jobs:
 
       - name: Checkout Web-R CDN2 contents
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: statground/web-r_CDN2_contents
           ref: main
@@ -591,7 +596,7 @@ jobs:
 
       - name: Checkout Web-R CDN2 packages
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: statground/web-r_CDN2_packages
           ref: main
@@ -601,7 +606,7 @@ jobs:
 
       - name: Checkout Web-R CDN2 community
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: statground/web-r_CDN2_community
           ref: main
@@ -919,7 +924,7 @@ jobs:
 
       - name: Checkout Web-R CDN2 admin snapshots
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: statground/web-r_CDN2
           ref: main
@@ -1009,3 +1014,34 @@ jobs:
               --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
               --manifest admin/pipelines/latest.json
           fi
+
+      - name: Mark deferred CDN exports as degraded
+        if: always() && (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn')
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          checks = {
+              "contents": ("web_r_cdn2_contents_export_report.json", "r_ecosystem"),
+              "packages": ("web_r_cdn2_packages_export_report.json", "r_package"),
+              "community": ("web_r_cdn2_community_export_report.json", "community"),
+          }
+          deferred = []
+          for scope, (path, key) in checks.items():
+              report_path = Path(path)
+              if not report_path.exists():
+                  deferred.append(f"{scope}:report_missing")
+                  continue
+              payload = json.loads(report_path.read_text(encoding="utf-8"))
+              result = payload.get(key) or {}
+              if result.get("export_deferred"):
+                  deferred.append(f"{scope}:{result.get('deferred_reason') or 'deferred'}")
+          if deferred:
+              summary = "CDN publish degraded: " + ", ".join(deferred)
+              print(f"::error::{summary}")
+              summary_path = Path(__import__('os').environ['GITHUB_STEP_SUMMARY'])
+              summary_path.write_text("## CDN publish degraded\n\n" + summary + "\n", encoding="utf-8")
+              raise SystemExit(1)
+          print("All CDN export scopes produced fresh reports.")
+          PY

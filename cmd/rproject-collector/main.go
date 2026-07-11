@@ -367,8 +367,9 @@ func runPackage(ctx context.Context, args []string) error {
 
 	total := 0
 	deferred := 0
+	jobTimeout := time.Duration(maxInt(60, envInt("RPKG_JOB_TIMEOUT_SECONDS", 7200))) * time.Second
 	for _, currentJob := range jobs {
-		events, err := collectPackageJob(currentJob, getRecords, packageJobLimits{
+		limits := packageJobLimits{
 			metadataLimit:                       *metadataLimit,
 			downloadTop:                         *downloadTop,
 			reverseLimit:                        *reverseLimit,
@@ -396,7 +397,8 @@ func runPackage(ctx context.Context, args []string) error {
 			githubLimit:                         *githubLimit,
 			osvLimit:                            *osvLimit,
 			bibliometricLimit:                   *bibliometricLimit,
-		})
+		}
+		events, err := collectPackageJobWithDeadline(currentJob, getRecords, limits, jobTimeout)
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
@@ -416,6 +418,27 @@ func runPackage(ctx context.Context, args []string) error {
 		fmt.Printf("publish_deferred=%d\n", deferred)
 	}
 	return nil
+}
+
+type packageJobResult struct {
+	events []genericEvent
+	err    error
+}
+
+func collectPackageJobWithDeadline(job string, getRecords func() ([]cranRecord, error), limits packageJobLimits, timeout time.Duration) ([]genericEvent, error) {
+	result := make(chan packageJobResult, 1)
+	go func() {
+		events, err := collectPackageJob(job, getRecords, limits)
+		result <- packageJobResult{events: events, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case completed := <-result:
+		return completed.events, completed.err
+	case <-timer.C:
+		return nil, fmt.Errorf("package job deadline exceeded after %s", timeout)
+	}
 }
 
 func runCommunity(ctx context.Context, args []string) error {

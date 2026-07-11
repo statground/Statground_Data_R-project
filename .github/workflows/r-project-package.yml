@@ -15,10 +15,50 @@ permissions:
   contents: write
 
 jobs:
-  package:
-    name: Package collector
+  package_manual:
+    if: github.event_name == 'workflow_dispatch'
+    name: Package collector (manual)
     uses: ./.github/workflows/r-project-all.yml
     with:
       scope: package
-      r_package_job: ${{ inputs.r_package_job || vars.RPKG_JOB || 'all' }}
+      r_package_job: ${{ inputs.r_package_job || 'all' }}
+    secrets: inherit
+
+  package_metadata:
+    if: github.event_name == 'schedule'
+    name: Package metadata and release signals
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-metadata,cran-downloads,cran-checks,cran-archive,cran-task-views,r-core-news,package-news
+    secrets: inherit
+
+  package_dependencies:
+    if: github.event_name == 'schedule'
+    needs: package_metadata
+    name: Package dependency graph
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-reverse-dependencies
+    secrets: inherit
+
+  package_pages:
+    if: github.event_name == 'schedule'
+    needs: package_dependencies
+    name: Package pages and repositories
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-package-pages,bioconductor,bioconductor-package-pages,runiverse,runiverse-package-pages
+    secrets: inherit
+
+  package_external_signals:
+    if: github.event_name == 'schedule'
+    needs: package_pages
+    name: Package external signals
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-website-discovery,r-websites,github-repos,osv-security,bibliometric-mentions
     secrets: inherit

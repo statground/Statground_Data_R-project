@@ -787,11 +787,11 @@ def load_env(path: Path) -> dict[str, str]:
 
 
 def content_secret(env: dict[str, str]) -> str:
-    for key in ("R_ECOSYSTEM_CONTENT_KEY", "WEBR_R_ECOSYSTEM_CONTENT_KEY", "SESSION_SECRET"):
+    for key in ("R_ECOSYSTEM_CONTENT_KEY", "WEBR_R_ECOSYSTEM_CONTENT_KEY"):
         value = env.get(key, "").strip()
         if value:
             return value
-    raise SystemExit("community content key is not configured")
+    raise SystemExit("R_ECOSYSTEM_CONTENT_KEY is not configured; refusing to reuse an application session secret")
 
 
 def derive_key(secret: str) -> bytes:
