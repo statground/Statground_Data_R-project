@@ -402,6 +402,15 @@ func runPackage(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
+		if currentJob == "cran-metadata" && envBool("RPKG_SKIP_UNCHANGED_METADATA", true) {
+			filtered, skipped, filterErr := filterUnchangedCRANMetadataEvents(events)
+			if filterErr != nil {
+				fmt.Printf("[package] metadata delta lookup unavailable; publishing full batch reason=%s\n", publicClickHouseError(filterErr))
+			} else {
+				events = filtered
+				fmt.Printf("[package] metadata delta selected=%d skipped_unchanged=%d\n", len(events), skipped)
+			}
+		}
 		if err := pub.publishGeneric(ctx, events); err != nil {
 			if shouldDeferPackagePublishFailure(err) {
 				fmt.Printf("[package] publish_deferred job=%s events=%d reason=%s\n", currentJob, len(events), packagePublishFailureReason(err))
@@ -418,6 +427,53 @@ func runPackage(ctx context.Context, args []string) error {
 		fmt.Printf("publish_deferred=%d\n", deferred)
 	}
 	return nil
+}
+
+func filterUnchangedCRANMetadataEvents(events []genericEvent) ([]genericEvent, int, error) {
+	if len(events) == 0 {
+		return events, 0, nil
+	}
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		return events, 0, err
+	}
+	rows, err := cfg.queryJSONEachRow(`
+SELECT
+    package_name,
+    lower(hex(SHA256(argMax(metadata_json, version)))) AS payload_hash
+FROM Data_R_Package_Service.package_current
+WHERE repository = 'CRAN'
+GROUP BY package_name
+SETTINGS max_threads = 2, max_execution_time = 45
+FORMAT JSONEachRow`)
+	if err != nil {
+		return events, 0, err
+	}
+	current := make(map[string]string, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(stringAny(row["package_name"]))
+		hash := strings.ToLower(strings.TrimSpace(stringAny(row["payload_hash"])))
+		if name != "" && hash != "" {
+			current[name] = hash
+		}
+	}
+	selected, skipped := filterGenericEventsByCurrentHash(events, current)
+	return selected, skipped, nil
+}
+
+func filterGenericEventsByCurrentHash(events []genericEvent, current map[string]string) ([]genericEvent, int) {
+	selected := make([]genericEvent, 0, len(events))
+	skipped := 0
+	for _, event := range events {
+		name := strings.TrimSpace(event.PackageName)
+		hash := strings.ToLower(strings.TrimSpace(event.PayloadHash))
+		if name != "" && hash != "" && current[name] == hash {
+			skipped++
+			continue
+		}
+		selected = append(selected, event)
+	}
+	return selected, skipped
 }
 
 type packageJobResult struct {

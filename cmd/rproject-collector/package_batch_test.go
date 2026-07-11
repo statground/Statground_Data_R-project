@@ -140,6 +140,24 @@ func TestPackageClickHouseFallbackOnlyForRPackageEvents(t *testing.T) {
 	}
 }
 
+func TestFilterGenericEventsByCurrentHashSkipsOnlyExactMetadataMatch(t *testing.T) {
+	events := []genericEvent{
+		{PackageName: "A3", PayloadHash: "abc"},
+		{PackageName: "A4", PayloadHash: "changed"},
+		{PackageName: "newpkg", PayloadHash: "new"},
+	}
+	selected, skipped := filterGenericEventsByCurrentHash(events, map[string]string{
+		"A3": "abc",
+		"A4": "old",
+	})
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", skipped)
+	}
+	if len(selected) != 2 || selected[0].PackageName != "A4" || selected[1].PackageName != "newpkg" {
+		t.Fatalf("selected = %#v", selected)
+	}
+}
+
 func TestShouldUsePackageClickHouseFallbackRequiresWholeChunkFailure(t *testing.T) {
 	allFailed := errors.New("kafka fixed partition fallback exhausted partitions=[0 1 2] failed_messages=100 last_error=Kafka write errors (100/100), errors: [[6] Not Leader For Partition]")
 	if !shouldUsePackageClickHouseFallback(allFailed, 100) {
