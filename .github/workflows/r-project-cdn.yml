@@ -4,6 +4,9 @@ on:
   schedule:
     # 23:07 KST. Runs after notebook generation and before the next package window.
     - cron: "7 14 * * *"
+  push:
+    tags:
+      - "webr-cdn-publish-*"
   workflow_dispatch:
 
 permissions:

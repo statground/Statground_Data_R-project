@@ -362,10 +362,40 @@ SELECT toString(n.uuid) AS uuid,
        formatDateTime(n.created_at, '%Y-%m-%d %H:%i:%S') AS published_at,
        if(isNull(n.updated_at), '', formatDateTime(n.updated_at, '%Y-%m-%d %H:%i:%S')) AS updated_at,
        concat('/webr/notebook/view/', if(isNull(n.uuid_share), toString(n.uuid), toString(n.uuid_share)), '/') AS url
-  FROM webr_webr.v_d1_notebook n
+  FROM
+  (
+      SELECT *
+        FROM
+        (
+            SELECT *,
+                   row_number() OVER
+                   (
+                       PARTITION BY uuid
+                       ORDER BY if(ifNull(active, 0) = 1, 0, 1) ASC,
+                                ifNull(updated_at, created_at) DESC
+                   ) AS rn,
+                   argMax(
+                       JSONExtractString(ifNull(updated_log, '{{}}'), 'action'),
+                       ifNull(updated_at, created_at)
+                   ) OVER (PARTITION BY uuid) AS latest_action
+              FROM
+              (
+                  -- CDN is the public read source, so export from every physical
+                  -- replica and deduplicate exact copies. A lagging randomly chosen
+                  -- replica must not make a newly published Notebook disappear.
+                  SELECT DISTINCT
+                         uuid, uuid_share, uuid_user, title, description,
+                         share, active, created_at, updated_at, updated_log
+                    FROM clusterAllReplicas('statground_cluster', 'webr_webr', 'notebook_local')
+                   WHERE uuid_user = toUUID('{NOTEBOOK_BOT_UUID}')
+              ) AS replica_versions
+        ) AS ranked_versions
+       WHERE rn = 1
+         AND ifNull(active, 0) = 1
+         AND latest_action != 'delete'
+  ) AS n
  WHERE coalesce(n.active, 0) = 1
    AND coalesce(n.share, 0) = 1
-   AND n.uuid_user = toUUID('{NOTEBOOK_BOT_UUID}')
  ORDER BY n.created_at DESC{suffix}
  FORMAT JSONEachRow
 """
