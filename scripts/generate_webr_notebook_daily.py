@@ -29,12 +29,17 @@ from clickhouse_http import build_clickhouse_url
 
 NOTEBOOK_BOT_UUID = "7b1c9fc4-7216-44cb-81b8-5fe17f2158bc"
 KST = ZoneInfo("Asia/Seoul")
-RECENT_CONTENT_LIMIT = 24
-MAX_CANDIDATE_ATTEMPTS = 48
+RECENT_CONTENT_LIMIT = 36
+MAX_CANDIDATE_ATTEMPTS = 512
 RECENT_STYLE_LOOKBACK = 5
 RECENT_TOPIC_LOOKBACK = 8
 RECENT_PAIR_LOOKBACK = 16
-SIMILARITY_THRESHOLD = 0.42
+# Full Notebook text includes a reusable base-R template, so scores around
+# 0.58-0.61 are normal even when the source topic and validation experiment
+# differ.  The previous 0.42 threshold was never attainable and silently fell
+# back to the least-similar candidate.  The new hard threshold has no fallback;
+# blueprint, title, recent topic/style and this text score must all pass.
+SIMILARITY_THRESHOLD = 0.64
 R_SET_SEED_MAX = 2_147_483_647
 DEFAULT_SOURCE_CONTEXT_LOOKBACK_DAYS = 21
 DEFAULT_SOURCE_CONTEXT_LIMIT = 24
@@ -125,6 +130,22 @@ class NotebookStyle:
     method_note: str
     formula_note: str
     closing: str
+
+
+@dataclass(frozen=True)
+class DiversityDimension:
+    key: str
+    label: str
+    note: str
+    title_suffix: str = ""
+
+
+@dataclass(frozen=True)
+class WebRPackageProfile:
+    key: str
+    package: str
+    label: str
+    note: str
 
 
 TOPICS = [
@@ -373,6 +394,82 @@ STYLES = [
     ),
 ]
 
+# The primary style is only one dimension of a Notebook.  These independent
+# dimensions are materialized in the generated markdown and in a second WebR
+# validation experiment.  Even with only the curated topics, the Cartesian
+# product is comfortably larger than one daily post for 100 years.
+DATA_DESIGNS = [
+    DiversityDimension("longitudinal-block", "반복 측정 시계열", "같은 단위를 여러 시점에서 관측해 시간 의존성을 보존합니다."),
+    DiversityDimension("overdispersed-count", "과산포 카운트", "평균보다 분산이 큰 횟수 자료를 만들어 단순 Poisson 가정을 의심합니다."),
+    DiversityDimension("zero-inflated", "0이 많은 사건 자료", "사건이 전혀 없는 관측과 양의 관측이 섞인 구조를 따로 봅니다."),
+    DiversityDimension("bounded-rate", "0과 1 사이 비율", "상한과 하한이 있는 비율 자료의 비대칭성을 보존합니다."),
+    DiversityDimension("paired-change", "대응 전후 비교", "같은 대상의 전후 차이를 사용해 대상 간 이질성을 제거합니다."),
+    DiversityDimension("clustered-sample", "군집 표본", "source나 cohort 안에서 서로 닮은 관측이 생기는 구조를 반영합니다."),
+    DiversityDimension("heavy-tail", "꼬리가 두꺼운 자료", "소수의 큰 값이 평균을 흔드는 상황을 만들어 강건 통계를 비교합니다."),
+    DiversityDimension("censored-time", "검열된 시간 자료", "관측 종료 전에 사건이 없었던 항목을 검열 표시와 함께 보존합니다."),
+    DiversityDimension("compositional-share", "합이 1인 구성비", "여러 경로의 비중이 서로 독립적이지 않은 구성비 자료를 만듭니다."),
+    DiversityDimension("irregular-interval", "불규칙 관측 간격", "관측 사이 간격이 일정하지 않은 로그 자료를 재현합니다."),
+]
+
+VALIDATION_LENSES = [
+    DiversityDimension("temporal-holdout", "시간 순서 holdout", "앞 구간에서 세운 해석이 뒤 구간에서도 유지되는지 확인합니다.", "시간 순서 검증"),
+    DiversityDimension("bootstrap-stability", "부트스트랩 안정성", "재표본추출마다 핵심 추정량이 얼마나 흔들리는지 확인합니다.", "재표본 안정성"),
+    DiversityDimension("permutation-placebo", "순열 placebo", "집단표시를 섞었을 때도 같은 크기의 차이가 흔한지 비교합니다.", "placebo 점검"),
+    DiversityDimension("leave-one-out", "leave-one-out 영향도", "관측 하나를 뺄 때 결론이 뒤집히는지 확인합니다.", "영향도 점검"),
+    DiversityDimension("subgroup-consistency", "하위집단 일관성", "서로 다른 segment에서도 효과 방향이 같은지 비교합니다.", "집단별 일관성"),
+    DiversityDimension("missingness-stress", "결측 민감도", "값이 선택적으로 빠지는 상황을 만들어 결론의 민감도를 봅니다.", "결측 민감도"),
+    DiversityDimension("robust-estimator", "강건 추정 비교", "평균과 절사평균, 중앙값을 나란히 두어 극단값 의존도를 봅니다.", "강건성 비교"),
+    DiversityDimension("threshold-sensitivity", "판정선 민감도", "판정선을 이동시키며 선택 비율과 결론 변화를 확인합니다.", "판정선 민감도"),
+    DiversityDimension("sample-size-stability", "표본크기 안정성", "작은 표본부터 관측을 늘리며 추정량의 수렴을 확인합니다.", "표본크기 점검"),
+    DiversityDimension("noise-stress", "잡음 stress test", "추가 잡음의 크기를 늘려 신호가 언제 사라지는지 확인합니다.", "잡음 stress test"),
+    DiversityDimension("negative-control", "negative control", "관계가 없어야 하는 대조 변수를 넣어 가짜 신호 가능성을 봅니다.", "대조 변수 점검"),
+    DiversityDimension("calibration-check", "보정도 점검", "예측된 수준과 실제 관측 수준이 구간별로 맞는지 비교합니다.", "보정도 점검"),
+]
+
+VISUAL_GRAMMARS = [
+    DiversityDimension("ecdf", "누적분포 곡선", "개별 bin 선택에 덜 민감한 ECDF로 전체 분포를 비교합니다."),
+    DiversityDimension("histogram", "분포 히스토그램", "추정량 또는 관측값의 분포 모양을 직접 확인합니다."),
+    DiversityDimension("boxplot", "강건 요약 상자그림", "중앙값, 사분위 범위와 극단 관측을 함께 봅니다."),
+    DiversityDimension("running-estimate", "누적 추정 곡선", "표본이 늘어날 때 추정량이 안정되는 과정을 선으로 봅니다."),
+    DiversityDimension("rank-dot", "순위 점도표", "큰 관측부터 작은 관측까지 영향 순서를 비교합니다."),
+    DiversityDimension("interval-forest", "구간 forest", "segment별 점추정과 불확실성 구간을 같은 축에 둡니다."),
+    DiversityDimension("residual-map", "잔차 지도", "관측 순서와 모형 오차를 함께 그려 구조적 패턴을 찾습니다."),
+    DiversityDimension("calibration-curve", "보정 곡선", "기대 수준과 관측 수준이 일치하는지 대각선과 비교합니다."),
+]
+
+NARRATIVE_FRAMES = [
+    DiversityDimension("operator-decision", "운영 의사결정", "결과가 어떤 운영 선택을 바꾸는지부터 읽습니다.", "운영 선택"),
+    DiversityDimension("teaching-first", "개념 학습", "처음 접하는 독자가 식과 그림을 연결할 수 있게 설명합니다.", "개념부터 읽기"),
+    DiversityDimension("debugging", "분석 디버깅", "결론보다 먼저 어떤 가정이 깨질 수 있는지 추적합니다.", "가정 디버깅"),
+    DiversityDimension("resource-allocation", "자원 배분", "한정된 시간과 자원을 어디에 먼저 투입할지 비교합니다.", "우선순위 결정"),
+    DiversityDimension("reproducibility", "재현성", "같은 입력에서 결과가 다시 만들어지는지와 seed 의존성을 봅니다.", "재현성 점검"),
+    DiversityDimension("risk", "위험 관리", "오탐, 미탐과 극단 상황의 비용을 중심으로 해석합니다.", "위험 관점"),
+    DiversityDimension("counterfactual", "반사실 질문", "조건이 달랐다면 결과가 어떻게 달라졌을지 비교합니다.", "다른 조건 상상하기"),
+    DiversityDimension("communication", "결과 커뮤니케이션", "숫자를 과장하지 않고 핵심 불확실성을 전달하는 방식을 봅니다.", "설명 방식 바꾸기"),
+]
+
+# Curated from the official repo.r-wasm.org R 4.6 package index.  The Node
+# runner still installs and loads the selected package before executing any
+# cell, so a stale catalog entry cannot produce a falsely successful post.
+WEBR_PACKAGE_PROFILES = [
+    WebRPackageProfile("matrix-sparse", "Matrix", "희소행렬", "Matrix::sparseMatrix로 드문 사건의 행렬 표현을 계산합니다."),
+    WebRPackageProfile("boot-resample", "boot", "재표본추출", "boot::boot로 추정량의 재표본 분포를 계산합니다."),
+    WebRPackageProfile("mass-robust", "MASS", "강건 회귀", "MASS::rlm으로 극단값에 덜 민감한 기울기를 비교합니다."),
+    WebRPackageProfile("survival-time", "survival", "생존 시간", "survival::Surv와 survfit으로 사건까지의 시간을 요약합니다."),
+    WebRPackageProfile("cluster-pam", "cluster", "군집 구조", "cluster::pam으로 관측 패턴을 세 군집으로 나눕니다."),
+    WebRPackageProfile("mgcv-smooth", "mgcv", "비선형 평활", "mgcv::gam으로 시간에 따른 완만한 비선형 변화를 추정합니다."),
+    WebRPackageProfile("nlme-grouped", "nlme", "군집별 모형", "nlme::lme로 segment별 절편 차이를 반영합니다."),
+    WebRPackageProfile("data-table-group", "data.table", "고속 그룹 집계", "data.table 문법으로 segment별 요약을 계산합니다."),
+    WebRPackageProfile("dplyr-summary", "dplyr", "파이프형 요약", "dplyr::summarise로 그룹별 중심과 산포를 계산합니다."),
+    WebRPackageProfile("ggplot-build", "ggplot2", "그래프 문법", "ggplot2 객체를 만들고 ggplot_build 결과를 점검합니다."),
+    WebRPackageProfile("tidyr-reshape", "tidyr", "긴 자료 변환", "tidyr::pivot_longer로 여러 측정값을 tidy long 형식으로 바꿉니다."),
+    WebRPackageProfile("purrr-map", "purrr", "함수형 반복", "purrr::map_dbl로 segment별 강건 요약을 계산합니다."),
+    WebRPackageProfile("stringr-token", "stringr", "문자 패턴", "stringr 함수로 분석 label의 토큰 패턴을 점검합니다."),
+    WebRPackageProfile("broom-tidy", "broom", "모형 표 정리", "broom::tidy로 회귀 계수를 재사용 가능한 표로 만듭니다."),
+    WebRPackageProfile("zoo-roll", "zoo", "이동 창", "zoo::rollmean으로 불규칙 신호의 이동 기준선을 계산합니다."),
+    WebRPackageProfile("jsonlite-roundtrip", "jsonlite", "JSON 재현", "jsonlite로 요약 결과를 JSON 왕복 변환해 재현성을 확인합니다."),
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -395,6 +492,7 @@ def main() -> int:
     series_date = parse_series_date(args.date)
     existing_titles = existing_notebook_titles(env)
     recent_rows = recent_notebook_content_rows(env)
+    published_blueprints = published_notebook_blueprint_fingerprints(env)
 
     if not args.force_new and daily_post_exists(env, series_date):
         result = {
@@ -408,7 +506,14 @@ def main() -> int:
         return 0
 
     topic_pool = build_notebook_topic_pool(env, series_date)
-    spec = build_notebook_spec(series_date, existing_titles, recent_rows, topic_pool=topic_pool, force_new=args.force_new)
+    spec = build_notebook_spec(
+        series_date,
+        existing_titles,
+        recent_rows,
+        topic_pool=topic_pool,
+        force_new=args.force_new,
+        published_blueprints=published_blueprints,
+    )
     runner_result = run_webr_runner(repo_root / args.runner, spec)
     row = build_clickhouse_row(spec, runner_result)
 
@@ -436,6 +541,12 @@ def main() -> int:
         "topic": spec["topic"]["key"],
         "topic_source": topic_source_context.get("context_kind", "curated_static"),
         "style": spec["style"]["key"],
+        "blueprint_fingerprint": spec["blueprint"]["fingerprint"],
+        "data_design": spec["blueprint"]["data_design"]["key"],
+        "validation_lens": spec["blueprint"]["validation_lens"]["key"],
+        "visual_grammar": spec["blueprint"]["visual_grammar"]["key"],
+        "narrative_frame": spec["blueprint"]["narrative_frame"]["key"],
+        "webr_package": spec["blueprint"]["package_profile"]["package"],
         "similarity_score": spec.get("similarity_guard", {}).get("max_similarity"),
         "similarity_matched_title": spec.get("similarity_guard", {}).get("matched_title", ""),
         "r_cell_count": len([cell for cell in spec["cells"] if cell["mode"] == "r"]),
@@ -511,6 +622,18 @@ def recent_notebook_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
     return pairs
 
 
+def recent_blueprint_dimension_keys(rows: list[dict[str, Any]], dimension: str, lookback: int) -> set[str]:
+    keys: set[str] = set()
+    for row in rows[:lookback]:
+        meta = parse_json_maybe(row.get("data_meta"))
+        blueprint = meta.get("blueprint") if isinstance(meta, dict) else None
+        value = blueprint.get(dimension) if isinstance(blueprint, dict) else None
+        key = str(value.get("key", "") if isinstance(value, dict) else value or "").strip()
+        if key:
+            keys.add(key)
+    return keys
+
+
 def topic_key_from_title(title: str) -> str:
     normalized = title.lower()
     for topic in TOPICS:
@@ -519,17 +642,54 @@ def topic_key_from_title(title: str) -> str:
     return ""
 
 
-def build_public_title(topic: Topic, style: NotebookStyle, existing_titles: set[str], seed: int) -> str:
+def build_diversity_blueprint(topic: Topic, style: NotebookStyle, seed: int, attempt: int) -> dict[str, Any]:
+    # Mixed-radix selection makes every dimension advance at a different pace,
+    # while the persisted fingerprint remains the final authority on reuse.
+    cursor = (int(seed) + attempt * 1_000_003) & 0xFFFFFFFFFFFFFFFF
+    data_design = DATA_DESIGNS[cursor % len(DATA_DESIGNS)]
+    cursor //= len(DATA_DESIGNS)
+    validation_lens = VALIDATION_LENSES[cursor % len(VALIDATION_LENSES)]
+    cursor //= len(VALIDATION_LENSES)
+    visual_grammar = VISUAL_GRAMMARS[cursor % len(VISUAL_GRAMMARS)]
+    cursor //= len(VISUAL_GRAMMARS)
+    narrative_frame = NARRATIVE_FRAMES[cursor % len(NARRATIVE_FRAMES)]
+    cursor //= len(NARRATIVE_FRAMES)
+    package_profile = WEBR_PACKAGE_PROFILES[cursor % len(WEBR_PACKAGE_PROFILES)]
+    components = {
+        "topic": topic.key,
+        "style": style.key,
+        "data_design": data_design.key,
+        "validation_lens": validation_lens.key,
+        "visual_grammar": visual_grammar.key,
+        "narrative_frame": narrative_frame.key,
+        "package_profile": package_profile.key,
+    }
+    canonical = json.dumps(components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        **components,
+        "data_design": data_design.__dict__,
+        "validation_lens": validation_lens.__dict__,
+        "visual_grammar": visual_grammar.__dict__,
+        "narrative_frame": narrative_frame.__dict__,
+        "package_profile": package_profile.__dict__,
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "space_size_per_topic": len(STYLES) * len(DATA_DESIGNS) * len(VALIDATION_LENSES) * len(VISUAL_GRAMMARS) * len(NARRATIVE_FRAMES) * len(WEBR_PACKAGE_PROFILES),
+    }
+
+
+def build_public_title(topic: Topic, style: NotebookStyle, blueprint: dict[str, Any], existing_titles: set[str], seed: int) -> str:
     base_title = style.title_template.format(entity=topic.entity, topic=topic.title)
+    validation_suffix = str(blueprint["validation_lens"].get("title_suffix") or blueprint["validation_lens"]["label"])
+    narrative_suffix = str(blueprint["narrative_frame"].get("title_suffix") or blueprint["narrative_frame"]["label"])
+    visual_label = str(blueprint["visual_grammar"]["label"])
+    data_design_label = str(blueprint["data_design"]["label"])
     candidates = [
-        base_title,
-        f"{base_title}: 민감도 점검",
-        f"{base_title}: 다른 가정으로 다시 보기",
-        f"{base_title}: 작은 표본 실험",
-        f"{base_title}: 해석 프레임 바꾸기",
-        f"{base_title}: 기준선 바꿔 보기",
-        f"{base_title}: 분포까지 함께 보기",
-        f"{base_title}: 운영 질문으로 다시 읽기",
+        f"{base_title}: {validation_suffix}",
+        f"{base_title}: {narrative_suffix}",
+        f"{base_title}: {visual_label}로 확인하기",
+        f"{base_title}: {data_design_label}{korean_instrumental_particle(data_design_label)} 다시 보기",
+        f"{base_title}: {narrative_suffix}에서 {validation_suffix}",
+        f"{base_title}: {visual_label}과 {validation_suffix}",
     ]
     existing_keys = {title_identity_key(title) for title in existing_titles if title_identity_key(title)}
     start = seed % len(candidates)
@@ -537,7 +697,19 @@ def build_public_title(topic: Topic, style: NotebookStyle, existing_titles: set[
         candidate = sanitize_public_title(candidates[(start + offset) % len(candidates)])
         if candidate not in existing_titles and title_identity_key(candidate) not in existing_keys:
             return candidate
-    return sanitize_public_title(f"{base_title}: 실험 노트 {(seed % 89) + 11}")
+    short_fingerprint = str(blueprint["fingerprint"])[:8]
+    return sanitize_public_title(f"{base_title}: {validation_suffix} {short_fingerprint}")
+
+
+def korean_instrumental_particle(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "으로"
+    code = ord(text[-1])
+    if 0xAC00 <= code <= 0xD7A3:
+        final_consonant = (code - 0xAC00) % 28
+        return "로" if final_consonant in (0, 8) else "으로"
+    return "로"
 
 
 def sanitize_public_title(title: str) -> str:
@@ -576,6 +748,7 @@ def notebook_content_text_from_spec(spec: dict[str, Any]) -> str:
         str(spec.get("description", "")),
         json.dumps(spec.get("topic", {}), ensure_ascii=False, sort_keys=True),
         json.dumps(spec.get("style", {}), ensure_ascii=False, sort_keys=True),
+        json.dumps(spec.get("blueprint", {}), ensure_ascii=False, sort_keys=True),
     ]
     for cell in spec.get("cells", []):
         if isinstance(cell, dict):
@@ -598,7 +771,7 @@ def notebook_content_text_from_row(row: dict[str, Any]) -> str:
             parts.append(str(payload))
     meta = parse_json_maybe(row.get("data_meta"))
     if isinstance(meta, dict):
-        for key in ("series_date", "topic", "style"):
+        for key in ("series_date", "topic", "style", "blueprint"):
             if key in meta:
                 parts.append(json.dumps(meta[key], ensure_ascii=False, sort_keys=True))
     return "\n".join(part for part in parts if part)
@@ -917,14 +1090,28 @@ def shorten_text(value: str, max_len: int) -> str:
     return text[: max(0, max_len - 1)].rstrip() + "…"
 
 
-def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows: list[dict[str, Any]], *, topic_pool: list[Topic], force_new: bool) -> dict[str, Any]:
+def build_notebook_spec(
+    series_date: str,
+    existing_titles: set[str],
+    recent_rows: list[dict[str, Any]],
+    *,
+    topic_pool: list[Topic],
+    force_new: bool,
+    published_blueprints: set[str] | None = None,
+) -> dict[str, Any]:
     base_seed = int(hashlib.sha256(f"webr-notebook:{series_date}".encode("utf-8")).hexdigest()[:8], 16)
     recent_styles = recent_notebook_style_keys(recent_rows)
     recent_topics = recent_notebook_topic_keys(recent_rows)
     recent_pairs = recent_notebook_pairs(recent_rows)
+    recent_blueprint_dimensions = {
+        "data_design": recent_blueprint_dimension_keys(recent_rows, "data_design", 5),
+        "validation_lens": recent_blueprint_dimension_keys(recent_rows, "validation_lens", 5),
+        "visual_grammar": recent_blueprint_dimension_keys(recent_rows, "visual_grammar", 5),
+        "narrative_frame": recent_blueprint_dimension_keys(recent_rows, "narrative_frame", 5),
+        "package_profile": recent_blueprint_dimension_keys(recent_rows, "package_profile", 8),
+    }
     existing_title_keys = {title_identity_key(title) for title in existing_titles if title_identity_key(title)}
-    best_spec: dict[str, Any] | None = None
-    best_similarity = 1.0
+    published_blueprints = set(published_blueprints or set())
 
     for attempt in range(MAX_CANDIDATE_ATTEMPTS):
         seed = (base_seed + attempt * 104729) & 0xFFFFFFFF
@@ -942,13 +1129,21 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
         topic_key = str(spec.get("topic", {}).get("key", ""))
         style_key = str(spec.get("style", {}).get("key", ""))
         title_key = title_identity_key(str(spec.get("title", "")))
+        blueprint_fingerprint = str(spec.get("blueprint", {}).get("fingerprint", ""))
         title_duplicate = bool(title_key and title_key in existing_title_keys)
+        blueprint_duplicate = not blueprint_fingerprint or blueprint_fingerprint in published_blueprints
+        repeated_blueprint_dimensions = {
+            dimension: str(spec.get("blueprint", {}).get(dimension, {}).get("key", "")) in recent_keys
+            for dimension, recent_keys in recent_blueprint_dimensions.items()
+        }
         pair_duplicate = bool(topic_key and style_key and (topic_key, style_key) in recent_pairs)
         topic_recent = topic_key in set(recent_topics[:4])
         style_recent = style_key in set(recent_styles[:3])
         accepted = (
             (similarity <= SIMILARITY_THRESHOLD or not recent_rows)
             and not title_duplicate
+            and not blueprint_duplicate
+            and not any(repeated_blueprint_dimensions.values())
             and not pair_duplicate
             and not (topic_recent and style_recent)
         )
@@ -958,6 +1153,10 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
             "matched_title": matched_title,
             "compared_recent_count": len(recent_rows),
             "title_duplicate": title_duplicate,
+            "blueprint_duplicate": blueprint_duplicate,
+            "blueprint_fingerprint": blueprint_fingerprint,
+            "repeated_blueprint_dimensions": repeated_blueprint_dimensions,
+            "published_blueprint_count": len(published_blueprints),
             "pair_duplicate": pair_duplicate,
             "topic_recent": topic_recent,
             "style_recent": style_recent,
@@ -965,16 +1164,12 @@ def build_notebook_spec(series_date: str, existing_titles: set[str], recent_rows
             "max_attempts": MAX_CANDIDATE_ATTEMPTS,
             "accepted": accepted,
         }
-        if best_spec is None or similarity < best_similarity:
-            best_spec = spec
-            best_similarity = similarity
         if accepted:
             return spec
 
-    if best_spec is None:
-        raise RuntimeError("no Web-R Notebook candidate could be generated")
-    best_spec["similarity_guard"]["fallback"] = "least_similar_after_retry"
-    return best_spec
+    raise RuntimeError(
+        "no novel Web-R Notebook blueprint passed the title, history, and similarity guards; refusing to publish a repeated design"
+    )
 
 
 def build_candidate_notebook_spec(
@@ -990,10 +1185,12 @@ def build_candidate_notebook_spec(
 ) -> dict[str, Any]:
     style = choose_style(seed + attempt * 2, recent_styles)
     topic = choose_topic(seed, recent_topics, attempt, topic_pool)
-    title = build_public_title(topic, style, existing_titles, seed + attempt)
+    blueprint = build_diversity_blueprint(topic, style, seed, attempt)
+    title = build_public_title(topic, style, blueprint, existing_titles, seed + attempt)
     description = (
-        f"{series_date} R ecosystem/community Notebook 자동 연재 글입니다. "
-        f"{topic.source_note}를 만들고, `{style.label}` 형식으로 {topic.entity} 데이터를 분석합니다."
+        f"{topic.source_note}를 {blueprint['data_design']['label']} 구조로 만들고, "
+        f"`{style.label}` 분석 뒤 {blueprint['validation_lens']['label']}과 "
+        f"{blueprint['visual_grammar']['label']}을 사용해 결론을 다시 점검합니다."
     )
 
     start_date = (datetime.strptime(series_date, "%Y-%m-%d") - timedelta(days=59)).strftime("%Y-%m-%d")
@@ -1009,6 +1206,7 @@ def build_candidate_notebook_spec(
         n=n,
         change_point=change_point,
         effect=effect,
+        blueprint=blueprint,
     )
     return {
         "schema": "web-r.notebook.daily-spec.v1",
@@ -1019,6 +1217,8 @@ def build_candidate_notebook_spec(
         "description": description,
         "topic": topic.__dict__,
         "style": style.__dict__,
+        "blueprint": blueprint,
+        "required_packages": [blueprint["package_profile"]["package"]],
         "seed": seed,
         "r_seed": r_seed_value(seed),
         "candidate_attempt": attempt,
@@ -1081,6 +1281,7 @@ def build_style_cells(
     n: int,
     change_point: int,
     effect: int,
+    blueprint: dict[str, Any],
 ) -> list[dict[str, Any]]:
     plot_path = f"/tmp/webr_daily_{style.key}.svg"
     if style.key == "ranked-audit":
@@ -1118,6 +1319,18 @@ def build_style_cells(
 
     context_note = source_context_markdown(topic)
     context_block = f"{context_note}\n\n" if context_note else ""
+    data_design = blueprint["data_design"]
+    validation_lens = blueprint["validation_lens"]
+    visual_grammar = blueprint["visual_grammar"]
+    narrative_frame = blueprint["narrative_frame"]
+    package_profile = blueprint["package_profile"]
+    validation_plot_path = f"/tmp/webr_daily_validation_{blueprint['fingerprint'][:12]}.svg"
+    validation_code = build_blueprint_validation_r_code(
+        seed=seed,
+        topic=topic,
+        blueprint=blueprint,
+        plot_path=validation_plot_path,
+    )
     return [
         {
             "id": 1,
@@ -1127,6 +1340,8 @@ def build_style_cells(
                 f"{topic.background}\n\n"
                 f"{context_block}"
                 f"{style.question_prefix} 오늘의 질문은 **{topic.question}** 입니다.\n\n"
+                f"이번 글은 **{data_design['label']}** 구조와 **{narrative_frame['label']}** 관점을 사용합니다. "
+                f"{data_design['note']} {narrative_frame['note']}\n\n"
                 f"{style.formula_note}\n\n"
                 f"아래에서는 {topic.source_note}를 만든 뒤, 브라우저 WebR에서 실행 가능한 base R 코드로 작은 분석을 진행합니다."
             ),
@@ -1145,11 +1360,155 @@ def build_style_cells(
             "id": 5,
             "mode": "markdown",
             "source": (
+                "### 결론을 한 번 더 흔들어 보기\n\n"
+                f"주 분석 다음에는 **{validation_lens['label']}**을 적용합니다. {validation_lens['note']} "
+                f"결과는 **{visual_grammar['label']}**으로 그립니다. {visual_grammar['note']} "
+                f"또한 WebAssembly 지원 패키지 **{package_profile['package']}**를 실제로 불러 "
+                f"{package_profile['note']}"
+            ),
+        },
+        {"id": 6, "mode": "r", "source": validation_code, "plot_path": validation_plot_path},
+        {
+            "id": 7,
+            "mode": "markdown",
+            "source": (
                 "### 읽는 포인트\n\n"
-                f"{style.closing} 오늘의 수치는 실제 운영 지표가 아니라 재현 가능한 예제 데이터이지만, 같은 접근은 실제 로그를 볼 때도 그대로 옮겨갈 수 있습니다."
+                f"{style.closing} {narrative_frame['note']} 오늘의 수치는 실제 운영 지표가 아니라 재현 가능한 예제 데이터이지만, "
+                "같은 분석 blueprint는 실제 로그에서도 데이터 구조와 검증 질문을 명시한 뒤 재사용할 수 있습니다."
             ),
         },
     ]
+
+
+def build_blueprint_validation_r_code(*, seed: int, topic: Topic, blueprint: dict[str, Any], plot_path: str) -> str:
+    design_key = str(blueprint["data_design"]["key"])
+    lens_key = str(blueprint["validation_lens"]["key"])
+    visual_key = str(blueprint["visual_grammar"]["key"])
+    package_key = str(blueprint["package_profile"]["key"])
+    design_code = {
+        "longitudinal-block": f"""subject <- rep(seq_len(30), each = 6)
+time_index <- rep(seq_len(6), times = 30)
+segment <- rep(c("A", "B", "C"), length.out = length(subject))
+probe <- {topic.base} + rep(rnorm(30, 0, {max(topic.noise, 1.0)}), each = 6) + {topic.slope} * time_index + rnorm(length(subject), 0, {max(topic.noise / 2, 0.5)})
+observed <- rep(TRUE, length(probe))""",
+        "overdispersed-count": f"""time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+mu <- pmax(2, {topic.base} + {topic.slope} * time_index / 4)
+probe <- rnbinom(length(time_index), mu = mu, size = 2.5)
+observed <- rep(TRUE, length(probe))""",
+        "zero-inflated": f"""time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+positive <- rpois(length(time_index), lambda = pmax(1, {topic.base} / 8))
+probe <- ifelse(rbinom(length(time_index), 1, 0.38) == 1, 0, positive)
+observed <- rep(TRUE, length(probe))""",
+        "bounded-rate": """time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+shape1 <- 2.2 + 0.35 * (segment == "C")
+shape2 <- 3.4 - 0.25 * (segment == "C")
+probe <- rbeta(length(time_index), shape1 = shape1, shape2 = shape2)
+observed <- rep(TRUE, length(probe))""",
+        "paired-change": f"""time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+before <- rnorm(length(time_index), {topic.base}, {max(topic.noise, 1.0)})
+after <- before + rnorm(length(time_index), {max(abs(topic.slope) * 3, 1.0)}, {max(topic.noise / 2, 0.5)})
+probe <- after - before
+observed <- rep(TRUE, length(probe))""",
+        "clustered-sample": f"""cluster <- rep(seq_len(24), each = 8)
+time_index <- seq_along(cluster)
+segment <- rep(c("A", "B", "C"), length.out = length(cluster))
+cluster_effect <- rep(rnorm(24, 0, {max(topic.noise, 1.0)}), each = 8)
+probe <- {topic.base} + cluster_effect + rnorm(length(cluster), 0, {max(topic.noise / 2, 0.5)})
+observed <- rep(TRUE, length(probe))""",
+        "heavy-tail": f"""time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+probe <- {topic.base} + {max(topic.noise, 1.0)} * rt(length(time_index), df = 3)
+observed <- rep(TRUE, length(probe))""",
+        "censored-time": """time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+event_time <- rexp(length(time_index), rate = 0.08 + 0.02 * (segment == "C"))
+censor_time <- runif(length(time_index), 4, 22)
+observed <- event_time <= censor_time
+probe <- pmin(event_time, censor_time)""",
+        "compositional-share": """time_index <- seq_len(180)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+parts <- matrix(rgamma(length(time_index) * 4, shape = rep(c(2, 3, 4, 5), each = length(time_index))), ncol = 4)
+parts <- parts / rowSums(parts)
+probe <- parts[, 1]
+observed <- rep(TRUE, length(probe))""",
+        "irregular-interval": f"""gap <- rexp(180, rate = 0.7)
+time_index <- cumsum(gap)
+segment <- rep(c("A", "B", "C"), length.out = length(time_index))
+probe <- {topic.base} + {topic.slope} * time_index + {topic.amplitude} * sin(time_index / 3) + rnorm(length(time_index), 0, {max(topic.noise, 1.0)})
+observed <- rep(TRUE, length(probe))""",
+    }[design_key]
+    lens_code = {
+        "temporal-holdout": "lens_values <- cumsum(probe) / seq_along(probe)\nlens_axis <- seq_along(lens_values)\nlens_summary <- tail(lens_values, 1) - lens_values[max(2, floor(length(lens_values) * 0.67))]",
+        "bootstrap-stability": "lens_values <- replicate(320, median(sample(probe, replace = TRUE)))\nlens_axis <- seq_along(lens_values)\nlens_summary <- stats::sd(lens_values)",
+        "permutation-placebo": "observed_gap <- mean(probe[segment == 'C']) - mean(probe[segment == 'A'])\nlens_values <- replicate(320, { shuffled <- sample(segment); mean(probe[shuffled == 'C']) - mean(probe[shuffled == 'A']) })\nlens_axis <- seq_along(lens_values)\nlens_summary <- mean(abs(lens_values) >= abs(observed_gap))",
+        "leave-one-out": "lens_values <- vapply(seq_along(probe), function(i) mean(probe[-i]), numeric(1))\nlens_axis <- seq_along(lens_values)\nlens_summary <- diff(range(lens_values))",
+        "subgroup-consistency": "lens_values <- as.numeric(tapply(probe, segment, median))\nlens_axis <- seq_along(lens_values)\nlens_summary <- diff(range(lens_values))",
+        "missingness-stress": "drop_rate <- seq(0, 0.45, length.out = 30)\nlens_values <- vapply(drop_rate, function(p) mean(sample(probe, max(8, floor(length(probe) * (1 - p))))), numeric(1))\nlens_axis <- drop_rate\nlens_summary <- tail(lens_values, 1) - lens_values[1]",
+        "robust-estimator": "lens_values <- c(mean = mean(probe), trimmed = mean(probe, trim = 0.1), median = median(probe))\nlens_axis <- seq_along(lens_values)\nlens_summary <- max(lens_values) - min(lens_values)",
+        "threshold-sensitivity": "lens_axis <- as.numeric(quantile(probe, probs = seq(0.1, 0.9, by = 0.05)))\nlens_values <- vapply(lens_axis, function(x) mean(probe >= x), numeric(1))\nlens_summary <- max(abs(diff(lens_values)))",
+        "sample-size-stability": "lens_axis <- unique(round(seq(12, length(probe), length.out = 28)))\nlens_values <- vapply(lens_axis, function(n) mean(probe[seq_len(n)]), numeric(1))\nlens_summary <- tail(lens_values, 1) - lens_values[1]",
+        "noise-stress": "lens_axis <- seq(0, stats::sd(probe), length.out = 28)\nlens_values <- vapply(lens_axis, function(s) suppressWarnings(cor(probe, probe + rnorm(length(probe), 0, s))), numeric(1))\nlens_summary <- tail(lens_values, 1)",
+        "negative-control": "lens_values <- replicate(320, suppressWarnings(cor(probe, sample(time_index))))\nlens_axis <- seq_along(lens_values)\nlens_summary <- mean(abs(lens_values) > 0.2, na.rm = TRUE)",
+        "calibration-check": "expected <- rank(probe, ties.method = 'average') / (length(probe) + 1)\nbin <- cut(expected, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)\nlens_axis <- as.numeric(tapply(expected, bin, mean))\nlens_values <- as.numeric(tapply(observed * 1, bin, mean))\nlens_summary <- mean(abs(lens_values - lens_axis), na.rm = TRUE)",
+    }[lens_key]
+    visual_code = {
+        "ecdf": "plot(stats::ecdf(lens_values), verticals = TRUE, do.points = FALSE, col = topic_color, lwd = 3, main = visual_title, xlab = 'validation value', ylab = 'cumulative probability')",
+        "histogram": "hist(lens_values, breaks = 'FD', col = topic_color, border = 'white', main = visual_title, xlab = 'validation value')",
+        "boxplot": "boxplot(lens_values, horizontal = TRUE, col = topic_color, border = '#111827', main = visual_title, xlab = 'validation value')",
+        "running-estimate": "plot(lens_axis, lens_values, type = 'l', col = topic_color, lwd = 3, main = visual_title, xlab = 'validation step', ylab = 'estimate'); points(lens_axis, lens_values, pch = 21, bg = topic_accent, col = 'white')",
+        "rank-dot": "ranked_values <- sort(lens_values, decreasing = TRUE); plot(seq_along(ranked_values), ranked_values, pch = 21, bg = topic_color, col = 'white', main = visual_title, xlab = 'rank', ylab = 'validation value')",
+        "interval-forest": "groups <- cut(seq_along(lens_values), breaks = min(6, length(lens_values)), labels = FALSE); centers <- as.numeric(tapply(lens_values, groups, mean)); spreads <- as.numeric(tapply(lens_values, groups, sd)); spreads[!is.finite(spreads)] <- 0; plot(centers, seq_along(centers), xlim = range(c(centers - spreads, centers + spreads)), pch = 19, col = topic_color, main = visual_title, xlab = 'estimate and one SD', ylab = 'block'); segments(centers - spreads, seq_along(centers), centers + spreads, seq_along(centers), col = topic_accent, lwd = 2)",
+        "residual-map": "fit_probe <- lm(probe ~ time_index); plot(time_index, resid(fit_probe), pch = 21, bg = ifelse(abs(scale(resid(fit_probe))) > 1.5, topic_accent, topic_color), col = 'white', main = visual_title, xlab = 'observation order', ylab = 'residual'); abline(h = 0, lty = 2, lwd = 2)",
+        "calibration-curve": "scaled_values <- rank(lens_values, ties.method = 'average') / (length(lens_values) + 1); expected_values <- seq_along(scaled_values) / (length(scaled_values) + 1); plot(expected_values, sort(scaled_values), type = 'b', pch = 21, bg = topic_color, col = topic_color, main = visual_title, xlab = 'expected quantile', ylab = 'observed quantile'); abline(0, 1, lty = 2, col = topic_accent, lwd = 2)",
+    }[visual_key]
+    package_code = {
+        "matrix-sparse": "pkg_object <- Matrix::sparseMatrix(i = seq_along(probe), j = rep(1:3, length.out = length(probe)), x = probe); package_result <- mean(Matrix::rowSums(pkg_object))",
+        "boot-resample": "pkg_object <- boot::boot(probe, statistic = function(d, i) mean(d[i]), R = 120); package_result <- stats::sd(as.numeric(pkg_object$t))",
+        "mass-robust": "pkg_object <- MASS::rlm(probe ~ time_index); package_result <- unname(stats::coef(pkg_object)[['time_index']])",
+        "survival-time": "pkg_object <- survival::survfit(survival::Surv(abs(probe) + 0.01, observed) ~ 1); package_result <- unname(summary(pkg_object)$table[['median']])",
+        "cluster-pam": "pkg_object <- cluster::pam(scale(cbind(probe, time_index)), k = 3); package_result <- pkg_object$silinfo$avg.width",
+        "mgcv-smooth": "pkg_object <- mgcv::gam(probe ~ s(time_index, k = 6)); package_result <- summary(pkg_object)$r.sq",
+        "nlme-grouped": "pkg_object <- nlme::lme(probe ~ time_index, random = ~1 | segment, control = nlme::lmeControl(returnObject = TRUE)); package_result <- unname(nlme::fixef(pkg_object)[['time_index']])",
+        "data-table-group": "pkg_object <- data.table::data.table(probe = probe, segment = segment)[, .(center = median(probe)), by = segment]; package_result <- mean(pkg_object$center)",
+        "dplyr-summary": "pkg_object <- dplyr::summarise(dplyr::group_by(data.frame(probe = probe, segment = segment), segment), center = mean(probe), spread = stats::sd(probe), .groups = 'drop'); package_result <- mean(pkg_object$center)",
+        "ggplot-build": "pkg_plot <- ggplot2::ggplot(data.frame(time_index = time_index, probe = probe), ggplot2::aes(time_index, probe)) + ggplot2::geom_point() + ggplot2::geom_smooth(method = 'lm', se = FALSE); pkg_object <- ggplot2::ggplot_build(pkg_plot); package_result <- length(pkg_object$data[[1]]$x)",
+        "tidyr-reshape": "pkg_object <- tidyr::pivot_longer(data.frame(id = seq_along(probe), observed = probe, centered = probe - mean(probe)), cols = c('observed', 'centered'), names_to = 'measure', values_to = 'value'); package_result <- nrow(pkg_object)",
+        "purrr-map": "pkg_object <- purrr::map_dbl(split(probe, segment), stats::median); package_result <- mean(pkg_object)",
+        "stringr-token": f"pkg_object <- stringr::str_count(c({r_string(topic.entity)}, {r_string(topic.question)}), stringr::boundary('word')); package_result <- sum(pkg_object)",
+        "broom-tidy": "pkg_object <- broom::tidy(stats::lm(probe ~ time_index)); package_result <- pkg_object$estimate[pkg_object$term == 'time_index']",
+        "zoo-roll": "pkg_object <- zoo::rollmean(probe, k = 7, fill = NA, align = 'right'); package_result <- tail(stats::na.omit(pkg_object), 1)",
+        "jsonlite-roundtrip": "pkg_json <- jsonlite::toJSON(list(center = mean(probe), spread = stats::sd(probe)), auto_unbox = TRUE); pkg_object <- jsonlite::fromJSON(pkg_json); package_result <- pkg_object$center",
+    }[package_key]
+    return "\n".join(
+        [
+            f"# Blueprint validation: {blueprint['fingerprint']}",
+            f"set.seed({r_seed_value(seed + 7919)})",
+            design_code,
+            lens_code,
+            "lens_values <- as.numeric(lens_values)",
+            "lens_values <- lens_values[is.finite(lens_values)]",
+            "if (!length(lens_values)) lens_values <- 0",
+            f"topic_color <- {r_string(topic.color)}",
+            f"topic_accent <- {r_string(topic.accent)}",
+            f"visual_title <- {r_string(blueprint['validation_lens']['label'] + ' · ' + blueprint['visual_grammar']['label'])}",
+            f"grDevices::svg({r_string(plot_path)}, width = 7.2, height = 4.6, bg = 'white')",
+            "op <- par(mar = c(4.6, 4.8, 3.2, 1.2), bg = 'white')",
+            visual_code,
+            "par(op)",
+            "grDevices::dev.off()",
+            package_code,
+            f"cat('WebAssembly package:', {r_string(blueprint['package_profile']['package'])}, as.character(utils::packageVersion({r_string(blueprint['package_profile']['package'])})), '\\n')",
+            "cat('package calculation:', round(as.numeric(package_result)[1], 4), '\\n')",
+            f"cat('data design:', {r_string(blueprint['data_design']['label'])}, '\\n')",
+            f"cat('validation lens:', {r_string(blueprint['validation_lens']['label'])}, '\\n')",
+            f"cat('visual grammar:', {r_string(blueprint['visual_grammar']['label'])}, '\\n')",
+            "cat('validation summary:', round(lens_summary, 4), '\\n')",
+        ]
+    ) + "\n"
 
 
 def build_analysis_r_code(*, seed: int, start_date: str, n: int, change_point: int, effect: int, topic: Topic, plot_path: str) -> str:
@@ -1587,17 +1946,22 @@ def validate_style_templates(runner: Path) -> dict[str, Any]:
 
 def build_style_validation_spec() -> dict[str, Any]:
     cells: list[dict[str, Any]] = []
+    required_packages: set[str] = set()
     for index, style in enumerate(STYLES):
         topic = TOPICS[index % len(TOPICS)]
+        validation_seed = 3_340_467_507 + index * 137
+        blueprint = build_diversity_blueprint(topic, style, validation_seed, index)
+        required_packages.add(str(blueprint["package_profile"]["package"]))
         style_cells = build_style_cells(
             style=style,
             topic=topic,
             title=f"Template validation: {style.label}",
-            seed=3_340_467_507 + index * 137,
+            seed=validation_seed,
             start_date="2026-01-01",
             n=60,
             change_point=34 + index,
             effect=10 + index,
+            blueprint=blueprint,
         )
         for cell in style_cells:
             cloned = dict(cell)
@@ -1608,6 +1972,7 @@ def build_style_validation_spec() -> dict[str, Any]:
         "schema": "web-r.notebook.style-validation-spec.v1",
         "series_date": "2026-01-01",
         "title": "Web-R Notebook style template validation",
+        "required_packages": sorted(required_packages),
         "cells": cells,
     }
 
@@ -1633,6 +1998,16 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         if cell["mode"] == "r"
     ]
     topic_source_context = spec.get("topic", {}).get("source_context") or {}
+    package_results = runner_result.get("packages", [])
+    installed_packages = {
+        str(item.get("package", "")).strip()
+        for item in package_results
+        if isinstance(item, dict) and str(item.get("package", "")).strip()
+    }
+    required_packages = {str(value).strip() for value in spec.get("required_packages", []) if str(value).strip()}
+    if not required_packages.issubset(installed_packages):
+        missing = sorted(required_packages - installed_packages)
+        raise RuntimeError(f"Web-R Notebook package execution contract failed for: {', '.join(missing)}")
     meta = {
         "version": "split-v1",
         "activeCellId": 2,
@@ -1649,6 +2024,8 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "topic": spec["topic"]["key"],
         "topic_source_context": topic_source_context,
         "style": spec["style"]["key"],
+        "blueprint": spec["blueprint"],
+        "webr_packages": package_results,
         "candidate_attempt": spec.get("candidate_attempt", 0),
         "similarity_guard": spec.get("similarity_guard", {}),
         "input_hash": hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
@@ -1665,6 +2042,8 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "topic": spec["topic"]["key"],
         "topic_source_context": topic_source_context,
         "style": spec["style"]["key"],
+        "blueprint": spec["blueprint"],
+        "webr_packages": package_results,
         "candidate_attempt": spec.get("candidate_attempt", 0),
         "similarity_guard": spec.get("similarity_guard", {}),
         "title": spec["title"],
@@ -1693,7 +2072,7 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "data_rcode": json.dumps(data_rcode, ensure_ascii=False, separators=(",", ":")),
         "data_rcode_result": json.dumps(data_rcode_result, ensure_ascii=False, separators=(",", ":")),
         "data_data": "[]",
-        "data_rpackage": "[]",
+        "data_rpackage": json.dumps(package_results, ensure_ascii=False, separators=(",", ":")),
         "data_meta": json.dumps(meta, ensure_ascii=False, separators=(",", ":")),
     }
 
@@ -1726,6 +2105,29 @@ SELECT
  FORMAT JSONEachRow
 """
     return clickhouse_json_each_row(env, sql)
+
+
+def published_notebook_blueprint_fingerprints(env: dict[str, str]) -> set[str]:
+    sql = f"""
+SELECT ifNull(data_meta, '') AS data_meta
+  FROM webr_webr.notebook
+ WHERE uuid_user = toUUID('{NOTEBOOK_BOT_UUID}')
+ ORDER BY created_at DESC
+ LIMIT 100000
+ FORMAT JSONEachRow
+"""
+    fingerprints: set[str] = set()
+    for row in clickhouse_json_each_row(env, sql):
+        meta = parse_json_maybe(row.get("data_meta"))
+        if not isinstance(meta, dict):
+            continue
+        blueprint = meta.get("blueprint")
+        if not isinstance(blueprint, dict):
+            continue
+        fingerprint = str(blueprint.get("fingerprint", "")).strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            fingerprints.add(fingerprint)
+    return fingerprints
 
 
 def daily_post_exists(env: dict[str, str], series_date: str) -> bool:

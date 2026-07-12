@@ -48,6 +48,11 @@ on:
         required: false
         type: string
         default: "false"
+      webr_notebook_count:
+        description: "Number of distinct Notebook posts to generate in this run (1-5)"
+        required: false
+        type: string
+        default: "1"
   workflow_dispatch:
     inputs:
       scope:
@@ -86,6 +91,10 @@ on:
         description: "Run webR and build the notebook row without inserting it."
         required: false
         default: "false"
+      webr_notebook_count:
+        description: "Number of distinct Notebook posts to generate in this run (1-5)"
+        required: false
+        default: "1"
 
 permissions:
   contents: write
@@ -130,6 +139,9 @@ jobs:
           echo "webr_notebook_date=${{ inputs.webr_notebook_date || '' }}" >> "$GITHUB_OUTPUT"
           echo "webr_notebook_force_new=${{ inputs.webr_notebook_force_new || 'false' }}" >> "$GITHUB_OUTPUT"
           echo "webr_notebook_dry_run=${{ inputs.webr_notebook_dry_run || 'false' }}" >> "$GITHUB_OUTPUT"
+          count="${{ inputs.webr_notebook_count || '1' }}"
+          [[ "$count" =~ ^[1-5]$ ]] || { echo "webr_notebook_count must be between 1 and 5"; exit 1; }
+          echo "webr_notebook_count=$count" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v6
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
@@ -547,10 +559,21 @@ jobs:
           if [[ "${{ steps.opts.outputs.webr_notebook_dry_run }}" == "true" ]]; then
             args+=(--dry-run)
           fi
-          python scripts/generate_webr_notebook_daily.py \
-            --runner scripts/webr_notebook_runner.mjs \
-            --output /tmp/webr_notebook_daily_result.json \
-            "${args[@]}"
+          : > /tmp/webr_notebook_daily_results.jsonl
+          count="${{ steps.opts.outputs.webr_notebook_count }}"
+          for index in $(seq 1 "$count"); do
+            iteration_args=("${args[@]}")
+            if (( index > 1 )); then
+              iteration_args+=(--force-new)
+            fi
+            output="/tmp/webr_notebook_daily_result_${index}.json"
+            python scripts/generate_webr_notebook_daily.py \
+              --runner scripts/webr_notebook_runner.mjs \
+              --output "$output" \
+              "${iteration_args[@]}"
+            python -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), ensure_ascii=False))' "$output" >> /tmp/webr_notebook_daily_results.jsonl
+          done
+          cp "/tmp/webr_notebook_daily_result_${count}.json" /tmp/webr_notebook_daily_result.json
           python - <<'PY'
           import json
           import os

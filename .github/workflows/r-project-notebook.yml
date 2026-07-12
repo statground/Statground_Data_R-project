@@ -18,6 +18,10 @@ on:
         description: "Run webR and build the notebook row without inserting it."
         required: false
         default: "false"
+      webr_notebook_count:
+        description: "Number of distinct Notebook posts to generate in this run (1-5)."
+        required: false
+        default: "1"
 
 permissions:
   contents: write
@@ -31,4 +35,5 @@ jobs:
       webr_notebook_date: ${{ inputs.webr_notebook_date || '' }}
       webr_notebook_force_new: ${{ inputs.webr_notebook_force_new || 'false' }}
       webr_notebook_dry_run: ${{ inputs.webr_notebook_dry_run || 'false' }}
+      webr_notebook_count: ${{ inputs.webr_notebook_count || '1' }}
     secrets: inherit

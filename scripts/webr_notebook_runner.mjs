@@ -108,11 +108,35 @@ function cellFailureContext(cell) {
   return `webR cell ${cell?.id ?? "unknown"}${style} failed: ${firstLine.slice(0, 160)}`;
 }
 
+async function installRequiredPackages(webR, packages) {
+  const uniquePackages = [...new Set((packages || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const installed = [];
+  for (const packageName of uniquePackages) {
+    try {
+      await webR.installPackages([packageName], { quiet: true });
+      const available = await webR.evalRString(
+        `if (requireNamespace(${JSON.stringify(packageName)}, quietly = TRUE)) "true" else "false"`,
+      );
+      if (String(available) !== "true") {
+        throw new Error("package did not load after installation");
+      }
+      const version = await webR.evalRString(
+        `as.character(utils::packageVersion(${JSON.stringify(packageName)}))`,
+      );
+      installed.push({ package: packageName, version: String(version || "") });
+    } catch (error) {
+      throw new Error(`required WebAssembly R package failed: ${packageName}`);
+    }
+  }
+  return installed;
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const spec = JSON.parse(await readFile(args.input, "utf8"));
   const webR = new WebR();
   await webR.init();
+  const installedPackages = await installRequiredPackages(webR, spec.required_packages);
 
   const rResults = [];
   for (const cell of spec.cells || []) {
@@ -139,6 +163,7 @@ async function main() {
       {
         schema: "web-r.notebook.runner-result.v1",
         runtime: "webr",
+        packages: installedPackages,
         r_results: rResults,
         runtime_sessionInfo: String(sessionInfo || ""),
       },
