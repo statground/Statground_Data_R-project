@@ -2062,6 +2062,7 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
     ]
     topic_source_context = spec.get("topic", {}).get("source_context") or {}
     package_results = runner_result.get("packages", [])
+    package_names = notebook_package_names(package_results)
     installed_packages = {
         str(item.get("package", "")).strip()
         for item in package_results
@@ -2135,9 +2136,27 @@ def build_clickhouse_row(spec: dict[str, Any], runner_result: dict[str, Any]) ->
         "data_rcode": json.dumps(data_rcode, ensure_ascii=False, separators=(",", ":")),
         "data_rcode_result": json.dumps(data_rcode_result, ensure_ascii=False, separators=(",", ":")),
         "data_data": "[]",
-        "data_rpackage": json.dumps(package_results, ensure_ascii=False, separators=(",", ":")),
+        # Browser Notebook releases treat data_rpackage as a string array.
+        # Versioned audit objects remain available in data_meta/created_log.
+        "data_rpackage": json.dumps(package_names, ensure_ascii=False, separators=(",", ":")),
         "data_meta": json.dumps(meta, ensure_ascii=False, separators=(",", ":")),
     }
+
+
+def notebook_package_names(package_results: list[Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in package_results:
+        if isinstance(raw, dict):
+            value = raw.get("package") or raw.get("name")
+        else:
+            value = raw
+        name = str(value or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def existing_notebook_titles(env: dict[str, str]) -> set[str]:

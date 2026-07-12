@@ -35,6 +35,19 @@ def row_from_spec(spec: dict) -> dict:
 
 
 class NotebookDiversityTest(unittest.TestCase):
+    def test_data_rpackage_compatibility_keeps_package_names_only(self) -> None:
+        self.assertEqual(
+            ["Matrix", "jsonlite"],
+            notebook.notebook_package_names(
+                [
+                    {"package": "Matrix", "version": "1.7-4"},
+                    {"package": "jsonlite", "version": "2.0.0"},
+                    {"package": "Matrix", "version": "1.7-4"},
+                    "",
+                ]
+            ),
+        )
+
     def test_batch_history_is_excluded_before_distributed_visibility(self) -> None:
         fingerprint = "a" * 64
         result = {
