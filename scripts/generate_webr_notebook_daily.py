@@ -477,6 +477,11 @@ def main() -> int:
     parser.add_argument("--date", default="", help="series date in YYYY-MM-DD, default: today in Asia/Seoul")
     parser.add_argument("--runner", default="scripts/webr_notebook_runner.mjs", help="Node webR runner path")
     parser.add_argument("--output", default="", help="write generated notebook JSON summary to this path")
+    parser.add_argument(
+        "--batch-history",
+        default="",
+        help="optional JSONL results from earlier posts in the same batch; excludes them before DB visibility catches up",
+    )
     parser.add_argument("--dry-run", action="store_true", help="run WebR and build the row without inserting it")
     parser.add_argument("--force-new", action="store_true", help="allow more than one generated post for the same date")
     parser.add_argument("--validate-style-templates", action="store_true", help="run every Notebook style template through webR and exit")
@@ -493,6 +498,13 @@ def main() -> int:
     existing_titles = existing_notebook_titles(env)
     recent_rows = recent_notebook_content_rows(env)
     published_blueprints = published_notebook_blueprint_fingerprints(env)
+    if args.batch_history:
+        merge_batch_history_exclusions(
+            Path(args.batch_history),
+            existing_titles=existing_titles,
+            recent_rows=recent_rows,
+            published_blueprints=published_blueprints,
+        )
 
     if not args.force_new and daily_post_exists(env, series_date):
         result = {
@@ -547,6 +559,7 @@ def main() -> int:
         "visual_grammar": spec["blueprint"]["visual_grammar"]["key"],
         "narrative_frame": spec["blueprint"]["narrative_frame"]["key"],
         "webr_package": spec["blueprint"]["package_profile"]["package"],
+        "webr_package_profile": spec["blueprint"]["package_profile"]["key"],
         "similarity_score": spec.get("similarity_guard", {}).get("max_similarity"),
         "similarity_matched_title": spec.get("similarity_guard", {}).get("matched_title", ""),
         "r_cell_count": len([cell for cell in spec["cells"] if cell["mode"] == "r"]),
@@ -572,6 +585,56 @@ def parse_series_date(value: str) -> str:
         datetime.strptime(value, "%Y-%m-%d")
         return value
     return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def merge_batch_history_exclusions(
+    path: Path,
+    *,
+    existing_titles: set[str],
+    recent_rows: list[dict[str, Any]],
+    published_blueprints: set[str],
+) -> int:
+    """Exclude earlier batch results without waiting for Distributed-table visibility."""
+    if not path.exists():
+        return 0
+
+    added_rows: list[dict[str, Any]] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        result = json.loads(line)
+        title = str(result.get("title", "")).strip()
+        fingerprint = str(result.get("blueprint_fingerprint", "")).strip().lower()
+        if title:
+            existing_titles.add(title)
+        if re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            published_blueprints.add(fingerprint)
+
+        blueprint = {
+            "fingerprint": fingerprint,
+            "data_design": {"key": str(result.get("data_design", ""))},
+            "validation_lens": {"key": str(result.get("validation_lens", ""))},
+            "visual_grammar": {"key": str(result.get("visual_grammar", ""))},
+            "narrative_frame": {"key": str(result.get("narrative_frame", ""))},
+            "package_profile": {
+                "key": str(result.get("webr_package_profile") or result.get("webr_package", "")),
+            },
+        }
+        added_rows.append(
+            {
+                "title": title,
+                "description": "",
+                "data_markdown": "",
+                "data_rcode": "",
+                "data_meta": json.dumps({"blueprint": blueprint}, ensure_ascii=False, separators=(",", ":")),
+                "created_at": str(result.get("series_date", "")),
+            }
+        )
+
+    if added_rows:
+        recent_rows[:0] = reversed(added_rows)
+    return len(added_rows)
 
 
 def recent_notebook_style_keys(rows: list[dict[str, Any]]) -> list[str]:
@@ -2160,7 +2223,11 @@ def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, An
 
 
 def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -> dict[str, Any]:
-    sql = f"INSERT INTO {table} SETTINGS insert_deduplicate = 1 FORMAT JSONEachRow\n" + json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+    sql = (
+        f"INSERT INTO {table} SETTINGS insert_deduplicate = 1, insert_distributed_sync = 1 FORMAT JSONEachRow\n"
+        + json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+        + "\n"
+    )
     attempts = max(1, env_int(env, "WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS", 6))
     backoff = max(0.0, env_float(env, "WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS", 10.0))
     last_message = ""

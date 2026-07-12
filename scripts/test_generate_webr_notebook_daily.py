@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,38 @@ def row_from_spec(spec: dict) -> dict:
 
 
 class NotebookDiversityTest(unittest.TestCase):
+    def test_batch_history_is_excluded_before_distributed_visibility(self) -> None:
+        fingerprint = "a" * 64
+        result = {
+            "title": "이미 생성된 배치 제목",
+            "series_date": "2026-07-12",
+            "blueprint_fingerprint": fingerprint,
+            "data_design": "clustered-sample",
+            "validation_lens": "bootstrap-stability",
+            "visual_grammar": "calibration-curve",
+            "narrative_frame": "communication",
+            "webr_package": "jsonlite",
+            "webr_package_profile": "jsonlite-roundtrip",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.jsonl"
+            path.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
+            titles: set[str] = set()
+            recent: list[dict[str, object]] = []
+            fingerprints: set[str] = set()
+            count = notebook.merge_batch_history_exclusions(
+                path,
+                existing_titles=titles,
+                recent_rows=recent,
+                published_blueprints=fingerprints,
+            )
+
+        self.assertEqual(1, count)
+        self.assertIn(result["title"], titles)
+        self.assertIn(fingerprint, fingerprints)
+        meta = json.loads(str(recent[0]["data_meta"]))
+        self.assertEqual("jsonlite-roundtrip", meta["blueprint"]["package_profile"]["key"])
+
     def test_blueprint_space_covers_one_daily_post_for_one_hundred_years(self) -> None:
         blueprint = notebook.build_diversity_blueprint(notebook.TOPICS[0], notebook.STYLES[0], 12345, 0)
         self.assertGreaterEqual(blueprint["space_size_per_topic"], 36525)

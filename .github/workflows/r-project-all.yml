@@ -570,6 +570,7 @@ jobs:
             python scripts/generate_webr_notebook_daily.py \
               --runner scripts/webr_notebook_runner.mjs \
               --output "$output" \
+              --batch-history /tmp/webr_notebook_daily_results.jsonl \
               "${iteration_args[@]}"
             python -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), ensure_ascii=False))' "$output" >> /tmp/webr_notebook_daily_results.jsonl
           done
@@ -578,6 +579,17 @@ jobs:
           import json
           import os
           from pathlib import Path
+
+          results = [json.loads(line) for line in Path("/tmp/webr_notebook_daily_results.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+          expected = int("${{ steps.opts.outputs.webr_notebook_count }}")
+          if len(results) != expected:
+              raise SystemExit(f"Notebook batch produced {len(results)} results; expected {expected}")
+          if not all(item.get("inserted") or item.get("dry_run") for item in results):
+              raise SystemExit("Notebook batch contains a skipped or deferred insert")
+          for key in ("share_uuid", "title", "blueprint_fingerprint", "data_design", "validation_lens", "visual_grammar", "narrative_frame", "webr_package"):
+              values = [str(item.get(key, "")) for item in results]
+              if any(not value for value in values) or len(set(values)) != expected:
+                  raise SystemExit(f"Notebook batch diversity contract failed for {key}: unique={len(set(values))}/{expected}")
 
           result = json.loads(Path("/tmp/webr_notebook_daily_result.json").read_text(encoding="utf-8"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
