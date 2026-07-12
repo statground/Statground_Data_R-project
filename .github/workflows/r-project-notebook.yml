@@ -4,6 +4,9 @@ on:
   schedule:
     # 20:23 KST. Runs after digest generation and before CDN publish.
     - cron: "23 11 * * *"
+  push:
+    tags:
+      - "webr-notebook-batch-5-*"
   workflow_dispatch:
     inputs:
       webr_notebook_date:
@@ -33,7 +36,7 @@ jobs:
     with:
       scope: notebook
       webr_notebook_date: ${{ inputs.webr_notebook_date || '' }}
-      webr_notebook_force_new: ${{ inputs.webr_notebook_force_new || 'false' }}
+      webr_notebook_force_new: ${{ startsWith(github.ref, 'refs/tags/webr-notebook-batch-5-') && 'true' || inputs.webr_notebook_force_new || 'false' }}
       webr_notebook_dry_run: ${{ inputs.webr_notebook_dry_run || 'false' }}
-      webr_notebook_count: ${{ inputs.webr_notebook_count || '1' }}
+      webr_notebook_count: ${{ startsWith(github.ref, 'refs/tags/webr-notebook-batch-5-') && '5' || inputs.webr_notebook_count || '1' }}
     secrets: inherit
