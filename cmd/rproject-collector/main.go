@@ -301,6 +301,8 @@ func runPackage(ctx context.Context, args []string) error {
 	metadataLimit := fs.Int("metadata-limit", envInt("RPKG_CRAN_METADATA_LIMIT", 0), "CRAN metadata limit")
 	downloadTop := fs.Int("download-top", envInt("RPKG_DOWNLOAD_TOP", 100), "cranlogs top package count")
 	reverseLimit := fs.Int("reverse-limit", envInt("RPKG_REVERSE_DEPENDENCY_LIMIT", 0), "reverse dependency edge limit")
+	reverseShardCount := fs.Int("reverse-shard-count", envInt("RPKG_REVERSE_DEPENDENCY_SHARD_COUNT", 1), "number of stable CRAN reverse dependency shards")
+	reverseShardIndex := fs.Int("reverse-shard-index", envInt("RPKG_REVERSE_DEPENDENCY_SHARD_INDEX", 0), "zero-based CRAN reverse dependency shard index")
 	checkLimit := fs.Int("check-limit", envInt("RPKG_CRAN_CHECK_LIMIT", 0), "CRAN check row limit")
 	archiveLimit := fs.Int("archive-limit", envInt("RPKG_CRAN_ARCHIVE_LIMIT", 0), "CRAN archive row limit")
 	taskViewLimit := fs.Int("task-view-limit", envInt("RPKG_CRAN_TASK_VIEW_LIMIT", 0), "CRAN Task View page limit")
@@ -326,6 +328,12 @@ func runPackage(ctx context.Context, args []string) error {
 	osvLimit := fs.Int("osv-limit", envInt("RPKG_OSV_LIMIT", 100), "OSV package query limit")
 	bibliometricLimit := fs.Int("bibliometric-limit", envInt("RPKG_BIBLIOMETRIC_LIMIT", 40), "OpenAlex bibliometric query limit")
 	fs.Parse(args)
+	if *reverseShardCount < 1 {
+		return fmt.Errorf("reverse-shard-count must be at least 1")
+	}
+	if *reverseShardIndex < 0 || *reverseShardIndex >= *reverseShardCount {
+		return fmt.Errorf("reverse-shard-index must be between 0 and %d", *reverseShardCount-1)
+	}
 
 	pub := newPublisher(*topic, "statground-rpkg-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
@@ -373,6 +381,8 @@ func runPackage(ctx context.Context, args []string) error {
 			metadataLimit:                       *metadataLimit,
 			downloadTop:                         *downloadTop,
 			reverseLimit:                        *reverseLimit,
+			reverseShardCount:                   *reverseShardCount,
+			reverseShardIndex:                   *reverseShardIndex,
 			checkLimit:                          *checkLimit,
 			archiveLimit:                        *archiveLimit,
 			taskViewLimit:                       *taskViewLimit,
@@ -2521,6 +2531,8 @@ type packageJobLimits struct {
 	metadataLimit                       int
 	downloadTop                         int
 	reverseLimit                        int
+	reverseShardCount                   int
+	reverseShardIndex                   int
 	checkLimit                          int
 	archiveLimit                        int
 	taskViewLimit                       int
@@ -2562,6 +2574,8 @@ func collectPackageJob(job string, records func() ([]cranRecord, error), limits 
 		if err != nil {
 			return nil, err
 		}
+		rows = selectReverseDependencyShard(recordsByPackageName(rows), limits.reverseShardCount, limits.reverseShardIndex)
+		fmt.Printf("[package] reverse_dependency_shard index=%d count=%d packages=%d\n", limits.reverseShardIndex, limits.reverseShardCount, len(rows))
 		return collectReverseDependencies(rows, limits.reverseLimit), nil
 	case "cran-checks":
 		return collectCRANChecks(limits.checkLimit)
@@ -2849,6 +2863,27 @@ func collectReverseDependencies(records []cranRecord, limit int) []genericEvent 
 		}
 	}
 	return events
+}
+
+func recordsByPackageName(records []cranRecord) []cranRecord {
+	sorted := append([]cranRecord(nil), records...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return strings.ToLower(sorted[i]["Package"]) < strings.ToLower(sorted[j]["Package"])
+	})
+	return sorted
+}
+
+func selectReverseDependencyShard(records []cranRecord, shardCount, shardIndex int) []cranRecord {
+	if shardCount <= 1 {
+		return records
+	}
+	selected := make([]cranRecord, 0, (len(records)+shardCount-1)/shardCount)
+	for index, record := range records {
+		if index%shardCount == shardIndex {
+			selected = append(selected, record)
+		}
+	}
+	return selected
 }
 
 func collectCRANChecks(limit int) ([]genericEvent, error) {

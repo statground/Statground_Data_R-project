@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,23 @@ func TestSelectPackagePageRecordsUsesForcedThenStableBatch(t *testing.T) {
 	}
 	if batch.ForcedCount != 1 || batch.SelectedCount != 3 || batch.NextCursorKey != "b" {
 		t.Fatalf("batch metadata = %+v", batch)
+	}
+}
+
+func TestSelectReverseDependencyShardCoversSortedRecordsOnce(t *testing.T) {
+	records := recordsByPackageName([]cranRecord{
+		{"Package": "delta"}, {"Package": "alpha"}, {"Package": "charlie"}, {"Package": "bravo"}, {"Package": "echo"},
+	})
+	got := make([]string, 0, len(records))
+	for shard := 0; shard < 4; shard++ {
+		for _, record := range selectReverseDependencyShard(records, 4, shard) {
+			got = append(got, record["Package"])
+		}
+	}
+	sort.Strings(got)
+	want := []string{"alpha", "bravo", "charlie", "delta", "echo"}
+	if !sameStrings(got, want) {
+		t.Fatalf("sharded packages got %v want %v", got, want)
 	}
 }
 

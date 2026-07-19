@@ -36,16 +36,22 @@ jobs:
   package_dependencies:
     if: github.event_name == 'schedule'
     needs: package_metadata
-    name: Package dependency graph
+    name: Package dependency graph (shard ${{ matrix.shard_index }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3]
     uses: ./.github/workflows/r-project-all.yml
     with:
       scope: package
       r_package_job: cran-reverse-dependencies
+      r_package_reverse_shard_count: "4"
+      r_package_reverse_shard_index: ${{ format('{0}', matrix.shard_index) }}
     secrets: inherit
 
   package_pages:
     if: github.event_name == 'schedule'
-    needs: package_dependencies
+    needs: package_metadata
     name: Package pages and repositories
     uses: ./.github/workflows/r-project-all.yml
     with:
@@ -55,7 +61,7 @@ jobs:
 
   package_external_signals:
     if: github.event_name == 'schedule'
-    needs: package_pages
+    needs: package_metadata
     name: Package external signals
     uses: ./.github/workflows/r-project-all.yml
     with:

@@ -13,6 +13,16 @@ on:
         required: false
         type: string
         default: "all"
+      r_package_reverse_shard_count:
+        description: "Number of stable CRAN reverse dependency shards"
+        required: false
+        type: string
+        default: "1"
+      r_package_reverse_shard_index:
+        description: "Zero-based CRAN reverse dependency shard index"
+        required: false
+        type: string
+        default: "0"
       r_youtube_job:
         description: "R YouTube jobs: all, seeds, pages, search, links, videos, transcripts, comments, or backfill-metadata"
         required: false
@@ -109,7 +119,7 @@ env:
   RPROJECT_PUBLISH_MODE: ${{ vars.RPROJECT_PUBLISH_MODE || 'clickhouse' }}
 
 concurrency:
-  group: r-project-${{ inputs.scope || 'all' }}-${{ inputs.r_package_job || 'default' }}
+  group: r-project-${{ inputs.scope || 'all' }}-${{ inputs.r_package_job || 'default' }}-${{ inputs.r_package_reverse_shard_index || '0' }}
   cancel-in-progress: true
 
 jobs:
@@ -132,6 +142,8 @@ jobs:
           esac
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "r_package_job=${{ inputs.r_package_job || vars.RPKG_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
+          echo "r_package_reverse_shard_count=${{ inputs.r_package_reverse_shard_count || '1' }}" >> "$GITHUB_OUTPUT"
+          echo "r_package_reverse_shard_index=${{ inputs.r_package_reverse_shard_index || '0' }}" >> "$GITHUB_OUTPUT"
           echo "r_youtube_job=${{ inputs.r_youtube_job || vars.R_YOUTUBE_JOB || 'all' }}" >> "$GITHUB_OUTPUT"
           echo "rblogger_rebuild_board=${{ inputs.rblogger_rebuild_board || 'false' }}" >> "$GITHUB_OUTPUT"
           echo "mastodon_backfill_board=${{ inputs.mastodon_backfill_board || 'false' }}" >> "$GITHUB_OUTPUT"
@@ -222,6 +234,8 @@ jobs:
           RPKG_CRAN_METADATA_LIMIT: ${{ vars.RPKG_CRAN_METADATA_LIMIT || '0' }}
           RPKG_DOWNLOAD_TOP: ${{ vars.RPKG_DOWNLOAD_TOP || '50' }}
           RPKG_REVERSE_DEPENDENCY_LIMIT: ${{ vars.RPKG_REVERSE_DEPENDENCY_LIMIT || '0' }}
+          RPKG_REVERSE_DEPENDENCY_SHARD_COUNT: ${{ steps.opts.outputs.r_package_reverse_shard_count }}
+          RPKG_REVERSE_DEPENDENCY_SHARD_INDEX: ${{ steps.opts.outputs.r_package_reverse_shard_index }}
           RPKG_CRAN_CHECK_LIMIT: ${{ vars.RPKG_CRAN_CHECK_LIMIT || '0' }}
           RPKG_CRAN_ARCHIVE_LIMIT: ${{ vars.RPKG_CRAN_ARCHIVE_LIMIT || '0' }}
           RPKG_CRAN_TASK_VIEW_LIMIT: ${{ vars.RPKG_CRAN_TASK_VIEW_LIMIT || '0' }}
