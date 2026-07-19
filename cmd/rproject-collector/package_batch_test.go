@@ -93,6 +93,24 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 	if !strings.Contains(text, "r-package-collection-*") || strings.Count(text, "github.event_name == 'push'") != 4 {
 		t.Fatal("package tag validation trigger must use the full split DAG")
 	}
+	if !strings.Contains(text, "max-parallel: 2") {
+		t.Fatal("dependency shards must cap parallel ClickHouse writers")
+	}
+	dependencyJob := text[strings.Index(text, "  package_dependencies:"):strings.Index(text, "  package_pages:")]
+	if strings.Contains(dependencyJob, "needs: package_metadata") {
+		t.Fatal("dependency shards must not wait for the long metadata/archive group")
+	}
+}
+
+func TestReverseDependencyWorkflowUsesLargerClickHouseChunks(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/r-project-all.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	if !strings.Contains(text, "RPKG_REVERSE_DEPENDENCY_CLICKHOUSE_CHUNK_SIZE || '500'") {
+		t.Fatal("reverse dependency workflow must use the larger bounded ClickHouse chunk default")
+	}
 }
 
 func TestFixedPartitionBalancerUsesRequestedPartition(t *testing.T) {

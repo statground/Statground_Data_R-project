@@ -8220,9 +8220,15 @@ func insertGenericRawEventsDirect(ctx context.Context, events []genericEvent) (g
 		return target, err
 	}
 	chunkSize := maxInt(1, envInt("RPROJECT_CLICKHOUSE_CHUNK_SIZE", envInt("RPKG_CLICKHOUSE_FALLBACK_CHUNK_SIZE", minInt(envInt("KAFKA_WRITE_CHUNK_SIZE", 100), 10))))
-	for _, chunk := range chunkGenericEvents(events, chunkSize) {
+	chunks := chunkGenericEvents(events, chunkSize)
+	progressEvery := maxInt(1, len(chunks)/10)
+	for index, chunk := range chunks {
 		if err := insertGenericRawEventChunkWithSplit(ctx, cfg, target, chunk); err != nil {
 			return target, err
+		}
+		completed := index + 1
+		if len(chunks) > 1 && (completed == 1 || completed == len(chunks) || completed%progressEvery == 0) {
+			fmt.Printf("[clickhouse] direct publish progress target=%s chunks=%d/%d events=%d/%d\n", target.label, completed, len(chunks), minInt(completed*chunkSize, len(events)), len(events))
 		}
 	}
 	return target, nil

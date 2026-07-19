@@ -38,10 +38,10 @@ jobs:
 
   package_dependencies:
     if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
-    needs: package_metadata
     name: Package dependency graph (shard ${{ matrix.shard_index }})
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         shard_index: [0, 1, 2, 3]
     uses: ./.github/workflows/r-project-all.yml
