@@ -113,14 +113,21 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 	}
 }
 
-func TestReverseDependencyWorkflowUsesLargerClickHouseChunks(t *testing.T) {
+func TestBulkPackageWorkflowsUseBoundedLargerClickHouseChunks(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/r-project-all.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(workflow)
-	if !strings.Contains(text, "RPKG_REVERSE_DEPENDENCY_CLICKHOUSE_CHUNK_SIZE || '500'") {
-		t.Fatal("reverse dependency workflow must use the larger bounded ClickHouse chunk default")
+	for _, contract := range []string{
+		"r_package_job == 'cran-reverse-dependencies' && (vars.RPKG_REVERSE_DEPENDENCY_CLICKHOUSE_CHUNK_SIZE || '500')",
+		"r_package_job == 'cran-archive' && (vars.RPKG_CRAN_ARCHIVE_CLICKHOUSE_CHUNK_SIZE || '500')",
+		"r_package_job == 'cran-task-views' && (vars.RPKG_CRAN_TASK_VIEW_CLICKHOUSE_CHUNK_SIZE || '250')",
+		"vars.RPROJECT_CLICKHOUSE_CHUNK_SIZE || '50'",
+	} {
+		if !strings.Contains(text, contract) {
+			t.Fatalf("bulk package workflow chunk contract missing %q", contract)
+		}
 	}
 }
 

@@ -224,7 +224,7 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
           CH_DATABASE: Data_R_Package_Raw
-          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ steps.opts.outputs.r_package_job == 'cran-reverse-dependencies' && (vars.RPKG_REVERSE_DEPENDENCY_CLICKHOUSE_CHUNK_SIZE || '500') || (vars.RPROJECT_CLICKHOUSE_CHUNK_SIZE || '50') }}
+          RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ steps.opts.outputs.r_package_job == 'cran-reverse-dependencies' && (vars.RPKG_REVERSE_DEPENDENCY_CLICKHOUSE_CHUNK_SIZE || '500') || steps.opts.outputs.r_package_job == 'cran-archive' && (vars.RPKG_CRAN_ARCHIVE_CLICKHOUSE_CHUNK_SIZE || '500') || steps.opts.outputs.r_package_job == 'cran-task-views' && (vars.RPKG_CRAN_TASK_VIEW_CLICKHOUSE_CHUNK_SIZE || '250') || (vars.RPROJECT_CLICKHOUSE_CHUNK_SIZE || '50') }}
           RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.RPROJECT_CLICKHOUSE_ATTEMPTS || '3' }}
           RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC: ${{ vars.RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC || 'false' }}
           RPKG_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RPKG_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
