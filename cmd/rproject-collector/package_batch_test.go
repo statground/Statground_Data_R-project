@@ -84,13 +84,13 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 		t.Fatal("manual custom worker must exclude the all input")
 	}
 	splitManualCondition := "github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all')"
-	if got := strings.Count(text, splitManualCondition); got != 4 {
-		t.Fatalf("manual all split job conditions = %d, want 4", got)
+	if got := strings.Count(text, splitManualCondition); got != 7 {
+		t.Fatalf("manual all split job conditions = %d, want 7", got)
 	}
 	if !strings.Contains(text, "shard_index: [0, 1, 2, 3]") {
 		t.Fatal("manual all path must retain four dependency shards")
 	}
-	if !strings.Contains(text, "r-package-collection-*") || strings.Count(text, "github.event_name == 'push'") != 4 {
+	if !strings.Contains(text, "r-package-collection-*") || strings.Count(text, "github.event_name == 'push'") != 7 {
 		t.Fatal("package tag validation trigger must use the full split DAG")
 	}
 	if !strings.Contains(text, "max-parallel: 2") {
@@ -99,6 +99,17 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 	dependencyJob := text[strings.Index(text, "  package_dependencies:"):strings.Index(text, "  package_pages:")]
 	if strings.Contains(dependencyJob, "needs: package_metadata") {
 		t.Fatal("dependency shards must not wait for the long metadata/archive group")
+	}
+	for _, contract := range []string{
+		"r_package_job: cran-metadata,cran-downloads,cran-checks",
+		"r_package_job: cran-archive",
+		"r_package_job: cran-task-views",
+		"r_package_job: r-core-news,package-news",
+		"needs: package_core_metadata",
+	} {
+		if !strings.Contains(text, contract) {
+			t.Fatalf("package split workflow missing %q", contract)
+		}
 	}
 }
 

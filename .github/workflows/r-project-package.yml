@@ -27,13 +27,40 @@ jobs:
       r_package_job: ${{ inputs.r_package_job || 'all' }}
     secrets: inherit
 
-  package_metadata:
+  package_core_metadata:
     if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
-    name: Package metadata and release signals
+    name: Package core metadata
     uses: ./.github/workflows/r-project-all.yml
     with:
       scope: package
-      r_package_job: cran-metadata,cran-downloads,cran-checks,cran-archive,cran-task-views,r-core-news,package-news
+      r_package_job: cran-metadata,cran-downloads,cran-checks
+    secrets: inherit
+
+  package_archive:
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    name: Package archive history
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-archive
+    secrets: inherit
+
+  package_task_views:
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    name: Package task views
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: cran-task-views
+    secrets: inherit
+
+  package_news:
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    name: Package release news
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: package
+      r_package_job: r-core-news,package-news
     secrets: inherit
 
   package_dependencies:
@@ -54,7 +81,7 @@ jobs:
 
   package_pages:
     if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
-    needs: package_metadata
+    needs: package_core_metadata
     name: Package pages and repositories
     uses: ./.github/workflows/r-project-all.yml
     with:
@@ -64,7 +91,7 @@ jobs:
 
   package_external_signals:
     if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
-    needs: package_metadata
+    needs: package_core_metadata
     name: Package external signals
     uses: ./.github/workflows/r-project-all.yml
     with:
