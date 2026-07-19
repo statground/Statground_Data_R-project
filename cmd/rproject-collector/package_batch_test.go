@@ -90,6 +90,9 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 	if !strings.Contains(text, "shard_index: [0, 1, 2, 3]") {
 		t.Fatal("manual all path must retain four dependency shards")
 	}
+	if !strings.Contains(text, "r-package-collection-*") || strings.Count(text, "github.event_name == 'push'") != 4 {
+		t.Fatal("package tag validation trigger must use the full split DAG")
+	}
 }
 
 func TestFixedPartitionBalancerUsesRequestedPartition(t *testing.T) {

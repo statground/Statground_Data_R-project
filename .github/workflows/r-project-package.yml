@@ -4,6 +4,9 @@ on:
   schedule:
     # 00:51 KST. Placed between the late Polymarket and early NAVER windows.
     - cron: "51 15 * * *"
+  push:
+    tags:
+      - "r-package-collection-*"
   workflow_dispatch:
     inputs:
       r_package_job:
@@ -25,7 +28,7 @@ jobs:
     secrets: inherit
 
   package_metadata:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
     name: Package metadata and release signals
     uses: ./.github/workflows/r-project-all.yml
     with:
@@ -34,7 +37,7 @@ jobs:
     secrets: inherit
 
   package_dependencies:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
     needs: package_metadata
     name: Package dependency graph (shard ${{ matrix.shard_index }})
     strategy:
@@ -50,7 +53,7 @@ jobs:
     secrets: inherit
 
   package_pages:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
     needs: package_metadata
     name: Package pages and repositories
     uses: ./.github/workflows/r-project-all.yml
@@ -60,7 +63,7 @@ jobs:
     secrets: inherit
 
   package_external_signals:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
+    if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all'))
     needs: package_metadata
     name: Package external signals
     uses: ./.github/workflows/r-project-all.yml
