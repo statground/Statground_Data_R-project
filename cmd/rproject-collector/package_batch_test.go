@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -70,6 +71,24 @@ func TestSelectReverseDependencyShardCoversSortedRecordsOnce(t *testing.T) {
 	want := []string{"alpha", "bravo", "charlie", "delta", "echo"}
 	if !sameStrings(got, want) {
 		t.Fatalf("sharded packages got %v want %v", got, want)
+	}
+}
+
+func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/r-project-package.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	if !strings.Contains(text, "inputs.r_package_job != 'all'") {
+		t.Fatal("manual custom worker must exclude the all input")
+	}
+	splitManualCondition := "github.event_name == 'workflow_dispatch' && (inputs.r_package_job == '' || inputs.r_package_job == 'all')"
+	if got := strings.Count(text, splitManualCondition); got != 4 {
+		t.Fatalf("manual all split job conditions = %d, want 4", got)
+	}
+	if !strings.Contains(text, "shard_index: [0, 1, 2, 3]") {
+		t.Fatal("manual all path must retain four dependency shards")
 	}
 }
 
