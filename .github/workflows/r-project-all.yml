@@ -697,6 +697,9 @@ jobs:
             --language ko \
             --previous-release-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_packages@${previous_package_commit}" \
             > /tmp/r_package_export.json
+          python scripts/validate_r_package_registry_v2.py \
+            --cdn-root web-r_CDN2_packages \
+            --language ko
           python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
           python - <<'PY'
           import json

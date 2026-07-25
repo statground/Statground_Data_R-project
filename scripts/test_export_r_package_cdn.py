@@ -16,7 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from export_r_ecosystem_cdn import derive_key  # noqa: E402
+from export_r_ecosystem_cdn import derive_key, write_json_atomic  # noqa: E402
 from export_r_package_cdn import (  # noqa: E402
     PACKAGE_REGISTRY_SCHEMA,
     build_package_registry_v2,
@@ -27,6 +27,7 @@ from export_r_package_cdn import (  # noqa: E402
     package_detail_spool_path,
     package_v2_shard_id,
 )
+from validate_r_package_registry_v2 import RegistryValidationError, validate_registry_v2  # noqa: E402
 
 
 def decode_b64url(value: str) -> bytes:
@@ -113,7 +114,10 @@ class PackageRegistryV2Tests(unittest.TestCase):
             versions_by_key=self.versions,
             news_manifest=self.news_manifest,
             news_document_metadata=self.news_document_metadata,
-            previous_release_base_url="https://cdn.example.invalid/repo@0123456789abcdef",
+            previous_release_base_url=(
+                "https://cdn.jsdelivr.net/gh/statground/"
+                "web-r_CDN2_packages@0123456789abcdef0123456789abcdef01234567"
+            ),
         )
 
     def test_registry_counts_digests_and_assignment(self) -> None:
@@ -142,6 +146,30 @@ class PackageRegistryV2Tests(unittest.TestCase):
                     seen.add(item_key)
                     self.assertEqual(int(row["range"]["bucket"]), package_v2_shard_id(item_key, 16))
             self.assertEqual(expected_count, len(seen))
+
+    def test_generated_registry_passes_publication_validation(self) -> None:
+        documents, _ = self.build()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for rel_path, document in documents.items():
+                write_json_atomic(root / rel_path, document)
+            result = validate_registry_v2(root, self.key)
+        self.assertEqual(64, result["shards"])
+        self.assertEqual(
+            {"catalog": 40, "details": 40, "versions": 40, "news": 9},
+            result["totals"],
+        )
+
+    def test_publication_validation_rejects_digest_corruption(self) -> None:
+        documents, _ = self.build()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for rel_path, document in documents.items():
+                write_json_atomic(root / rel_path, document)
+            path = root / "packages/ko/v2/catalog/00.json"
+            path.write_bytes(path.read_bytes() + b" ")
+            with self.assertRaises(RegistryValidationError):
+                validate_registry_v2(root, self.key)
 
     def test_shards_and_release_id_are_stable_when_only_generated_at_changes(self) -> None:
         first_documents, first_result = self.build("2026-07-25T00:00:00+00:00")
