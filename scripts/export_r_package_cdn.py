@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from export_r_ecosystem_cdn import (
     fetch_json_rows,
     first_text,
     is_transient_clickhouse_export_failure,
+    iter_json_rows,
     load_env,
     normalize_language,
     normalize_uuid,
@@ -32,6 +35,14 @@ from export_r_ecosystem_cdn import (
 
 PACKAGE_MANIFEST_SCHEMA = "web-r.r-ecosystem.package-manifest.plain.v1"
 PACKAGE_VERSIONS_SCHEMA = "web-r.r-ecosystem.package-versions.plain.v1"
+PACKAGE_REGISTRY_SCHEMA = "web-r.r-ecosystem.package-registry.plain.v2"
+PACKAGE_SHARD_SCHEMAS = {
+    "catalog": "web-r.r-ecosystem.package-catalog-shard.plain.v2",
+    "details": "web-r.r-ecosystem.package-detail-index-shard.plain.v2",
+    "versions": "web-r.r-ecosystem.package-versions-shard.plain.v2",
+    "news": "web-r.r-ecosystem.package-news-shard.plain.v2",
+}
+DEFAULT_V2_SHARD_COUNT = 16
 
 PACKAGE_NEWS_TITLE_SQL = r"""
 coalesce(
@@ -115,6 +126,18 @@ def main() -> int:
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--package-limit", type=int, default=0, help="optional package row limit for smoke exports")
     parser.add_argument("--news-limit", type=int, default=0, help="optional package news limit for smoke exports")
+    parser.add_argument(
+        "--v2-shards",
+        type=int,
+        default=DEFAULT_V2_SHARD_COUNT,
+        choices=(16, 32),
+        help="stable SHA-256 shard count for the shadow registry v2",
+    )
+    parser.add_argument(
+        "--previous-release-base-url",
+        default="",
+        help="optional exact previous commit base URL recorded for rollback",
+    )
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
@@ -128,7 +151,6 @@ def main() -> int:
         package_rows = fetch_json_rows(env, package_sql(args.package_limit), query_name="r_package_packages")
         news_rows = fetch_json_rows(env, package_news_sql(args.news_limit), query_name="r_package_news")
         version_rows = fetch_json_rows(env, package_version_sql(), query_name="r_package_versions")
-        detail_groups = fetch_package_detail_groups(env)
     except ClickHouseExportError as exc:
         fail_open = env_bool(
             env,
@@ -274,10 +296,11 @@ def main() -> int:
             },
         }
 
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     manifest = {
         "schema": PACKAGE_MANIFEST_SCHEMA,
         "language": language,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": generated_at,
         "packages": packages,
         "news": news_manifest,
     }
@@ -287,47 +310,88 @@ def main() -> int:
         "generated_at": manifest["generated_at"],
         "versions": {key: rows for key, rows in versions_by_key.items() if key in packages and rows},
     }
-    detail_payloads = build_package_detail_payloads(
-        details_by_package,
-        detail_paths_by_package,
-        versions_by_package,
-        detail_groups,
+    try:
+        with tempfile.TemporaryDirectory(prefix="web-r-package-detail-spool.") as spool_dir:
+            spool_counts = spool_package_detail_groups(
+                env,
+                Path(spool_dir),
+                args.v2_shards,
+                set(details_by_package),
+            )
+            detail_document_metadata = build_package_detail_documents_from_spool(
+                spool_root=Path(spool_dir),
+                shard_count=args.v2_shards,
+                details_by_package=details_by_package,
+                detail_paths_by_package=detail_paths_by_package,
+                versions_by_package=versions_by_package,
+                key=key,
+                language=language,
+                cdn_root=cdn_root,
+                dry_run=args.dry_run,
+            )
+    except ClickHouseExportError as exc:
+        fail_open = env_bool(
+            env,
+            "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+        )
+        if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            print(
+                f"[warn] R package CDN export deferred query={exc.query_name} reason={exc.category}",
+                file=sys.stderr,
+            )
+            print(json.dumps(deferred_package_export_result(exc), ensure_ascii=False))
+            return 0
+        raise SystemExit(str(exc)) from exc
+
+    news_document_metadata: dict[str, dict[str, Any]] = {}
+    for uuid, payload in news_payloads.items():
+        rel_path = news_manifest[uuid]["path"]
+        encrypted = encrypt_document(payload, key, rel_path, language, uuid, compress=True)
+        news_document_metadata[uuid] = document_metadata(rel_path, encrypted)
+        if not args.dry_run:
+            write_json_atomic(cdn_root / rel_path, encrypted)
+
+    v2_documents, v2_result = build_package_registry_v2(
+        language=language,
+        generated_at=generated_at,
+        shard_count=args.v2_shards,
+        key=key,
+        packages=packages,
+        detail_paths_by_package=detail_paths_by_package,
+        detail_document_metadata=detail_document_metadata,
+        versions_by_key=versions_manifest["versions"],
+        news_manifest=news_manifest,
+        news_document_metadata=news_document_metadata,
+        previous_release_base_url=args.previous_release_base_url,
     )
 
     if args.dry_run:
-        print(
-            json.dumps(
-                package_export_result(
-                    len(packages),
-                    len(detail_payloads),
-                    len(news_manifest),
-                    news_source_counts,
-                    news_latest_by_source,
-                    package_repository_counts,
-                    package_recent_update_counts,
-                    package_first_seen_counts,
-                    sum(len(v) for v in versions_manifest["versions"].values()),
-                ),
-                ensure_ascii=False,
-            )
+        result = package_export_result(
+            len(packages),
+            len(detail_document_metadata),
+            len(news_manifest),
+            news_source_counts,
+            news_latest_by_source,
+            package_repository_counts,
+            package_recent_update_counts,
+            package_first_seen_counts,
+            sum(len(v) for v in versions_manifest["versions"].values()),
         )
+        result.update(v2_result)
+        result["detail_spool_rows"] = spool_counts
+        print(json.dumps(result, ensure_ascii=False))
         return 0
-
-    for package_key, payload in detail_payloads.items():
-        rel_path = detail_paths_by_package[package_key]
-        write_json_atomic(cdn_root / rel_path, encrypt_document(payload, key, rel_path, language, "", compress=True))
-
-    for uuid, payload in news_payloads.items():
-        rel_path = news_manifest[uuid]["path"]
-        write_json_atomic(cdn_root / rel_path, encrypt_document(payload, key, rel_path, language, uuid, compress=True))
 
     manifest_path = f"packages/{language}/index.json"
     write_json_atomic(cdn_root / manifest_path, encrypt_document(manifest, key, manifest_path, language, "", compress=True))
     versions_path = f"packages/{language}/versions.json"
     write_json_atomic(cdn_root / versions_path, encrypt_document(versions_manifest, key, versions_path, language, "", compress=True))
+    for rel_path, encrypted in v2_documents.items():
+        write_json_atomic(cdn_root / rel_path, encrypted)
     result = package_export_result(
         len(packages),
-        len(detail_payloads),
+        len(detail_document_metadata),
         len(news_manifest),
         news_source_counts,
         news_latest_by_source,
@@ -337,8 +401,172 @@ def main() -> int:
         sum(len(v) for v in versions_manifest["versions"].values()),
     )
     result.update({"manifest": manifest_path, "versions_manifest": versions_path})
+    result.update(v2_result)
+    result["detail_spool_rows"] = spool_counts
     print(json.dumps(result, ensure_ascii=False))
     return 0
+
+
+def encoded_document_bytes(document: dict[str, Any]) -> bytes:
+    return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def document_metadata(path: str, document: dict[str, Any]) -> dict[str, Any]:
+    body = encoded_document_bytes(document)
+    return {
+        "path": path,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "bytes": len(body),
+    }
+
+
+def package_v2_shard_id(key: str, shard_count: int) -> int:
+    if shard_count not in (16, 32):
+        raise ValueError("package registry v2 shard count must be 16 or 32")
+    digest = hashlib.sha256(key.strip().lower().encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % shard_count
+
+
+def build_package_registry_v2(
+    *,
+    language: str,
+    generated_at: str,
+    shard_count: int,
+    key: bytes,
+    packages: dict[str, dict[str, Any]],
+    detail_paths_by_package: dict[str, str],
+    detail_document_metadata: dict[str, dict[str, Any]],
+    versions_by_key: dict[str, list[dict[str, str]]],
+    news_manifest: dict[str, dict[str, str]],
+    news_document_metadata: dict[str, dict[str, Any]],
+    previous_release_base_url: str = "",
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build encrypted, bounded v2 registry documents without changing the serving pointer."""
+
+    if shard_count not in (16, 32):
+        raise ValueError("package registry v2 shard count must be 16 or 32")
+
+    detail_index = {
+        package_key: {
+            "package_name": package_key,
+            **detail_document_metadata[package_key],
+        }
+        for package_key in detail_document_metadata
+        if package_key in detail_paths_by_package
+    }
+    news_index = {
+        uuid: {
+            **news_manifest[uuid],
+            **news_document_metadata[uuid],
+        }
+        for uuid in news_document_metadata
+        if uuid in news_manifest
+    }
+    item_sets: dict[str, dict[str, Any]] = {
+        "catalog": packages,
+        "details": detail_index,
+        "versions": versions_by_key,
+        "news": news_index,
+    }
+
+    documents: dict[str, dict[str, Any]] = {}
+    registry_sections: dict[str, list[dict[str, Any]]] = {}
+    total_items: dict[str, int] = {}
+    for kind, items in item_sets.items():
+        buckets: list[dict[str, Any]] = [dict() for _ in range(shard_count)]
+        for item_key, item in sorted(items.items()):
+            buckets[package_v2_shard_id(item_key, shard_count)][item_key] = item
+
+        section: list[dict[str, Any]] = []
+        for bucket_index, bucket_items in enumerate(buckets):
+            shard_id = f"{bucket_index:02d}"
+            rel_path = f"packages/{language}/v2/{kind}/{shard_id}.json"
+            plain = {
+                "schema": PACKAGE_SHARD_SCHEMAS[kind],
+                "language": language,
+                "kind": kind,
+                "shard_id": shard_id,
+                "shard_count": shard_count,
+                "items": bucket_items,
+            }
+            encrypted = encrypt_document(plain, key, rel_path, language, "", compress=True)
+            documents[rel_path] = encrypted
+            meta = document_metadata(rel_path, encrypted)
+            section.append(
+                {
+                    "shard_id": shard_id,
+                    "range": {
+                        "algorithm": "sha256-mod",
+                        "modulus": shard_count,
+                        "bucket": bucket_index,
+                    },
+                    "item_count": len(bucket_items),
+                    "total_bytes": meta["bytes"],
+                    "manifest_digest": meta["sha256"],
+                    "path": rel_path,
+                }
+            )
+        registry_sections[f"{kind}_shards"] = section
+        total_items[kind] = len(items)
+
+    release_seed = {
+        kind: [
+            {
+                "shard_id": row["shard_id"],
+                "item_count": row["item_count"],
+                "total_bytes": row["total_bytes"],
+                "manifest_digest": row["manifest_digest"],
+            }
+            for row in registry_sections[f"{kind}_shards"]
+        ]
+        for kind in item_sets
+    }
+    release_id = hashlib.sha256(
+        json.dumps(release_seed, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    registry_path = f"packages/{language}/v2/registry.json"
+    previous_release = {
+        "schema": PACKAGE_MANIFEST_SCHEMA,
+        "manifest_path": f"packages/{language}/index.json",
+    }
+    previous_base = previous_release_base_url.strip().rstrip("/")
+    if previous_base:
+        previous_release["immutable_base_url"] = previous_base
+    registry_plain = {
+        "schema": PACKAGE_REGISTRY_SCHEMA,
+        "language": language,
+        "generated_at": generated_at,
+        "release_id": release_id,
+        "source": {
+            "base": "release-pointer",
+            "exact_commit_required": True,
+        },
+        "shadow": True,
+        "shard_count": shard_count,
+        "totals": total_items,
+        "previous_release": previous_release,
+        **registry_sections,
+    }
+    registry_encrypted = encrypt_document(
+        registry_plain,
+        key,
+        registry_path,
+        language,
+        "",
+        compress=True,
+    )
+    documents[registry_path] = registry_encrypted
+    registry_meta = document_metadata(registry_path, registry_encrypted)
+    result = {
+        "registry_v2": registry_path,
+        "registry_v2_release_id": release_id,
+        "registry_v2_sha256": registry_meta["sha256"],
+        "registry_v2_bytes": registry_meta["bytes"],
+        "registry_v2_shards": shard_count * len(item_sets),
+        "registry_v2_shadow": True,
+        "registry_v2_totals": total_items,
+    }
+    return documents, result
 
 
 def package_export_result(
@@ -630,22 +858,155 @@ def first_rows(rows: list[dict[str, Any]], key_field: str = "package_key") -> di
     return out
 
 
-def fetch_package_detail_groups(env: dict[str, str]) -> dict[str, Any]:
+def package_detail_queries() -> dict[str, tuple[str, str, bool]]:
     return {
-        "cran_page": first_rows(fetch_json_rows(env, cran_page_sql(), query_name="r_package_cran_page")),
-        "checks": group_rows(fetch_json_rows(env, cran_checks_sql(), query_name="r_package_cran_checks")),
-        "security": group_rows(fetch_json_rows(env, security_sql(), query_name="r_package_security")),
-        "bibliometric": group_rows(fetch_json_rows(env, bibliometric_sql(), query_name="r_package_bibliometric")),
-        "manual_topics": group_rows(fetch_json_rows(env, manual_topics_sql(), query_name="r_package_manual_topics")),
-        "artifacts": group_rows(fetch_json_rows(env, artifacts_sql(), query_name="r_package_artifacts")),
-        "dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=False), query_name="r_package_dependencies")),
-        "reverse_dependencies": group_rows(fetch_json_rows(env, dependencies_sql(reverse=True), query_name="r_package_reverse_dependencies")),
-        "reverse_counts": group_rows(fetch_json_rows(env, reverse_counts_sql(), query_name="r_package_reverse_counts")),
-        "github_repos": group_rows(fetch_json_rows(env, github_repos_sql(), query_name="r_package_github_repos")),
-        "task_views": group_rows(fetch_json_rows(env, task_views_sql(), query_name="r_package_task_views")),
-        "website_mentions": group_rows(fetch_json_rows(env, website_mentions_sql(), query_name="r_package_website_mentions")),
-        "books": group_rows(fetch_json_rows(env, books_sql(), query_name="r_package_books")),
+        "cran_page": (cran_page_sql(), "r_package_cran_page", True),
+        "checks": (cran_checks_sql(), "r_package_cran_checks", False),
+        "security": (security_sql(), "r_package_security", False),
+        "bibliometric": (bibliometric_sql(), "r_package_bibliometric", False),
+        "manual_topics": (manual_topics_sql(), "r_package_manual_topics", False),
+        "artifacts": (artifacts_sql(), "r_package_artifacts", False),
+        "dependencies": (dependencies_sql(reverse=False), "r_package_dependencies", False),
+        "reverse_dependencies": (dependencies_sql(reverse=True), "r_package_reverse_dependencies", False),
+        "reverse_counts": (reverse_counts_sql(), "r_package_reverse_counts", False),
+        "github_repos": (github_repos_sql(), "r_package_github_repos", False),
+        "task_views": (task_views_sql(), "r_package_task_views", False),
+        "website_mentions": (website_mentions_sql(), "r_package_website_mentions", False),
+        "books": (books_sql(), "r_package_books", False),
     }
+
+
+def clickhouse_string_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def filter_package_detail_sql(sql: str, package_keys: set[str]) -> str:
+    if not package_keys or len(package_keys) > 500:
+        return sql
+    marker = "FORMAT JSONEachRow"
+    marker_index = sql.rfind(marker)
+    if marker_index < 0:
+        raise ValueError("package detail query is missing FORMAT JSONEachRow")
+    inner = sql[:marker_index].strip()
+    suffix = sql[marker_index + len(marker) :]
+    literals = ",".join(clickhouse_string_literal(value) for value in sorted(package_keys))
+    return (
+        "SELECT *\n"
+        "  FROM (\n"
+        f"{inner}\n"
+        ")\n"
+        f" WHERE package_key IN ({literals})\n"
+        f" FORMAT JSONEachRow{suffix}"
+    )
+
+
+def package_detail_spool_path(spool_root: Path, group_name: str, shard_index: int) -> Path:
+    return spool_root / group_name / f"{shard_index:02d}.jsonl"
+
+
+def spool_package_detail_groups(
+    env: dict[str, str],
+    spool_root: Path,
+    shard_count: int,
+    allowed_package_keys: set[str],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    normalized_allowed = {value.strip().lower() for value in allowed_package_keys if value.strip()}
+    for group_name, (sql, query_name, _first_only) in package_detail_queries().items():
+        group_root = spool_root / group_name
+        group_root.mkdir(parents=True, exist_ok=True)
+        writers = [
+            package_detail_spool_path(spool_root, group_name, index).open("w", encoding="utf-8")
+            for index in range(shard_count)
+        ]
+        count = 0
+        try:
+            scoped_sql = filter_package_detail_sql(sql, normalized_allowed)
+            for row in iter_json_rows(env, scoped_sql, query_name=query_name):
+                package_key = text(row.get("package_key")).lower()
+                if not package_key or (normalized_allowed and package_key not in normalized_allowed):
+                    continue
+                shard_index = package_v2_shard_id(package_key, shard_count)
+                writers[shard_index].write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                count += 1
+        finally:
+            for writer in writers:
+                writer.close()
+        counts[group_name] = count
+    return counts
+
+
+def load_package_detail_spool(
+    spool_root: Path,
+    group_name: str,
+    shard_index: int,
+    first_only: bool,
+) -> dict[str, Any]:
+    path = package_detail_spool_path(spool_root, group_name, shard_index)
+    if not path.exists():
+        return {}
+    rows: dict[str, Any] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            row = json.loads(raw_line)
+            package_key = text(row.get("package_key")).lower()
+            if not package_key:
+                continue
+            item = {key: value for key, value in row.items() if key != "package_key"}
+            if first_only:
+                rows.setdefault(package_key, item)
+            else:
+                rows.setdefault(package_key, []).append(item)
+    return rows
+
+
+def build_package_detail_documents_from_spool(
+    *,
+    spool_root: Path,
+    shard_count: int,
+    details_by_package: dict[str, dict[str, Any]],
+    detail_paths_by_package: dict[str, str],
+    versions_by_package: dict[str, list[dict[str, str]]],
+    key: bytes,
+    language: str,
+    cdn_root: Path,
+    dry_run: bool,
+) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for shard_index in range(shard_count):
+        shard_details = {
+            package_key: seed
+            for package_key, seed in details_by_package.items()
+            if package_v2_shard_id(package_key, shard_count) == shard_index
+        }
+        groups = {
+            group_name: load_package_detail_spool(spool_root, group_name, shard_index, first_only)
+            for group_name, (_sql, _query_name, first_only) in package_detail_queries().items()
+        }
+        payloads = build_package_detail_payloads(
+            shard_details,
+            detail_paths_by_package,
+            versions_by_package,
+            groups,
+        )
+        for package_key, payload in payloads.items():
+            rel_path = detail_paths_by_package[package_key]
+            encrypted = encrypt_document(payload, key, rel_path, language, "", compress=True)
+            metadata[package_key] = document_metadata(rel_path, encrypted)
+            if not dry_run:
+                write_json_atomic(cdn_root / rel_path, encrypted)
+    return metadata
+
+
+def fetch_package_detail_groups(env: dict[str, str]) -> dict[str, Any]:
+    groups: dict[str, Any] = {}
+    for group_name, (sql, query_name, first_only) in package_detail_queries().items():
+        rows = fetch_json_rows(env, sql, query_name=query_name)
+        groups[group_name] = first_rows(rows) if first_only else group_rows(rows)
+    return groups
 
 
 def build_package_detail_payloads(

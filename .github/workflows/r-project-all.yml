@@ -689,6 +689,7 @@ jobs:
           WEBR_COMMUNITY_CDN_CH_MAX_THREADS: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_THREADS || '2' }}
           WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
         run: |
+          python scripts/test_export_r_package_cdn.py
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
           python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
@@ -755,7 +756,7 @@ jobs:
                   "packages": int(r_package.get("packages") or 0),
                   "news": int(r_package.get("news") or 0),
                   "package_details": int(r_package.get("package_details") or 0),
-                  "manifest_paths": ["packages/ko/index.json", "packages/ko/versions.json"],
+                  "manifest_paths": ["packages/ko/index.json", "packages/ko/versions.json", "packages/ko/v2/registry.json"],
               },
               "community": {
                   "schema": "web-r.content-cdn.export-report.v2",
@@ -816,7 +817,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_packages.git"
           changed=false
-          git add packages/ko/index.json packages/ko/versions.json packages/ko/news
+          git add packages/ko/index.json packages/ko/versions.json packages/ko/news packages/ko/v2
           if ! git diff --cached --quiet; then
             git commit -m "Refresh Web-R CDN2 encrypted package news"
             git push origin HEAD:main
@@ -954,6 +955,12 @@ jobs:
               --repo statground/web-r_CDN2_packages \
               --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
               --manifest packages/ko/index.json
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-packages \
+              --language ko \
+              --repo statground/web-r_CDN2_packages \
+              --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
+              --manifest packages/ko/v2/registry.json
           fi
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_community.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("community") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
             echo "Web-R CDN2 community release record was deferred or skipped; skipping community release pointer verification."

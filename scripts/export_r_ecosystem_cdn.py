@@ -341,7 +341,7 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") -> list[dict[str, Any]]:
+def iter_json_rows(env: dict[str, str], sql: str, query_name: str = "query"):
     user = env.get("CLICKHOUSE_USER", "").strip()
     password = env.get("CLICKHOUSE_PASSWORD", "")
     if not user:
@@ -357,7 +357,12 @@ def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") ->
     request.add_header("Content-Type", "text/plain; charset=utf-8")
     try:
         with urllib.request.urlopen(request, timeout=int(env.get("R_ECOSYSTEM_CDN_HTTP_TIMEOUT", "150"))) as response:
-            body = response.read().decode("utf-8")
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if line:
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        yield parsed
     except urllib.error.HTTPError as exc:
         detail = exc.read(800).decode("utf-8", errors="replace")
         category = clickhouse_error_category(detail)
@@ -372,12 +377,10 @@ def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") ->
         raise ClickHouseExportError(query_name, 0, "TIMEOUT_EXCEEDED", str(exc)) from exc
     except OSError as exc:
         raise ClickHouseExportError(query_name, 0, "CLICKHOUSE_NETWORK", str(exc)) from exc
-    rows: list[dict[str, Any]] = []
-    for line in body.splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
+
+
+def fetch_json_rows(env: dict[str, str], sql: str, query_name: str = "query") -> list[dict[str, Any]]:
+    return list(iter_json_rows(env, sql, query_name=query_name))
 
 
 def safe_query_name(value: str) -> str:
