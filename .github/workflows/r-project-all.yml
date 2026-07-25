@@ -691,7 +691,12 @@ jobs:
         run: |
           python scripts/test_export_r_package_cdn.py
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
-          python scripts/export_r_package_cdn.py --cdn-root web-r_CDN2_packages --language ko > /tmp/r_package_export.json
+          previous_package_commit="$(git -C web-r_CDN2_packages rev-parse HEAD)"
+          python scripts/export_r_package_cdn.py \
+            --cdn-root web-r_CDN2_packages \
+            --language ko \
+            --previous-release-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_packages@${previous_package_commit}" \
+            > /tmp/r_package_export.json
           python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
           python - <<'PY'
           import json
