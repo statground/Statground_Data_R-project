@@ -103,22 +103,18 @@ PIPELINES = [
         ],
     },
     {
-        "key": "naver_book_all",
-        "label": "NAVER Book Collector - All Kafka",
+        "key": "kakao_book_scheduled",
+        "label": "Kakao Book Scheduled Provider Pipeline",
         "repo": "statground/Statground_Data_NAVER_Book",
         "repo_label": "Statground_Data_NAVER_Book",
-        "workflow_file": "naver_book_collect_all.yml",
-        "output_group": "naver_book",
+        "workflow_file": "kakao_book_schedule.yml",
+        "output_group": "book",
         "stages": [
-            {"key": "prepare", "label": "준비", "matches": ["checkout", "setup go", "validate required", "resolve go modules", "build active"]},
-            {"key": "aladin_seed", "label": "Aladin seed", "matches": ["collect aladin publisher seed"]},
-            {"key": "author", "label": "저자", "matches": ["via kafka (author)"]},
-            {"key": "keyword", "label": "키워드", "matches": ["via kafka (keyword)"]},
-            {"key": "review_keywords", "label": "Web-R 검토어", "matches": ["web-r review keywords"]},
-            {"key": "publisher", "label": "출판사", "matches": ["via kafka (publisher)"]},
-            {"key": "r_package", "label": "R 패키지 샘플", "matches": ["r package sample"]},
-            {"key": "manual", "label": "수동 키워드", "matches": ["via kafka (manual)"], "optional": True},
-            {"key": "catalog", "label": "카탈로그 갱신", "matches": ["refresh web-r r book catalog"]},
+            {"key": "prepare", "label": "테스트·빌드", "matches": ["checkout", "setup go", "run secret-free tests and build"]},
+            {"key": "validate_kakao", "label": "Kakao 키 검증", "matches": ["validate kakao api key"]},
+            {"key": "validate_clickhouse", "label": "ClickHouse 검증", "matches": ["validate clickhouse endpoint", "validate clickhouse https transport", "validate clickhouse credentials"]},
+            {"key": "collect", "label": "Kakao 도서 수집", "matches": ["collect kakao books into provider tables"]},
+            {"key": "catalog", "label": "카탈로그 갱신", "matches": ["refresh provider-neutral serving catalogs"], "optional": True},
         ],
     },
 ]
@@ -217,13 +213,15 @@ def build_snapshot(language: str) -> dict[str, Any]:
     warnings.extend(source_warnings)
     warnings.extend(output_warnings)
 
+    snapshot_summary = summary(pipelines, outputs, warnings)
     return {
         "ok": True,
+        "partial": bool(snapshot_summary.get("unknown_count")),
         "schema": "web-r.admin-pipelines.snapshot.v1",
         "language": language,
         "generated_at": format_time(datetime.now(timezone.utc)),
         "snapshot_source": "cdn2",
-        "summary": summary(pipelines, outputs, warnings),
+        "summary": snapshot_summary,
         "pipelines": pipelines,
         "recent_runs": recent_runs,
         "source_groups": source_groups,
@@ -329,7 +327,7 @@ def run_row(definition: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
 
 
 def source_groups_snapshot() -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
-    out = {"r_project": [], "naver_book": [], "cdn_release": []}
+    out = {"r_project": [], "book": [], "naver_book": [], "cdn_release": []}
     warnings: list[str] = []
     out["r_project"], ok = safe_query(
         """
@@ -351,7 +349,7 @@ def source_groups_snapshot() -> tuple[dict[str, list[dict[str, Any]]], list[str]
     )
     if not ok:
         warnings.append("r_project_sources_unavailable")
-    out["naver_book"], ok = safe_query(
+    out["book"], ok = safe_query(
         """
         SELECT
             search_mode,
@@ -360,18 +358,19 @@ def source_groups_snapshot() -> tuple[dict[str, list[dict[str, Any]]], list[str]
             count() AS log_count,
             sum(fetched_count) AS fetched_count,
             countIf(status = 'ERROR') AS error_count,
-            argMax(status, created_at) AS latest_status,
-            max(created_at) AS latest_created_at,
+            argMax(status, collected_at) AS latest_status,
+            max(collected_at) AS latest_collected_at,
             max(ingested_at) AS latest_ingested_at
-        FROM Data_Book_NAVER_Log.naver_collect_log
-        WHERE created_at >= now64(3, 'Asia/Seoul') - INTERVAL 7 DAY
+        FROM Data_Book_KAKAO_Log.kakao_collect_log
+        WHERE collected_at >= now64(3, 'Asia/Seoul') - INTERVAL 7 DAY
         GROUP BY search_mode, search_query, search_sort
         ORDER BY latest_ingested_at DESC
         LIMIT 100
         """,
     )
+    out["naver_book"] = out["book"]
     if not ok:
-        warnings.append("naver_book_sources_unavailable")
+        warnings.append("book_sources_unavailable")
     out["cdn_release"], ok = safe_query(
         """
         SELECT
@@ -398,6 +397,7 @@ def outputs_snapshot(windows: dict[str, tuple[datetime, datetime]]) -> tuple[dic
         "r_posts": [],
         "digests": [],
         "notebooks": [],
+        "books": [],
         "naver_books": [],
         "r_book_catalog": [],
         "cdn_releases": [],
@@ -475,11 +475,12 @@ def outputs_snapshot(windows: dict[str, tuple[datetime, datetime]]) -> tuple[dic
     )
     if not ok:
         warnings.append("notebook_outputs_unavailable")
-    out["naver_books"], ok = safe_query(
+    out["books"], ok = safe_query(
         """
         SELECT
             isbn,
             toString(uuid) AS uuid,
+            provider,
             title,
             author,
             publisher,
@@ -490,20 +491,22 @@ def outputs_snapshot(windows: dict[str, tuple[datetime, datetime]]) -> tuple[dic
             updated_at,
             collected_at,
             ingested_at
-        FROM Data_Book_NAVER_Service.naver_book_recent
+        FROM Data_Book_Service.book_recent
         """
-        + window_filter("updated_at", windows.get("naver_book"), 36)
+        + window_filter("updated_at", windows.get("book"), 36)
         + """
         ORDER BY updated_at DESC
         LIMIT 40
         """,
     )
+    out["naver_books"] = out["books"]
     if not ok:
-        warnings.append("naver_book_outputs_unavailable")
+        warnings.append("book_outputs_unavailable")
     out["r_book_catalog"], ok = safe_query(
         """
         SELECT
             isbn,
+            metadata_provider,
             title,
             author,
             publisher,
@@ -513,9 +516,9 @@ def outputs_snapshot(windows: dict[str, tuple[datetime, datetime]]) -> tuple[dic
             source_collected_at,
             source_ingested_at,
             concat('/book/?q=', replaceAll(title, ' ', '+')) AS url
-        FROM webr_book.v_naver_r_book_catalog
+        FROM webr_book.v_book_catalog
         """
-        + window_filter("source_ingested_at", windows.get("naver_book"), 36)
+        + window_filter("source_ingested_at", windows.get("book"), 36)
         + """
         ORDER BY source_ingested_at DESC
         LIMIT 30
@@ -558,7 +561,7 @@ def summary(pipelines: list[dict[str, Any]], outputs: dict[str, list[dict[str, A
     for pipeline in pipelines:
         status = str(pipeline.get("status") or "")
         counts[status] = counts.get(status, 0) + 1
-    output_count = sum(len(outputs.get(key) or []) for key in ("r_posts", "digests", "notebooks", "naver_books", "r_book_catalog", "cdn_releases"))
+    output_count = sum(len(outputs.get(key) or []) for key in ("r_posts", "digests", "notebooks", "books", "r_book_catalog", "cdn_releases"))
     return {
         "pipeline_count": len(pipelines),
         "success_count": counts.get("success", 0),
