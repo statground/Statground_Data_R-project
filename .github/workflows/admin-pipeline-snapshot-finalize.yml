@@ -1,0 +1,143 @@
+name: Web-R Admin Pipeline Snapshot Finalize
+
+on:
+  workflow_run:
+    workflows:
+      - R Project Package Collection
+      - R Project Social Collection
+      - R Project Community Collection
+      - R Project Community Digest
+      - R Project Notebook Generation
+      - R Project CDN Publish
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-r-admin-pipeline-snapshot-finalize
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish completed pipeline snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate snapshot finalizer contract
+        run: python scripts/test_admin_pipeline_snapshot_finalize_workflow.py
+
+      - name: Checkout Web-R CDN2 admin snapshots
+        uses: actions/checkout@v7
+        with:
+          repository: statground/web-r_CDN2
+          ref: main
+          path: web-r_CDN2
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
+
+      - name: Export completed admin pipeline monitor snapshot
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
+          CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
+          ADMIN_PIPELINE_MONITOR_CH_MAX_EXECUTION_TIME: "20"
+          ADMIN_PIPELINE_MONITOR_CH_MAX_THREADS: "1"
+          WEBR_GITHUB_ACTIONS_TOKEN: ${{ secrets.WEBR_GITHUB_ACTIONS_TOKEN || secrets.GITHUB_ACTIONS_STATUS_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/export_admin_pipeline_monitor.py \
+            --cdn-root web-r_CDN2 \
+            --language ko \
+            > /tmp/admin_pipeline_export.json
+
+      - name: Commit and push completed admin pipeline snapshot
+        id: snapshot
+        working-directory: web-r_CDN2
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2.git"
+          git add admin/pipelines/latest.json
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "Finalize admin pipeline monitor snapshot"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep $((attempt * 2))
+            fi
+          done
+          echo "Unable to publish the completed admin pipeline snapshot after 3 attempts" >&2
+          exit 1
+
+      - name: Record Web-R CDN2 admin pipeline snapshot release
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
+          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: "true"
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: "20"
+          WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: "25"
+          WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: "1"
+        run: |
+          python scripts/record_web_r_cdn_release.py \
+            --report /tmp/admin_pipeline_export.json \
+            --commit-sha "${{ steps.snapshot.outputs.commit_sha }}" \
+            --repo statground/web-r_CDN2 \
+            --branch main \
+            --scope web-r-admin-pipelines \
+            --language ko \
+            > /tmp/web_r_cdn_record_admin_pipelines.json
+
+      - name: Verify Web-R CDN2 admin pipeline snapshot release
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
+          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: "true"
+          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: "true"
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: "20"
+          WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: "25"
+          WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: "1"
+        run: |
+          if python -c 'import json, pathlib, sys; status=json.loads(pathlib.Path("/tmp/web_r_cdn_record_admin_pipelines.json").read_text(encoding="utf-8")); sys.exit(0 if status.get("record_deferred") else 1)'; then
+            echo "Web-R CDN2 admin pipeline release record was deferred; skipping pointer verification."
+          else
+            python scripts/verify_web_r_cdn_release.py \
+              --scope web-r-admin-pipelines \
+              --language ko \
+              --repo statground/web-r_CDN2 \
+              --commit-sha "${{ steps.snapshot.outputs.commit_sha }}" \
+              --manifest admin/pipelines/latest.json
+          fi
