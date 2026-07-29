@@ -1059,9 +1059,21 @@ jobs:
             --scope web-r-admin-pipelines \
             --language ko > /tmp/web_r_cdn_record_admin_pipelines.json
           cat /tmp/web_r_cdn_record_admin_pipelines.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          record = json.loads(
+              Path("/tmp/web_r_cdn_record_admin_pipelines.json").read_text(encoding="utf-8")
+          )
+          if record.get("record_deferred"):
+              raise SystemExit(
+                  "Web-R CDN2 admin pipeline release record was deferred; treating it as a failed CDN publish."
+              )
+          PY
 
       - name: Verify Web-R CDN2 admin pipeline snapshot release
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
+        if: always() && (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn') && steps.web_r_cdn2_admin_pipelines.outcome == 'success'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -1075,16 +1087,12 @@ jobs:
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
           WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'true' }}
         run: |
-          if python -c 'import json, pathlib, sys; status_path=pathlib.Path("/tmp/web_r_cdn_record_admin_pipelines.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if status.get("record_deferred") else 1)'; then
-            echo "Web-R CDN2 admin pipeline release record was deferred; skipping admin pipeline release pointer verification."
-          else
-            python scripts/verify_web_r_cdn_release.py \
-              --scope web-r-admin-pipelines \
-              --language ko \
-              --repo statground/web-r_CDN2 \
-              --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
-              --manifest admin/pipelines/latest.json
-          fi
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-admin-pipelines \
+            --language ko \
+            --repo statground/web-r_CDN2 \
+            --commit-sha "${{ steps.web_r_cdn2_admin_pipelines.outputs.commit_sha }}" \
+            --manifest admin/pipelines/latest.json
 
       - name: Mark deferred CDN exports as degraded
         if: always() && (steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn')

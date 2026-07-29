@@ -66,6 +66,30 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
         self.assertIn("verify_web_r_cdn_release.py", TEXT)
         self.assertGreaterEqual(TEXT.count("--scope web-r-admin-pipelines"), 2)
 
+    def test_release_record_failure_does_not_skip_pointer_verification(self) -> None:
+        finalizer_record = TEXT.split(
+            "- name: Record Web-R CDN2 admin pipeline snapshot release", 1
+        )[1].split("- name: Verify Web-R CDN2 admin pipeline snapshot release", 1)[0]
+        finalizer_verify = TEXT.split(
+            "- name: Verify Web-R CDN2 admin pipeline snapshot release", 1
+        )[1]
+        self.assertIn("record_deferred", finalizer_record)
+        self.assertIn("failed finalization", finalizer_record)
+        self.assertIn("if: always() && steps.snapshot.outcome == 'success'", finalizer_verify)
+        self.assertNotIn("skipping pointer verification", finalizer_verify)
+
+        main_record = MAIN_WORKFLOW.split(
+            "- name: Record Web-R CDN2 admin pipeline snapshot release", 1
+        )[1].split("- name: Verify Web-R CDN2 admin pipeline snapshot release", 1)[0]
+        main_verify = MAIN_WORKFLOW.split(
+            "- name: Verify Web-R CDN2 admin pipeline snapshot release", 1
+        )[1].split("- name: Mark deferred CDN exports as degraded", 1)[0]
+        self.assertIn("record_deferred", main_record)
+        self.assertIn("failed CDN publish", main_record)
+        self.assertIn("if: always()", main_verify)
+        self.assertIn("steps.web_r_cdn2_admin_pipelines.outcome == 'success'", main_verify)
+        self.assertNotIn("skipping admin pipeline release pointer verification", main_verify)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -116,8 +116,21 @@ jobs:
             --scope web-r-admin-pipelines \
             --language ko \
             > /tmp/web_r_cdn_record_admin_pipelines.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          record = json.loads(
+              Path("/tmp/web_r_cdn_record_admin_pipelines.json").read_text(encoding="utf-8")
+          )
+          if record.get("record_deferred"):
+              raise SystemExit(
+                  "Web-R CDN2 admin pipeline release record was deferred; treating it as a failed finalization."
+              )
+          PY
 
       - name: Verify Web-R CDN2 admin pipeline snapshot release
+        if: always() && steps.snapshot.outcome == 'success'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -131,13 +144,9 @@ jobs:
           WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: "25"
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: "1"
         run: |
-          if python -c 'import json, pathlib, sys; status=json.loads(pathlib.Path("/tmp/web_r_cdn_record_admin_pipelines.json").read_text(encoding="utf-8")); sys.exit(0 if status.get("record_deferred") else 1)'; then
-            echo "Web-R CDN2 admin pipeline release record was deferred; skipping pointer verification."
-          else
-            python scripts/verify_web_r_cdn_release.py \
-              --scope web-r-admin-pipelines \
-              --language ko \
-              --repo statground/web-r_CDN2 \
-              --commit-sha "${{ steps.snapshot.outputs.commit_sha }}" \
-              --manifest admin/pipelines/latest.json
-          fi
+          python scripts/verify_web_r_cdn_release.py \
+            --scope web-r-admin-pipelines \
+            --language ko \
+            --repo statground/web-r_CDN2 \
+            --commit-sha "${{ steps.snapshot.outputs.commit_sha }}" \
+            --manifest admin/pipelines/latest.json
