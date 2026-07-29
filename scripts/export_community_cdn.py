@@ -342,9 +342,9 @@ SELECT toString(digest_uuid) AS uuid,
        summary,
        toString(source_items_json) AS source_items_json,
        toInt64(deduped_item_count) AS deduped_item_count,
-       concat(toString(digest_date), ' 23:59:00') AS published_at,
+       formatDateTime(d.created_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS published_at,
        formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S') AS updated_at
-  FROM Data_R_Community_Service.v_r_community_daily_digest_latest
+  FROM Data_R_Community_Service.v_r_community_daily_digest_latest AS d
  WHERE notEmpty(summary)
  ORDER BY digest_date DESC, updated_at DESC{suffix}
  FORMAT JSONEachRow
