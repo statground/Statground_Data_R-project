@@ -35,6 +35,16 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
         self.assertNotIn("export_r_package_cdn.py", TEXT)
         self.assertNotIn("export_community_cdn.py", TEXT)
 
+    def test_installs_pinned_python_dependencies_before_validation(self) -> None:
+        setup_position = TEXT.index("- name: Set up Python")
+        install_position = TEXT.index("- name: Install Python dependencies")
+        validation_position = TEXT.index("- name: Validate snapshot finalizer contract")
+
+        self.assertIn("cache-dependency-path: scripts/requirements.txt", TEXT)
+        self.assertIn("python -m pip install -r scripts/requirements.txt", TEXT)
+        self.assertLess(setup_position, install_position)
+        self.assertLess(install_position, validation_position)
+
     def test_clickhouse_queries_remain_bounded(self) -> None:
         self.assertIn('ADMIN_PIPELINE_MONITOR_CH_MAX_THREADS: "1"', TEXT)
         self.assertIn('ADMIN_PIPELINE_MONITOR_CH_MAX_EXECUTION_TIME: "20"', TEXT)

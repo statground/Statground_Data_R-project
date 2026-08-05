@@ -33,6 +33,11 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r scripts/requirements.txt
 
       - name: Validate snapshot finalizer contract
         run: python scripts/test_admin_pipeline_snapshot_finalize_workflow.py
