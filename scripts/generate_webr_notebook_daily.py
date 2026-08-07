@@ -705,19 +705,33 @@ def topic_key_from_title(title: str) -> str:
     return ""
 
 
-def build_diversity_blueprint(topic: Topic, style: NotebookStyle, seed: int, attempt: int) -> dict[str, Any]:
+def build_diversity_blueprint(
+    topic: Topic,
+    style: NotebookStyle,
+    seed: int,
+    attempt: int,
+    *,
+    dimension_pools: dict[str, list[Any]] | None = None,
+) -> dict[str, Any]:
     # Mixed-radix selection makes every dimension advance at a different pace,
     # while the persisted fingerprint remains the final authority on reuse.
+    pools = dimension_pools or {
+        "data_design": DATA_DESIGNS,
+        "validation_lens": VALIDATION_LENSES,
+        "visual_grammar": VISUAL_GRAMMARS,
+        "narrative_frame": NARRATIVE_FRAMES,
+        "package_profile": WEBR_PACKAGE_PROFILES,
+    }
     cursor = (int(seed) + attempt * 1_000_003) & 0xFFFFFFFFFFFFFFFF
-    data_design = DATA_DESIGNS[cursor % len(DATA_DESIGNS)]
-    cursor //= len(DATA_DESIGNS)
-    validation_lens = VALIDATION_LENSES[cursor % len(VALIDATION_LENSES)]
-    cursor //= len(VALIDATION_LENSES)
-    visual_grammar = VISUAL_GRAMMARS[cursor % len(VISUAL_GRAMMARS)]
-    cursor //= len(VISUAL_GRAMMARS)
-    narrative_frame = NARRATIVE_FRAMES[cursor % len(NARRATIVE_FRAMES)]
-    cursor //= len(NARRATIVE_FRAMES)
-    package_profile = WEBR_PACKAGE_PROFILES[cursor % len(WEBR_PACKAGE_PROFILES)]
+    data_design = pools["data_design"][cursor % len(pools["data_design"])]
+    cursor //= len(pools["data_design"])
+    validation_lens = pools["validation_lens"][cursor % len(pools["validation_lens"])]
+    cursor //= len(pools["validation_lens"])
+    visual_grammar = pools["visual_grammar"][cursor % len(pools["visual_grammar"])]
+    cursor //= len(pools["visual_grammar"])
+    narrative_frame = pools["narrative_frame"][cursor % len(pools["narrative_frame"])]
+    cursor //= len(pools["narrative_frame"])
+    package_profile = pools["package_profile"][cursor % len(pools["package_profile"])]
     components = {
         "topic": topic.key,
         "style": style.key,
@@ -738,6 +752,42 @@ def build_diversity_blueprint(topic: Topic, style: NotebookStyle, seed: int, att
         "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         "space_size_per_topic": len(STYLES) * len(DATA_DESIGNS) * len(VALIDATION_LENSES) * len(VISUAL_GRAMMARS) * len(NARRATIVE_FRAMES) * len(WEBR_PACKAGE_PROFILES),
     }
+
+
+def eligible_blueprint_dimension_pools(
+    recent_blueprint_dimensions: dict[str, set[str]],
+) -> dict[str, list[Any]]:
+    """Remove dimensions forbidden by the recent-history contract before sampling."""
+    source_pools: dict[str, list[Any]] = {
+        "data_design": DATA_DESIGNS,
+        "validation_lens": VALIDATION_LENSES,
+        "visual_grammar": VISUAL_GRAMMARS,
+        "narrative_frame": NARRATIVE_FRAMES,
+        "package_profile": WEBR_PACKAGE_PROFILES,
+    }
+    eligible = {
+        dimension: [item for item in items if item.key not in recent_blueprint_dimensions.get(dimension, set())]
+        for dimension, items in source_pools.items()
+    }
+    exhausted = [dimension for dimension, items in eligible.items() if not items]
+    if exhausted:
+        raise RuntimeError(
+            "recent Web-R Notebook history exhausts eligible blueprint dimensions: " + ", ".join(sorted(exhausted))
+        )
+    return eligible
+
+
+def notebook_topic_search_pools(topic_pool: list[Topic]) -> list[tuple[str, list[Topic]]]:
+    """Search fresh source context first, then the curated pool as a novelty fallback."""
+    pool = topic_pool or TOPICS
+    source_topics = [topic for topic in pool if topic.source_context]
+    curated_topics = [topic for topic in pool if not topic.source_context]
+    search_pools: list[tuple[str, list[Topic]]] = []
+    if source_topics:
+        search_pools.append(("source_context", source_topics))
+    if curated_topics:
+        search_pools.append(("curated_static", curated_topics))
+    return search_pools or [("curated_static", TOPICS)]
 
 
 def build_public_title(topic: Topic, style: NotebookStyle, blueprint: dict[str, Any], existing_titles: set[str], seed: int) -> str:
@@ -1173,62 +1223,70 @@ def build_notebook_spec(
         "narrative_frame": recent_blueprint_dimension_keys(recent_rows, "narrative_frame", 5),
         "package_profile": recent_blueprint_dimension_keys(recent_rows, "package_profile", 8),
     }
+    blueprint_dimension_pools = eligible_blueprint_dimension_pools(recent_blueprint_dimensions)
+    topic_search_pools = notebook_topic_search_pools(topic_pool)
+    total_candidate_attempts = MAX_CANDIDATE_ATTEMPTS * len(topic_search_pools)
     existing_title_keys = {title_identity_key(title) for title in existing_titles if title_identity_key(title)}
     published_blueprints = set(published_blueprints or set())
 
-    for attempt in range(MAX_CANDIDATE_ATTEMPTS):
-        seed = (base_seed + attempt * 104729) & 0xFFFFFFFF
-        spec = build_candidate_notebook_spec(
-            series_date=series_date,
-            existing_titles=existing_titles,
-            recent_styles=recent_styles,
-            recent_topics=recent_topics,
-            topic_pool=topic_pool,
-            seed=seed,
-            attempt=attempt,
-            force_new=force_new,
-        )
-        similarity, matched_title = max_recent_similarity(spec, recent_rows)
-        topic_key = str(spec.get("topic", {}).get("key", ""))
-        style_key = str(spec.get("style", {}).get("key", ""))
-        title_key = title_identity_key(str(spec.get("title", "")))
-        blueprint_fingerprint = str(spec.get("blueprint", {}).get("fingerprint", ""))
-        title_duplicate = bool(title_key and title_key in existing_title_keys)
-        blueprint_duplicate = not blueprint_fingerprint or blueprint_fingerprint in published_blueprints
-        repeated_blueprint_dimensions = {
-            dimension: str(spec.get("blueprint", {}).get(dimension, {}).get("key", "")) in recent_keys
-            for dimension, recent_keys in recent_blueprint_dimensions.items()
-        }
-        pair_duplicate = bool(topic_key and style_key and (topic_key, style_key) in recent_pairs)
-        topic_recent = topic_key in set(recent_topics[:4])
-        style_recent = style_key in set(recent_styles[:3])
-        accepted = (
-            (similarity <= SIMILARITY_THRESHOLD or not recent_rows)
-            and not title_duplicate
-            and not blueprint_duplicate
-            and not any(repeated_blueprint_dimensions.values())
-            and not pair_duplicate
-            and not (topic_recent and style_recent)
-        )
-        spec["similarity_guard"] = {
-            "threshold": SIMILARITY_THRESHOLD,
-            "max_similarity": round(similarity, 4),
-            "matched_title": matched_title,
-            "compared_recent_count": len(recent_rows),
-            "title_duplicate": title_duplicate,
-            "blueprint_duplicate": blueprint_duplicate,
-            "blueprint_fingerprint": blueprint_fingerprint,
-            "repeated_blueprint_dimensions": repeated_blueprint_dimensions,
-            "published_blueprint_count": len(published_blueprints),
-            "pair_duplicate": pair_duplicate,
-            "topic_recent": topic_recent,
-            "style_recent": style_recent,
-            "attempt": attempt + 1,
-            "max_attempts": MAX_CANDIDATE_ATTEMPTS,
-            "accepted": accepted,
-        }
-        if accepted:
-            return spec
+    for pool_index, (topic_pool_kind, candidate_topic_pool) in enumerate(topic_search_pools):
+        for pool_attempt in range(MAX_CANDIDATE_ATTEMPTS):
+            attempt = pool_index * MAX_CANDIDATE_ATTEMPTS + pool_attempt
+            seed = (base_seed + attempt * 104729) & 0xFFFFFFFF
+            spec = build_candidate_notebook_spec(
+                series_date=series_date,
+                existing_titles=existing_titles,
+                recent_styles=recent_styles,
+                recent_topics=recent_topics,
+                topic_pool=candidate_topic_pool,
+                seed=seed,
+                attempt=attempt,
+                force_new=force_new,
+                blueprint_dimension_pools=blueprint_dimension_pools,
+            )
+            similarity, matched_title = max_recent_similarity(spec, recent_rows)
+            topic_key = str(spec.get("topic", {}).get("key", ""))
+            style_key = str(spec.get("style", {}).get("key", ""))
+            title_key = title_identity_key(str(spec.get("title", "")))
+            blueprint_fingerprint = str(spec.get("blueprint", {}).get("fingerprint", ""))
+            title_duplicate = bool(title_key and title_key in existing_title_keys)
+            blueprint_duplicate = not blueprint_fingerprint or blueprint_fingerprint in published_blueprints
+            repeated_blueprint_dimensions = {
+                dimension: str(spec.get("blueprint", {}).get(dimension, {}).get("key", "")) in recent_keys
+                for dimension, recent_keys in recent_blueprint_dimensions.items()
+            }
+            pair_duplicate = bool(topic_key and style_key and (topic_key, style_key) in recent_pairs)
+            topic_recent = topic_key in set(recent_topics[:4])
+            style_recent = style_key in set(recent_styles[:3])
+            accepted = (
+                (similarity <= SIMILARITY_THRESHOLD or not recent_rows)
+                and not title_duplicate
+                and not blueprint_duplicate
+                and not any(repeated_blueprint_dimensions.values())
+                and not pair_duplicate
+                and not (topic_recent and style_recent)
+            )
+            spec["similarity_guard"] = {
+                "threshold": SIMILARITY_THRESHOLD,
+                "max_similarity": round(similarity, 4),
+                "matched_title": matched_title,
+                "compared_recent_count": len(recent_rows),
+                "title_duplicate": title_duplicate,
+                "blueprint_duplicate": blueprint_duplicate,
+                "blueprint_fingerprint": blueprint_fingerprint,
+                "repeated_blueprint_dimensions": repeated_blueprint_dimensions,
+                "published_blueprint_count": len(published_blueprints),
+                "pair_duplicate": pair_duplicate,
+                "topic_recent": topic_recent,
+                "style_recent": style_recent,
+                "topic_pool_kind": topic_pool_kind,
+                "topic_pool_attempt": pool_attempt + 1,
+                "attempt": attempt + 1,
+                "max_attempts": total_candidate_attempts,
+                "accepted": accepted,
+            }
+            if accepted:
+                return spec
 
     raise RuntimeError(
         "no novel Web-R Notebook blueprint passed the title, history, and similarity guards; refusing to publish a repeated design"
@@ -1245,10 +1303,17 @@ def build_candidate_notebook_spec(
     seed: int,
     attempt: int,
     force_new: bool,
+    blueprint_dimension_pools: dict[str, list[Any]] | None = None,
 ) -> dict[str, Any]:
     style = choose_style(seed + attempt * 2, recent_styles)
     topic = choose_topic(seed, recent_topics, attempt, topic_pool)
-    blueprint = build_diversity_blueprint(topic, style, seed, attempt)
+    blueprint = build_diversity_blueprint(
+        topic,
+        style,
+        seed,
+        attempt,
+        dimension_pools=blueprint_dimension_pools,
+    )
     title = build_public_title(topic, style, blueprint, existing_titles, seed + attempt)
     description = (
         f"{topic.source_note}를 {blueprint['data_design']['label']} 구조로 만들고, "
@@ -2227,18 +2292,31 @@ SELECT count() AS count
 
 
 def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, Any]]:
-    request = urllib.request.Request(clickhouse_url(env), data=sql.encode("utf-8"), method="POST")
-    request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
-    request.add_header("Content-Type", "text/plain; charset=utf-8")
-    try:
-        with urllib.request.urlopen(request, timeout=clickhouse_http_timeout(env)) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(300).decode("utf-8", errors="replace")
-        raise SystemExit(f"ClickHouse query failed: HTTP {exc.code}: {redact_detail(env, detail)}") from exc
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"ClickHouse query failed: {exc.__class__.__name__}") from exc
-    return [json.loads(line) for line in body.splitlines() if line.strip()]
+    attempts = max(1, env_int(env, "WEBR_NOTEBOOK_DAILY_READ_ATTEMPTS", 4))
+    backoff = max(0.0, env_float(env, "WEBR_NOTEBOOK_DAILY_READ_BACKOFF_SECONDS", 3.0))
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(clickhouse_url(env), data=sql.encode("utf-8"), method="POST")
+        request.add_header("Authorization", "Basic " + base64.b64encode(f"{first_env(env, 'CH_USER', 'CLICKHOUSE_USER')}:{first_env(env, 'CH_PASSWORD', 'CLICKHOUSE_PASSWORD')}".encode("utf-8")).decode("ascii"))
+        request.add_header("Content-Type", "text/plain; charset=utf-8")
+        try:
+            with urllib.request.urlopen(request, timeout=clickhouse_http_timeout(env)) as response:
+                body = response.read().decode("utf-8")
+            if attempt > 1:
+                print(f"ClickHouse query retry succeeded attempt={attempt}")
+            return [json.loads(line) for line in body.splitlines() if line.strip()]
+        except urllib.error.HTTPError as exc:
+            detail = redact_detail(env, exc.read(300).decode("utf-8", errors="replace"))
+            message = f"HTTP {exc.code}: {detail}"
+            retryable = is_retryable_clickhouse_insert_error(exc.code, detail)
+        except urllib.error.URLError as exc:
+            message = exc.__class__.__name__
+            retryable = True
+        if attempt >= attempts or not retryable:
+            raise SystemExit(f"ClickHouse query failed: {message}")
+        print(f"ClickHouse query retry attempt={attempt + 1}/{attempts} reason={short_clickhouse_reason(message)}")
+        if backoff:
+            time.sleep(backoff)
+    raise SystemExit("ClickHouse query failed: temporary-error")
 
 
 def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -> dict[str, Any]:

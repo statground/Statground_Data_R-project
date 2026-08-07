@@ -5,7 +5,9 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("generate_webr_notebook_daily.py")
@@ -35,6 +37,28 @@ def row_from_spec(spec: dict) -> dict:
 
 
 class NotebookDiversityTest(unittest.TestCase):
+    def test_clickhouse_history_read_retries_url_error(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"value":1}\n'
+        env = {
+            "CH_HOST": "clickhouse.test",
+            "CH_PORT": "8123",
+            "CH_USER": "app",
+            "CH_PASSWORD": "secret",
+            "WEBR_NOTEBOOK_DAILY_READ_ATTEMPTS": "2",
+            "WEBR_NOTEBOOK_DAILY_READ_BACKOFF_SECONDS": "0",
+        }
+
+        with mock.patch.object(
+            notebook.urllib.request,
+            "urlopen",
+            side_effect=[urllib.error.URLError("temporary timeout"), response],
+        ) as urlopen:
+            rows = notebook.clickhouse_json_each_row(env, "SELECT 1 FORMAT JSONEachRow")
+
+        self.assertEqual([{"value": 1}], rows)
+        self.assertEqual(2, urlopen.call_count)
+
     def test_data_rpackage_compatibility_keeps_package_names_only(self) -> None:
         self.assertEqual(
             ["Matrix", "jsonlite"],
@@ -119,6 +143,97 @@ class NotebookDiversityTest(unittest.TestCase):
         self.assertEqual(5, len(fingerprints))
         for dimension, values in dimension_values.items():
             self.assertEqual(5, len(values), dimension)
+
+    def test_recent_dimension_guards_are_applied_before_candidate_sampling(self) -> None:
+        recent_keys = {
+            "data_design": {item.key for item in notebook.DATA_DESIGNS[:5]},
+            "validation_lens": {item.key for item in notebook.VALIDATION_LENSES[:5]},
+            "visual_grammar": {item.key for item in notebook.VISUAL_GRAMMARS[:5]},
+            "narrative_frame": {item.key for item in notebook.NARRATIVE_FRAMES[:5]},
+            "package_profile": {item.key for item in notebook.WEBR_PACKAGE_PROFILES[:8]},
+        }
+        pools = notebook.eligible_blueprint_dimension_pools(recent_keys)
+
+        for dimension, excluded in recent_keys.items():
+            self.assertTrue(pools[dimension], dimension)
+            self.assertTrue({item.key for item in pools[dimension]}.isdisjoint(excluded), dimension)
+
+        blueprint = notebook.build_diversity_blueprint(
+            notebook.TOPICS[0],
+            notebook.STYLES[0],
+            12345,
+            0,
+            dimension_pools=pools,
+        )
+        for dimension, excluded in recent_keys.items():
+            self.assertNotIn(blueprint[dimension]["key"], excluded, dimension)
+
+    def test_notebook_spec_skips_recent_blueprint_dimensions_without_exhausting_attempts(self) -> None:
+        recent_dimension_keys = {
+            "data_design": [item.key for item in notebook.DATA_DESIGNS[:5]],
+            "validation_lens": [item.key for item in notebook.VALIDATION_LENSES[:5]],
+            "visual_grammar": [item.key for item in notebook.VISUAL_GRAMMARS[:5]],
+            "narrative_frame": [item.key for item in notebook.NARRATIVE_FRAMES[:5]],
+            "package_profile": [item.key for item in notebook.WEBR_PACKAGE_PROFILES[:8]],
+        }
+        recent_rows = []
+        for index in range(8):
+            blueprint = {
+                dimension: {"key": keys[index % len(keys)]}
+                for dimension, keys in recent_dimension_keys.items()
+            }
+            recent_rows.append(
+                {
+                    "title": f"history {index}",
+                    "description": "",
+                    "data_markdown": "",
+                    "data_rcode": "",
+                    "data_meta": json.dumps({"blueprint": blueprint}),
+                }
+            )
+
+        spec = notebook.build_notebook_spec(
+            "2026-08-07",
+            set(),
+            recent_rows,
+            topic_pool=notebook.TOPICS,
+            force_new=True,
+        )
+
+        for dimension, excluded in recent_dimension_keys.items():
+            self.assertNotIn(spec["blueprint"][dimension]["key"], excluded, dimension)
+        self.assertTrue(spec["similarity_guard"]["accepted"])
+
+    def test_curated_topics_are_searched_after_source_context_novelty_exhaustion(self) -> None:
+        dynamic_topic = notebook.Topic(
+            **{
+                **notebook.TOPICS[0].__dict__,
+                "key": "source-context-regression",
+                "source_context": {"context_kind": "unit_test"},
+            }
+        )
+
+        def similarity_by_topic(spec: dict, _rows: list[dict]) -> tuple[float, str]:
+            if spec["topic"].get("source_context"):
+                return 0.99, "repeated source context"
+            return 0.1, ""
+
+        with (
+            mock.patch.object(notebook, "MAX_CANDIDATE_ATTEMPTS", 2),
+            mock.patch.object(notebook, "max_recent_similarity", side_effect=similarity_by_topic),
+        ):
+            spec = notebook.build_notebook_spec(
+                "2026-08-07",
+                set(),
+                [{"title": "history"}],
+                topic_pool=[dynamic_topic, notebook.TOPICS[1]],
+                force_new=True,
+            )
+
+        self.assertIsNone(spec["topic"]["source_context"])
+        self.assertEqual("curated_static", spec["similarity_guard"]["topic_pool_kind"])
+        self.assertEqual(3, spec["similarity_guard"]["attempt"])
+        self.assertTrue(spec["similarity_guard"]["accepted"])
 
     def test_all_dimension_combinations_build_base_r_validation_code(self) -> None:
         topic = notebook.TOPICS[0]
