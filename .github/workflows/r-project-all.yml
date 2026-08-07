@@ -692,6 +692,7 @@ jobs:
         run: |
           python scripts/test_export_r_package_cdn.py
           python scripts/test_export_community_cdn.py
+          python scripts/test_record_web_r_cdn_release.py
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           previous_package_commit="$(git -C web-r_CDN2_packages rev-parse HEAD)"
           python scripts/export_r_package_cdn.py \
@@ -889,6 +890,8 @@ jobs:
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
           WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_ATTEMPTS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_ATTEMPTS || '3' }}
+          WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS || '2' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS || '1' }}
@@ -1063,6 +1066,8 @@ jobs:
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
           WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_ATTEMPTS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_ATTEMPTS || '3' }}
+          WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS || '2' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS || '1' }}

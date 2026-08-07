@@ -40,7 +40,9 @@ jobs:
         run: python -m pip install -r scripts/requirements.txt
 
       - name: Validate snapshot finalizer contract
-        run: python scripts/test_admin_pipeline_snapshot_finalize_workflow.py
+        run: |
+          python scripts/test_admin_pipeline_snapshot_finalize_workflow.py
+          python scripts/test_record_web_r_cdn_release.py
 
       - name: Checkout Web-R CDN2 admin snapshots
         uses: actions/checkout@v7
@@ -115,6 +117,8 @@ jobs:
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
           WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: "true"
+          WEB_R_CDN_RELEASE_RECORD_ATTEMPTS: "3"
+          WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS: "2"
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: "20"
           WEB_R_CDN_RELEASE_RECORD_HTTP_TIMEOUT: "25"
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_THREADS: "1"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import http.client
 import json
 import os
@@ -29,6 +30,11 @@ DEFAULT_REPO = "statground/web-r_CDN2_contents"
 DEFAULT_BRANCH = "main"
 DEFAULT_SCOPE = "web-r-content"
 DEFAULT_LANGUAGE = "ko"
+RELEASE_LOG_TABLE = "Data_R_Community_Service.web_r_cdn_release_log"
+DEFAULT_RECORD_ATTEMPTS = 3
+MAX_RECORD_ATTEMPTS = 6
+DEFAULT_RECORD_BACKOFF_SECONDS = 2.0
+MAX_RECORD_BACKOFF_SECONDS = 30.0
 
 
 class ClickHouseReleaseRecordError(RuntimeError):
@@ -81,13 +87,32 @@ def main() -> int:
         "active": 1,
         "version": version,
     }
+    attempts = bounded_int_env(
+        "WEB_R_CDN_RELEASE_RECORD_ATTEMPTS",
+        DEFAULT_RECORD_ATTEMPTS,
+        minimum=1,
+        maximum=MAX_RECORD_ATTEMPTS,
+    )
+    backoff_seconds = bounded_float_env(
+        "WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS",
+        DEFAULT_RECORD_BACKOFF_SECONDS,
+        minimum=0.0,
+        maximum=MAX_RECORD_BACKOFF_SECONDS,
+    )
 
     try:
-        insert_json_each_row("Data_R_Community_Service.web_r_cdn_release_log", payload)
+        attempts_used = insert_release_with_retry(
+            RELEASE_LOG_TABLE,
+            payload,
+            scope=args.scope,
+            attempts=attempts,
+            backoff_seconds=backoff_seconds,
+        )
     except ClickHouseReleaseRecordError as exc:
         if env_bool(os.environ, "WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
-                f"[warn] Web-R CDN release record deferred scope={args.scope} reason={exc.category}",
+                f"[warn] Web-R CDN release record deferred scope={args.scope} "
+                f"reason={exc.category} attempts={attempts}",
                 file=sys.stderr,
             )
             print(
@@ -99,13 +124,25 @@ def main() -> int:
                         "record_deferred": True,
                         "deferred_reason": exc.category,
                         "deferred_http_status": exc.status_code,
+                        "record_attempts": attempts,
                     },
                     ensure_ascii=False,
                 )
             )
             return 0
         raise SystemExit(str(exc)) from exc
-    print(json.dumps({"release_id": release_id, "commit_sha": commit_sha, "item_count": item_count, "record_deferred": False}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "release_id": release_id,
+                "commit_sha": commit_sha,
+                "item_count": item_count,
+                "record_deferred": False,
+                "record_attempts": attempts_used,
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -128,8 +165,71 @@ def report_item_count(report: dict[str, Any]) -> int:
     return total
 
 
-def insert_json_each_row(table: str, row: dict[str, Any]) -> None:
-    sql = f"INSERT INTO {table} FORMAT JSONEachRow\n" + json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+def insert_release_with_retry(
+    table: str,
+    row: dict[str, Any],
+    *,
+    scope: str,
+    attempts: int,
+    backoff_seconds: float,
+) -> int:
+    bounded_attempts = max(1, min(MAX_RECORD_ATTEMPTS, int(attempts)))
+    bounded_backoff = max(0.0, min(MAX_RECORD_BACKOFF_SECONDS, float(backoff_seconds)))
+    deduplication_token = release_record_deduplication_token(str(row.get("release_id") or ""))
+    for attempt in range(1, bounded_attempts + 1):
+        try:
+            insert_json_each_row(
+                table,
+                row,
+                deduplication_token=deduplication_token,
+            )
+            return attempt
+        except ClickHouseReleaseRecordError as exc:
+            transient = is_transient_clickhouse_export_failure(
+                exc.status_code,
+                exc.category,
+                exc.detail,
+            )
+            if not transient or attempt >= bounded_attempts:
+                raise
+            print(
+                f"[warn] Web-R CDN release record retry scope={scope} "
+                f"reason={exc.category} attempt={attempt}/{bounded_attempts}",
+                file=sys.stderr,
+            )
+            delay = min(MAX_RECORD_BACKOFF_SECONDS, bounded_backoff * attempt)
+            if delay > 0:
+                time.sleep(delay)
+    raise AssertionError("unreachable release record retry state")
+
+
+def release_record_deduplication_token(release_id: str) -> str:
+    release_id = str(release_id or "").strip()
+    if not release_id:
+        raise ValueError("release_id is required for ClickHouse insert deduplication")
+    return hashlib.sha256(f"web-r-cdn-release:v1:{release_id}".encode("utf-8")).hexdigest()
+
+
+def insert_json_each_row(
+    table: str,
+    row: dict[str, Any],
+    *,
+    deduplication_token: str,
+) -> None:
+    token = str(deduplication_token or "").strip().lower()
+    if len(token) != 64 or not all(character in "0123456789abcdef" for character in token):
+        raise ValueError("valid SHA-256 ClickHouse insert deduplication token is required")
+    row_json = json.dumps(
+        row,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    sql = (
+        f"INSERT INTO {table} SETTINGS insert_deduplicate = 1, "
+        f"insert_deduplication_token = '{token}' FORMAT JSONEachRow\n"
+        f"{row_json}\n"
+    )
     request = urllib.request.Request(clickhouse_url(), data=sql.encode("utf-8"), method="POST")
     user = first_env("CH_USER", "CLICKHOUSE_USER")
     password = first_env("CH_PASSWORD", "CLICKHOUSE_PASSWORD")
@@ -173,6 +273,36 @@ def first_env(*keys: str) -> str:
         if value:
             return value
     return ""
+
+
+def bounded_int_env(
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.environ.get(key, "").strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except ValueError as exc:
+        raise SystemExit(f"{key} must be an integer") from exc
+    return max(int(minimum), min(int(maximum), value))
+
+
+def bounded_float_env(
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = os.environ.get(key, "").strip()
+    try:
+        value = float(raw) if raw else float(default)
+    except ValueError as exc:
+        raise SystemExit(f"{key} must be a number") from exc
+    return max(float(minimum), min(float(maximum), value))
 
 
 def redact_detail(value: str) -> str:
