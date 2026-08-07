@@ -76,6 +76,40 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
         self.assertIn("verify_web_r_cdn_release.py", TEXT)
         self.assertGreaterEqual(TEXT.count("--scope web-r-admin-pipelines"), 2)
 
+    def test_both_admin_snapshot_publishers_rebuild_on_latest_main(self) -> None:
+        finalizer_publish = TEXT.split(
+            "- name: Commit and push completed admin pipeline snapshot", 1
+        )[1].split("- name: Record Web-R CDN2 admin pipeline snapshot release", 1)[0]
+        main_publish = MAIN_WORKFLOW.split(
+            "- name: Commit and push Web-R CDN2 admin pipeline snapshot", 1
+        )[1].split("- name: Record Web-R CDN2 admin pipeline snapshot release", 1)[0]
+
+        for publish in (finalizer_publish, main_publish):
+            self.assertIn(
+                'snapshot_file="${RUNNER_TEMP}/web-r-admin-pipelines-latest.json"',
+                publish,
+            )
+            self.assertIn(
+                "git restore --source=HEAD --staged --worktree "
+                "admin/pipelines/latest.json",
+                publish,
+            )
+            self.assertIn("for attempt in 1 2 3; do", publish)
+            self.assertIn("git fetch --no-tags origin main", publish)
+            self.assertIn("git switch --detach FETCH_HEAD", publish)
+            self.assertIn(
+                'cp "$snapshot_file" admin/pipelines/latest.json', publish
+            )
+            self.assertIn("if git push origin HEAD:main; then", publish)
+            self.assertLess(
+                publish.index("git fetch --no-tags origin main"),
+                publish.index("git commit -m"),
+            )
+            self.assertLess(
+                publish.index("git commit -m"),
+                publish.index("if git push origin HEAD:main; then"),
+            )
+
     def test_release_record_failure_does_not_skip_pointer_verification(self) -> None:
         finalizer_record = TEXT.split(
             "- name: Record Web-R CDN2 admin pipeline snapshot release", 1

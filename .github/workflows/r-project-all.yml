@@ -1026,17 +1026,32 @@ jobs:
           git config user.name "statground-r-project-bot"
           git config user.email "actions@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2.git"
-          git add admin/pipelines/latest.json
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "Web-R CDN2 admin pipeline snapshot is already up to date."
-            exit 0
-          fi
-          git commit -m "Refresh admin pipeline monitor snapshot"
-          git push origin HEAD:main
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          snapshot_file="${RUNNER_TEMP}/web-r-admin-pipelines-latest.json"
+          cp admin/pipelines/latest.json "$snapshot_file"
+          git restore --source=HEAD --staged --worktree admin/pipelines/latest.json
+          for attempt in 1 2 3; do
+            git fetch --no-tags origin main
+            git switch --detach FETCH_HEAD
+            cp "$snapshot_file" admin/pipelines/latest.json
+            git add admin/pipelines/latest.json
+            if git diff --cached --quiet; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              echo "Web-R CDN2 admin pipeline snapshot is already up to date."
+              exit 0
+            fi
+            git commit -m "Refresh admin pipeline monitor snapshot"
+            if git push origin HEAD:main; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep $((attempt * 2))
+            fi
+          done
+          echo "Unable to publish the admin pipeline snapshot after 3 attempts" >&2
+          exit 1
 
       - name: Record Web-R CDN2 admin pipeline snapshot release
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
