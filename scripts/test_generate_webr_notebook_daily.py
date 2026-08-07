@@ -59,6 +59,10 @@ class NotebookDiversityTest(unittest.TestCase):
         self.assertEqual([{"value": 1}], rows)
         self.assertEqual(2, urlopen.call_count)
 
+    def test_clickhouse_history_read_does_not_retry_type_contract_error(self) -> None:
+        detail = "Code: 386. DB::Exception: There is no supertype for types String, UUID. (NO_COMMON_TYPE)"
+        self.assertFalse(notebook.is_retryable_clickhouse_insert_error(500, detail))
+
     def test_data_rpackage_compatibility_keeps_package_names_only(self) -> None:
         self.assertEqual(
             ["Matrix", "jsonlite"],
