@@ -198,8 +198,11 @@ def head_status(url: str) -> int:
             return int(response.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"CDN manifest verification failed: {exc.__class__.__name__}") from exc
+    except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError):
+        # A freshly-published jsDelivr object can be temporarily unreachable or
+        # time out. Returning 0 keeps the failure inside main's bounded retry
+        # loop instead of aborting on the first transport exception.
+        return 0
 
 
 def normalize_sha(value: str) -> str:
