@@ -2311,6 +2311,11 @@ def clickhouse_json_each_row(env: dict[str, str], sql: str) -> list[dict[str, An
         except urllib.error.URLError as exc:
             message = exc.__class__.__name__
             retryable = True
+        except TimeoutError as exc:
+            # socket/http.client can raise the built-in TimeoutError directly;
+            # urllib does not always wrap it in URLError.
+            message = exc.__class__.__name__
+            retryable = True
         if attempt >= attempts or not retryable:
             raise SystemExit(f"ClickHouse query failed: {message}")
         print(f"ClickHouse query retry attempt={attempt + 1}/{attempts} reason={short_clickhouse_reason(message)}")
@@ -2345,6 +2350,9 @@ def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -
             last_message = f"HTTP {exc.code}: {sanitized}"
             retryable = is_retryable_clickhouse_insert_error(exc.code, sanitized)
         except urllib.error.URLError as exc:
+            last_message = exc.__class__.__name__
+            retryable = True
+        except TimeoutError as exc:
             last_message = exc.__class__.__name__
             retryable = True
         last_retryable = retryable

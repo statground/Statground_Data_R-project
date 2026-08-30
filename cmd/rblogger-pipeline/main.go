@@ -1029,6 +1029,9 @@ func (r *ClickHouseReader) InsertRbloggerEvents(ctx context.Context, events []Ka
 	for _, table := range tables {
 		rows := rowsByTable[table]
 		if err := r.insertRows(ctx, table, rows, batchSize); err != nil {
+			if isRbloggerOutboxPersistenceError(err) {
+				return counts, fmt.Errorf("ClickHouse R-bloggers direct publish failed target=%s: %w", rbloggerDirectTableLabel(table), err)
+			}
 			return counts, fmt.Errorf("ClickHouse R-bloggers direct publish failed target=%s: %s", rbloggerDirectTableLabel(table), publicClickHouseStatementError(err))
 		}
 		counts[rbloggerDirectTableLabel(table)] += len(rows)
@@ -1073,6 +1076,7 @@ func (r *ClickHouseReader) insertRowChunkWithSplit(ctx context.Context, table st
 			return nil
 		} else {
 			fmt.Printf("[warn] rblogger direct outbox enqueue failed target=%s rows=%d error=%s\n", rbloggerDirectTableLabel(table), len(rows), publicClickHouseStatementError(outboxErr))
+			return newRbloggerOutboxPersistenceError(table, err, outboxErr)
 		}
 	}
 	return err
@@ -1486,7 +1490,38 @@ func shouldDeferRbloggerPublishFailure(err error) bool {
 	if !envBool("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
 		return false
 	}
+	if isRbloggerOutboxPersistenceError(err) {
+		return false
+	}
 	return isTransientClickHousePublishFailure(err)
+}
+
+type rbloggerOutboxPersistenceError struct {
+	target       string
+	sourceReason string
+	outboxReason string
+}
+
+func (e *rbloggerOutboxPersistenceError) Error() string {
+	return fmt.Sprintf(
+		"clickhouse rblogger publish was not persisted target=%s source_reason=%s outbox_reason=%s",
+		e.target,
+		e.sourceReason,
+		e.outboxReason,
+	)
+}
+
+func newRbloggerOutboxPersistenceError(table string, sourceErr, outboxErr error) error {
+	return &rbloggerOutboxPersistenceError{
+		target:       rbloggerDirectTableLabel(table),
+		sourceReason: publicClickHouseStatementError(sourceErr),
+		outboxReason: publicClickHouseStatementError(outboxErr),
+	}
+}
+
+func isRbloggerOutboxPersistenceError(err error) bool {
+	var persistenceErr *rbloggerOutboxPersistenceError
+	return errors.As(err, &persistenceErr)
 }
 
 func isTransientClickHousePublishFailure(err error) bool {

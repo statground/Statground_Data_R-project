@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -113,6 +114,20 @@ func TestRbloggerPublishFailureDefersOnlyTransientErrors(t *testing.T) {
 	permission := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-permission")
 	if shouldDeferRbloggerPublishFailure(permission) {
 		t.Fatal("permission errors must remain fatal")
+	}
+	persistenceErr := fmt.Errorf(
+		"wrapped rblogger failure: %w",
+		newRbloggerOutboxPersistenceError(
+			"Data_R_Community_Raw.rblogger_event_raw",
+			errors.New("clickhouse statement failed HTTP 408"),
+			errors.New("Post http://clickhouse:8123/: unexpected EOF"),
+		),
+	)
+	if !isRbloggerOutboxPersistenceError(persistenceErr) {
+		t.Fatal("wrapped R-bloggers persistence failure must retain its fail-closed identity")
+	}
+	if shouldDeferRbloggerPublishFailure(persistenceErr) {
+		t.Fatal("R-bloggers must fail when both target and outbox persistence fail")
 	}
 }
 

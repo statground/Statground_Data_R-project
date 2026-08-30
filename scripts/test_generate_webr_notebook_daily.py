@@ -59,6 +59,28 @@ class NotebookDiversityTest(unittest.TestCase):
         self.assertEqual([{"value": 1}], rows)
         self.assertEqual(2, urlopen.call_count)
 
+    def test_clickhouse_history_read_retries_builtin_timeout(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"value":1}\n'
+        env = {
+            "CH_HOST": "clickhouse.test",
+            "CH_PORT": "8123",
+            "CH_USER": "app",
+            "CH_PASSWORD": "secret",
+            "WEBR_NOTEBOOK_DAILY_READ_ATTEMPTS": "2",
+            "WEBR_NOTEBOOK_DAILY_READ_BACKOFF_SECONDS": "0",
+        }
+
+        with mock.patch.object(
+            notebook.urllib.request,
+            "urlopen",
+            side_effect=[TimeoutError("timed out"), response],
+        ) as urlopen:
+            rows = notebook.clickhouse_json_each_row(env, "SELECT 1 FORMAT JSONEachRow")
+
+        self.assertEqual([{"value": 1}], rows)
+        self.assertEqual(2, urlopen.call_count)
+
     def test_clickhouse_history_read_does_not_retry_type_contract_error(self) -> None:
         detail = "Code: 386. DB::Exception: There is no supertype for types String, UUID. (NO_COMMON_TYPE)"
         self.assertFalse(notebook.is_retryable_clickhouse_insert_error(500, detail))

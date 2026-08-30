@@ -7972,6 +7972,9 @@ func (p *publisher) publishGeneric(ctx context.Context, events []genericEvent) e
 		p.drainDirectOutbox(ctx)
 		target, err := insertGenericRawEventsDirect(ctx, events)
 		if err != nil {
+			if isDirectOutboxPersistenceError(err) {
+				return fmt.Errorf("ClickHouse direct publish failed target=%s: %w", target.label, err)
+			}
 			return fmt.Errorf("ClickHouse direct publish failed target=%s: %s", target.label, publicClickHouseError(err))
 		}
 		if len(events) > 0 {
@@ -8030,9 +8033,17 @@ func (p *publisher) drainDirectOutbox(ctx context.Context) {
 		return
 	}
 	p.directOutboxDrained = true
-	limit := envInt("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", 100)
+	configuredLimit := envInt("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", rProjectDirectOutboxDrainDefault)
+	limit := rProjectDirectOutboxDrainLimit()
 	if limit <= 0 {
 		return
+	}
+	if configuredLimit > rProjectDirectOutboxDrainHardMax {
+		fmt.Printf(
+			"[warn] R Project direct outbox drain limit capped configured=%d effective=%d\n",
+			configuredLimit,
+			limit,
+		)
 	}
 	cfg, err := newClickHouseQueryConfig()
 	if err != nil {
@@ -8047,6 +8058,22 @@ func (p *publisher) drainDirectOutbox(ctx context.Context) {
 	if drained > 0 {
 		fmt.Printf("[clickhouse] drained R Project direct outbox chunks=%d\n", drained)
 	}
+}
+
+const (
+	rProjectDirectOutboxDrainDefault = 10
+	rProjectDirectOutboxDrainHardMax = 25
+)
+
+func rProjectDirectOutboxDrainLimit() int {
+	limit := envInt("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", rProjectDirectOutboxDrainDefault)
+	if limit <= 0 {
+		return 0
+	}
+	if limit > rProjectDirectOutboxDrainHardMax {
+		return rProjectDirectOutboxDrainHardMax
+	}
+	return limit
 }
 
 func (p *publisher) packageClickHouseFallbackEnabled(events []genericEvent) bool {
@@ -8076,11 +8103,17 @@ func shouldDeferPackagePublishFailure(err error) bool {
 	if !envBool("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
 		return false
 	}
+	if isDirectOutboxPersistenceError(err) {
+		return false
+	}
 	return isTransientPublishFailure(err)
 }
 
 func shouldDeferYouTubePublishFailure(err error) bool {
 	if !envBool("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+		return false
+	}
+	if isDirectOutboxPersistenceError(err) {
 		return false
 	}
 	return isTransientPublishFailure(err)
@@ -8090,6 +8123,9 @@ func shouldDeferCommunityPublishFailure(err error) bool {
 	if !envBool("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
 		return false
 	}
+	if isDirectOutboxPersistenceError(err) {
+		return false
+	}
 	return isTransientPublishFailure(err)
 }
 
@@ -8097,7 +8133,38 @@ func shouldDeferCommunityDigestFailure(err error) bool {
 	if !envBool("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", true) {
 		return false
 	}
+	if isDirectOutboxPersistenceError(err) {
+		return false
+	}
 	return isTransientClickHousePublishFailure(err)
+}
+
+type directOutboxPersistenceError struct {
+	target       string
+	sourceReason string
+	outboxReason string
+}
+
+func (e *directOutboxPersistenceError) Error() string {
+	return fmt.Sprintf(
+		"clickhouse direct publish was not persisted target=%s source_reason=%s outbox_reason=%s",
+		e.target,
+		e.sourceReason,
+		e.outboxReason,
+	)
+}
+
+func newDirectOutboxPersistenceError(target string, sourceErr, outboxErr error) error {
+	return &directOutboxPersistenceError{
+		target:       target,
+		sourceReason: publicClickHouseError(sourceErr),
+		outboxReason: publicClickHouseError(outboxErr),
+	}
+}
+
+func isDirectOutboxPersistenceError(err error) bool {
+	var persistenceErr *directOutboxPersistenceError
+	return errors.As(err, &persistenceErr)
 }
 
 func isTransientPublishFailure(err error) bool {
@@ -8303,10 +8370,7 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 			return fmt.Errorf("clickhouse direct publish deferred target=%s rows=%d reason=%s", label, len(events), publicClickHouseError(err))
 		} else {
 			fmt.Printf("[warn] R Project direct outbox enqueue failed target=%s rows=%d error=%s\n", label, len(events), publicClickHouseError(outboxErr))
-			if isTransientClickHousePublishFailure(outboxErr) {
-				return fmt.Errorf("clickhouse direct publish deferred target=%s rows=%d reason=%s outbox_error=%s", label, len(events), publicClickHouseError(err), publicClickHouseError(outboxErr))
-			}
-			return fmt.Errorf("clickhouse direct publish failed target=%s reason=%s outbox_error=%s", label, publicClickHouseError(err), publicClickHouseError(outboxErr))
+			return newDirectOutboxPersistenceError(label, err, outboxErr)
 		}
 	}
 	return err
@@ -8640,6 +8704,9 @@ func (p *publisher) publishWebR(ctx context.Context, events []webREvent) error {
 	if p.usesClickHouse() {
 		counts, err := insertWebREventsDirect(ctx, events)
 		if err != nil {
+			if isDirectOutboxPersistenceError(err) {
+				return fmt.Errorf("ClickHouse direct Web-R publish failed: %w", err)
+			}
 			return fmt.Errorf("ClickHouse direct Web-R publish failed: %s", publicClickHouseError(err))
 		}
 		if len(events) > 0 {
@@ -8917,10 +8984,7 @@ func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConf
 			return true, nil
 		} else {
 			fmt.Printf("[warn] Web-R direct outbox enqueue failed target=%s rows=%d error=%s\n", label, len(rows), publicClickHouseError(outboxErr))
-			if shouldDeferWebRDirectOutboxFailure(outboxErr) {
-				fmt.Printf("[webr] publish_deferred target=%s rows=%d reason=%s outbox_error=%s\n", label, len(rows), publicClickHouseError(err), publicClickHouseError(outboxErr))
-				return true, nil
-			}
+			return false, newDirectOutboxPersistenceError(label, err, outboxErr)
 		}
 	}
 	return false, err
@@ -8928,20 +8992,6 @@ func insertDirectRowsChunkWithSplit(ctx context.Context, cfg clickHouseQueryConf
 
 func shouldEnqueueWebRDirectOutbox(err error) bool {
 	return isTransientClickHousePublishFailure(err)
-}
-
-func shouldDeferWebRDirectOutboxFailure(err error) bool {
-	if !webRDirectTransientFailOpen() {
-		return false
-	}
-	return isTransientClickHousePublishFailure(err)
-}
-
-func webRDirectTransientFailOpen() bool {
-	if value, ok := os.LookupEnv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN"); ok && strings.TrimSpace(value) != "" {
-		return envBoolValue(value)
-	}
-	return envBool("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", true)
 }
 
 func enqueueWebRDirectOutbox(ctx context.Context, cfg clickHouseQueryConfig, table, label, insertBody string, rowCount int, sourceErr error) error {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -93,12 +94,11 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 	if !strings.Contains(text, "r-package-collection-*") || strings.Count(text, "github.event_name == 'push'") != 7 {
 		t.Fatal("package tag validation trigger must use the full split DAG")
 	}
-	if !strings.Contains(text, "max-parallel: 2") {
-		t.Fatal("dependency shards must cap parallel ClickHouse writers")
+	if !strings.Contains(text, "group: r-project-package-pipeline") || !strings.Contains(text, "cancel-in-progress: false") {
+		t.Fatal("package runs must not overlap or cancel a partially completed pipeline")
 	}
-	dependencyJob := text[strings.Index(text, "  package_dependencies:"):strings.Index(text, "  package_pages:")]
-	if strings.Contains(dependencyJob, "needs: package_metadata") {
-		t.Fatal("dependency shards must not wait for the long metadata/archive group")
+	if !strings.Contains(text, "max-parallel: 1") {
+		t.Fatal("dependency shards must serialize ClickHouse writers")
 	}
 	for _, contract := range []string{
 		"r_package_job: cran-metadata,cran-downloads,cran-checks",
@@ -106,6 +106,11 @@ func TestPackageWorkflowManualAllUsesSplitDAG(t *testing.T) {
 		"r_package_job: cran-task-views",
 		"r_package_job: r-core-news,package-news",
 		"needs: package_core_metadata",
+		"needs: package_archive",
+		"needs: package_task_views",
+		"needs: package_news",
+		"needs: package_dependencies",
+		"needs: package_pages",
 	} {
 		if !strings.Contains(text, contract) {
 			t.Fatalf("package split workflow missing %q", contract)
@@ -124,6 +129,7 @@ func TestBulkPackageWorkflowsUseBoundedLargerClickHouseChunks(t *testing.T) {
 		"r_package_job == 'cran-archive' && (vars.RPKG_CRAN_ARCHIVE_CLICKHOUSE_CHUNK_SIZE || '500')",
 		"r_package_job == 'cran-task-views' && (vars.RPKG_CRAN_TASK_VIEW_CLICKHOUSE_CHUNK_SIZE || '250')",
 		"vars.RPROJECT_CLICKHOUSE_CHUNK_SIZE || '50'",
+		"RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT: ${{ vars.RPKG_DIRECT_OUTBOX_DRAIN_LIMIT || '10' }}",
 	} {
 		if !strings.Contains(text, contract) {
 			t.Fatalf("bulk package workflow chunk contract missing %q", contract)
@@ -407,6 +413,56 @@ func TestShouldDeferPackagePublishFailureOnlyForTransientErrors(t *testing.T) {
 	}
 }
 
+func TestDirectOutboxPersistenceFailureIsNeverFailOpen(t *testing.T) {
+	t.Setenv("RPKG_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	t.Setenv("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", "true")
+	err := fmt.Errorf(
+		"wrapped direct publish failure: %w",
+		newDirectOutboxPersistenceError(
+			"package",
+			errors.New("ClickHouse HTTP 408: timeout"),
+			errors.New("Post http://clickhouse:8123/: unexpected EOF"),
+		),
+	)
+	if !isDirectOutboxPersistenceError(err) {
+		t.Fatal("wrapped persistence error must retain its fail-closed identity")
+	}
+	for name, deferFailure := range map[string]func(error) bool{
+		"package":          shouldDeferPackagePublishFailure,
+		"youtube":          shouldDeferYouTubePublishFailure,
+		"community":        shouldDeferCommunityPublishFailure,
+		"community-digest": shouldDeferCommunityDigestFailure,
+	} {
+		if deferFailure(err) {
+			t.Fatalf("%s must fail when both target and outbox persistence fail", name)
+		}
+	}
+}
+
+func TestRProjectDirectOutboxDrainLimitIsHardBounded(t *testing.T) {
+	tests := []struct {
+		value string
+		want  int
+	}{
+		{value: "", want: rProjectDirectOutboxDrainDefault},
+		{value: "bad", want: rProjectDirectOutboxDrainDefault},
+		{value: "0", want: 0},
+		{value: "-1", want: 0},
+		{value: "10", want: 10},
+		{value: "999", want: rProjectDirectOutboxDrainHardMax},
+	}
+	for _, tc := range tests {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT", tc.value)
+			if got := rProjectDirectOutboxDrainLimit(); got != tc.want {
+				t.Fatalf("drain limit = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
 	transient := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-not-initialized")
 	if !shouldDeferYouTubePublishFailure(transient) {
@@ -463,8 +519,6 @@ func TestShouldDeferCommunityDigestFailureForClickHouseBusyErrors(t *testing.T) 
 }
 
 func TestWebRDirectOutboxHelpers(t *testing.T) {
-	t.Setenv("RPROJECT_WEBR_PUBLISH_TRANSIENT_FAIL_OPEN", "")
-	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
 	body := genericRawEventInsertPrefix(clickHouseQueryConfig{}, "Data_R_Community_Log.mastodon_log") + "{\"uuid\":\"u1\"}\n"
 	rowsJSON := directRowsJSONFromInsertBody(body)
 	if rowsJSON != "{\"uuid\":\"u1\"}" {
@@ -487,12 +541,13 @@ func TestWebRDirectOutboxHelpers(t *testing.T) {
 	if !shouldEnqueueWebRDirectOutbox(errors.New("ClickHouse HTTP 408: Code: 159. DB::Exception: Timeout exceeded")) {
 		t.Fatal("ClickHouse 408 timeout errors should be queued to outbox")
 	}
-	if !shouldDeferWebRDirectOutboxFailure(errors.New("Post http://clickhouse:8123/: unexpected EOF")) {
-		t.Fatal("transient outbox enqueue failure should be fail-open by default")
-	}
-	t.Setenv("MASTODON_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
-	if shouldDeferWebRDirectOutboxFailure(errors.New("Post http://clickhouse:8123/: unexpected EOF")) {
-		t.Fatal("Mastodon/Web-R outbox defer should respect opt-out env")
+	persistenceErr := newDirectOutboxPersistenceError(
+		"mastodon-log",
+		transient,
+		errors.New("Post http://clickhouse:8123/: unexpected EOF"),
+	)
+	if !isDirectOutboxPersistenceError(persistenceErr) {
+		t.Fatal("transient Web-R outbox enqueue failure must be fail-closed")
 	}
 	if shouldEnqueueWebRDirectOutbox(errors.New("ClickHouse HTTP 500: DB::Exception: Unknown identifier status_id")) {
 		t.Fatal("schema errors must not be queued to outbox")
