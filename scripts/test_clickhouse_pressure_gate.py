@@ -16,7 +16,6 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.healthy = {
             "distributed_files": 20,
             "broken_distributed_files": 0,
-            "readonly_metric": 0,
             "available_samples": 1,
             "available_bytes": 500 * 1024**3,
             "total_samples": 1,
@@ -27,6 +26,11 @@ class ClickHousePressureGateTest(unittest.TestCase):
             "total_inodes": 10_000_000,
             "iowait_samples": 1,
             "iowait_normalized": 0.10,
+            "expected_replica_target_count": 2,
+            "replica_target_count": 2,
+            "expected_local_target_count": 1,
+            "local_target_count": 1,
+            "invalid_local_target_engines": 0,
             "unhealthy_replicas": 0,
             "max_replica_queue": 12,
             "max_replica_delay_seconds": 4,
@@ -38,9 +42,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
 
     def test_each_pressure_dimension_blocks(self):
         cases = {
-            "distributed_files": 10001,
-            "broken_distributed_files": 1,
-            "readonly_metric": 1,
+            "unhealthy_replicas": 1,
             "available_bytes": 10,
             "iowait_normalized": 0.75,
             "max_replica_queue": 2001,
@@ -52,24 +54,73 @@ class ClickHousePressureGateTest(unittest.TestCase):
                 snapshot = dict(self.healthy, **{key: value})
                 self.assertTrue(gate.evaluate(snapshot, self.thresholds))
 
+    def test_unrelated_global_distributed_backlog_is_observability_only(self):
+        snapshot = dict(self.healthy, distributed_files=606_448, broken_distributed_files=7)
+        self.assertEqual(gate.evaluate(snapshot, self.thresholds), [])
+
     def test_missing_filesystem_metrics_fails_closed(self):
         snapshot = dict(self.healthy, available_samples=0)
         self.assertIn("filesystem_metrics_unavailable", gate.evaluate(snapshot, self.thresholds))
         snapshot = dict(self.healthy, total_inode_samples=0)
         self.assertIn("filesystem_inode_metrics_unavailable", gate.evaluate(snapshot, self.thresholds))
+        snapshot = dict(self.healthy, iowait_samples=0)
+        self.assertIn("iowait_metrics_unavailable", gate.evaluate(snapshot, self.thresholds))
 
     def test_idle_replica_delay_does_not_block(self):
         snapshot = dict(self.healthy, max_replica_queue=0, max_replica_delay_seconds=9_999_999)
         self.assertEqual(gate.evaluate(snapshot, self.thresholds), [])
 
-    def test_query_uses_constant_cost_system_tables(self):
-        self.assertIn("system.metrics", gate.PRESSURE_QUERY)
-        self.assertIn("system.asynchronous_metrics", gate.PRESSURE_QUERY)
-        self.assertIn("system.disks", gate.PRESSURE_QUERY)
-        self.assertIn("system.replicas", gate.PRESSURE_QUERY)
-        self.assertNotIn("system.distribution_queue", gate.PRESSURE_QUERY)
-        self.assertIn("maxIf(absolute_delay, queue_size > 0)", gate.PRESSURE_QUERY)
-        self.assertIn("max_threads = 1", gate.PRESSURE_QUERY)
+    def test_target_contract_is_strict_and_fail_closed(self):
+        valid = gate.load_targets(
+            {
+                gate.TARGET_ENV: (
+                    "replica:Data_R_Package_Raw.r_package_event_raw_local,"
+                    "local:Data_R_Community_Log.r_project_direct_insert_outbox"
+                )
+            }
+        )
+        self.assertEqual(len(valid), 2)
+        for raw in ("", "r_package_event_raw_local", "replica:db.table,", "replica:db.table,replica:db.table"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                gate.load_targets({gate.TARGET_ENV: raw})
+
+        snapshot = dict(self.healthy, replica_target_count=1)
+        self.assertIn("replica_targets=1/2", gate.evaluate(snapshot, self.thresholds))
+        snapshot = dict(self.healthy, local_target_count=0)
+        self.assertIn("local_targets=0/1", gate.evaluate(snapshot, self.thresholds))
+        snapshot = dict(self.healthy, invalid_local_target_engines=1)
+        self.assertIn("invalid_local_target_engines=1", gate.evaluate(snapshot, self.thresholds))
+
+    def test_unrelated_legacy_queue_is_excluded_but_target_queue_blocks(self):
+        targets = gate.load_targets(
+            {gate.TARGET_ENV: "replica:Data_R_Package_Raw.r_package_event_raw_local"}
+        )
+        query = gate.build_pressure_query(targets)
+        self.assertIn("r_package_event_raw_local", query)
+        self.assertNotIn("polymarket_market_latest_v2_local", query)
+        self.assertIn("WHERE (database, table) IN", query)
+        snapshot = dict(self.healthy, max_replica_queue=2001)
+        self.assertIn("replica_queue=2001", gate.evaluate(snapshot, self.thresholds))
+
+    def test_query_uses_bounded_system_tables(self):
+        targets = gate.load_targets(
+            {
+                gate.TARGET_ENV: (
+                    "replica:Data_R_Package_Raw.r_package_event_raw_local,"
+                    "local:Data_R_Community_Log.r_project_direct_insert_outbox"
+                )
+            }
+        )
+        query = gate.build_pressure_query(targets)
+        self.assertIn("system.metrics", query)
+        self.assertIn("system.asynchronous_metrics", query)
+        self.assertIn("system.disks", query)
+        self.assertIn("system.replicas", query)
+        self.assertIn("system.tables", query)
+        self.assertNotIn("system.distribution_queue", query)
+        self.assertNotIn("ReadonlyReplica", query)
+        self.assertIn("maxIf(absolute_delay, queue_size > 0)", query)
+        self.assertIn("max_threads = 1", query)
 
     def test_url_supports_both_env_families(self):
         self.assertEqual(
@@ -84,7 +135,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
     def test_scheduled_workflow_gates_before_first_writer(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/r-project-all.yml").read_text()
-        gate_step = "run: python3 scripts/clickhouse_pressure_gate.py"
+        gate_step = "python3 scripts/clickhouse_pressure_gate.py"
         self.assertEqual(workflow.count(gate_step), 1)
         self.assertLess(workflow.index(gate_step), workflow.index("go run ./cmd/rproject-collector package"))
         self.assertLess(workflow.index(gate_step), workflow.index("- name: Generate and insert Web-R Notebook"))
@@ -93,9 +144,18 @@ class ClickHousePressureGateTest(unittest.TestCase):
             "if: steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true'",
             workflow,
         )
+        self.assertIn('case "${{ steps.opts.outputs.scope }}" in', workflow)
+        self.assertIn('package) CLICKHOUSE_PRESSURE_GATE_TARGETS="${package_targets},${outbox_target}"', workflow)
+        self.assertIn('notebook) CLICKHOUSE_PRESSURE_GATE_TARGETS="${notebook_target}"', workflow)
+        self.assertIn('cdn) CLICKHOUSE_PRESSURE_GATE_TARGETS="${cdn_target}"', workflow)
+        self.assertIn("replica:Data_R_Package_Raw.r_package_event_raw_local", workflow)
+        self.assertIn("replica:webr_webr.notebook_local", workflow)
+        self.assertIn("replica:Data_R_Community_Service.web_r_cdn_release_log_local", workflow)
+        self.assertIn("local:Data_R_Community_Log.r_project_direct_insert_outbox", workflow)
+        self.assertNotIn("polymarket_market_latest_v2_local", workflow)
         notebook = (root / "scripts/generate_webr_notebook_daily.py").read_text()
         self.assertIn("if not args.dry_run:\n        insert_state = insert_json_each_row", notebook)
-        self.assertIn('CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"', workflow)
+        self.assertIn('CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"', workflow)
 
 
 if __name__ == "__main__":

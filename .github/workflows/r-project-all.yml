@@ -117,7 +117,6 @@ env:
   TZ: Asia/Seoul
   PYTHONUNBUFFERED: "1"
   RPROJECT_PUBLISH_MODE: ${{ vars.RPROJECT_PUBLISH_MODE || 'clickhouse' }}
-  CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"
   CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"
   CLICKHOUSE_PRESSURE_GATE_MAX_USED_RATIO: "0.90"
   CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_INODES: "1000000"
@@ -232,7 +231,92 @@ jobs:
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
-        run: python3 scripts/clickhouse_pressure_gate.py
+        run: |
+          package_targets="replica:Data_R_Package_Raw.r_package_event_raw_local,\
+          replica:Data_R_Package_Raw.bibliometric_mention_raw_local,\
+          replica:Data_R_Package_Raw.cran_archive_raw_local,\
+          replica:Data_R_Package_Raw.cran_check_raw_local,\
+          replica:Data_R_Package_Raw.cran_download_daily_raw_local,\
+          replica:Data_R_Package_Raw.cran_package_artifact_raw_local,\
+          replica:Data_R_Package_Raw.cran_package_manual_topic_raw_local,\
+          replica:Data_R_Package_Raw.cran_package_page_raw_local,\
+          replica:Data_R_Package_Raw.cran_package_snapshot_raw_local,\
+          replica:Data_R_Package_Raw.cran_task_view_package_edge_raw_local,\
+          replica:Data_R_Package_Raw.cran_task_view_snapshot_raw_local,\
+          replica:Data_R_Package_Raw.github_repo_snapshot_raw_local,\
+          replica:Data_R_Package_Raw.package_dependency_edge_raw_local,\
+          replica:Data_R_Package_Raw.r_core_release_note_raw_local,\
+          replica:Data_R_Package_Raw.r_website_candidate_raw_local,\
+          replica:Data_R_Package_Raw.r_website_feed_discovery_raw_local,\
+          replica:Data_R_Package_Raw.r_website_feed_item_raw_local,\
+          replica:Data_R_Package_Raw.r_website_fetch_raw_local,\
+          replica:Data_R_Package_Raw.r_website_link_edge_raw_local,\
+          replica:Data_R_Package_Raw.r_website_package_mention_raw_local,\
+          replica:Data_R_Package_Raw.r_website_sitemap_url_raw_local,\
+          replica:Data_R_Package_Raw.security_osv_snapshot_raw_local,\
+          replica:Data_R_Package_Service.package_bibliometric_current_local,\
+          replica:Data_R_Package_Service.package_cran_artifact_current_local,\
+          replica:Data_R_Package_Service.package_cran_check_current_local,\
+          replica:Data_R_Package_Service.package_cran_manual_topic_current_local,\
+          replica:Data_R_Package_Service.package_cran_page_by_name_current_local,\
+          replica:Data_R_Package_Service.package_cran_page_current_local,\
+          replica:Data_R_Package_Service.package_current_local,\
+          replica:Data_R_Package_Service.package_dependency_edge_current_local,\
+          replica:Data_R_Package_Service.package_dependency_from_current_local,\
+          replica:Data_R_Package_Service.package_document_artifact_current_local,\
+          replica:Data_R_Package_Service.package_document_manual_topic_current_local,\
+          replica:Data_R_Package_Service.package_download_daily_local,\
+          replica:Data_R_Package_Service.package_github_repo_current_local,\
+          replica:Data_R_Package_Service.package_lifecycle_current_local,\
+          replica:Data_R_Package_Service.package_security_osv_current_local,\
+          replica:Data_R_Package_Service.package_version_history_local,\
+          replica:Data_R_Package_Service.r_website_current_local"
+          social_targets="replica:Data_R_Community_Raw.r_youtube_event_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_source_seed_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_video_snapshot_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_transcript_segment_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_comment_thread_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_package_mention_raw_local,\
+          replica:Data_R_Community_Log.api_quota_ledger_local,\
+          replica:Data_R_Community_Service.crawl_cursor_current_local,\
+          replica:Data_R_Community_Service.r_youtube_source_seed_current_local,\
+          replica:Data_R_Community_Service.r_youtube_video_current_local,\
+          replica:Data_R_Community_Service.r_youtube_package_mention_current_local,\
+          replica:Data_R_Community_Log.r_blogger_log_local,\
+          replica:Data_R_Community_Raw.r_blogger_article_raw_local,\
+          replica:Data_R_Community_Service.r_blogger_board_local,\
+          replica:Data_R_Community_Log.mastodon_log_local,\
+          replica:Data_R_Community_Raw.mastodon_status_raw_local,\
+          replica:Data_R_Community_Service.mastodon_board_local"
+          community_targets="replica:Data_R_Community_Raw.r_community_event_raw_local,\
+          replica:Data_R_Community_Raw.r_community_item_raw_local,\
+          replica:Data_R_Community_Raw.community_dcinside_post_raw_local,\
+          replica:Data_R_Community_Raw.community_html_link_raw_local,\
+          replica:Data_R_Community_Raw.community_mastodon_item_raw_local,\
+          replica:Data_R_Community_Raw.community_reddit_post_raw_local,\
+          replica:Data_R_Community_Raw.community_release_note_raw_local,\
+          replica:Data_R_Community_Raw.community_rss_item_raw_local,\
+          replica:Data_R_Community_Service.r_community_daily_digest_local,\
+          replica:Data_R_Community_Service.r_community_item_current_local,\
+          replica:Data_R_Community_Service.r_community_item_read_current_local,\
+          replica:Data_R_Community_Service.r_community_source_current_local,\
+          replica:Data_R_Community_Mart.r_community_source_daily_local"
+          digest_target="replica:Data_R_Community_Service.r_community_daily_digest_local"
+          notebook_target="replica:webr_webr.notebook_local"
+          cdn_target="replica:Data_R_Community_Service.web_r_cdn_release_log_local"
+          outbox_target="local:Data_R_Community_Log.r_project_direct_insert_outbox"
+          case "${{ steps.opts.outputs.scope }}" in
+            all) CLICKHOUSE_PRESSURE_GATE_TARGETS="${package_targets},${social_targets},${community_targets},${notebook_target},${cdn_target},${outbox_target}" ;;
+            package) CLICKHOUSE_PRESSURE_GATE_TARGETS="${package_targets},${outbox_target}" ;;
+            social) CLICKHOUSE_PRESSURE_GATE_TARGETS="${social_targets},${outbox_target}" ;;
+            community) CLICKHOUSE_PRESSURE_GATE_TARGETS="${community_targets},${outbox_target}" ;;
+            community-digest) CLICKHOUSE_PRESSURE_GATE_TARGETS="${digest_target},${outbox_target}" ;;
+            notebook) CLICKHOUSE_PRESSURE_GATE_TARGETS="${notebook_target}" ;;
+            cdn) CLICKHOUSE_PRESSURE_GATE_TARGETS="${cdn_target}" ;;
+            *) echo "Unsupported pressure-gate scope"; exit 1 ;;
+          esac
+          export CLICKHOUSE_PRESSURE_GATE_TARGETS
+          python3 scripts/clickhouse_pressure_gate.py
 
       - name: Collect R package ecosystem
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package'
