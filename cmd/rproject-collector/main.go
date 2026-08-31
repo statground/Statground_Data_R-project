@@ -2724,7 +2724,7 @@ func runMastodon(ctx context.Context, args []string) error {
 	}
 	events := make([]webREvent, 0)
 	if !*backfillOnly {
-		currentEvents, err := collectMastodonRSS(*instance, *acct, *limit, ai, *translationModel, *translate, dedup)
+		currentEvents, err := collectMastodonRSS(ctx, *instance, *acct, *limit, ai, *translationModel, *translate, dedup)
 		if err != nil {
 			return err
 		}
@@ -6224,22 +6224,22 @@ func extractYouTubeSearchResults(text, query, searchURL string) []map[string]str
 	return firstNMaps(out, maxInt(1, envInt("R_YOUTUBE_SEARCH_RESULT_LIMIT", 80)))
 }
 
-func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translationModel string, translate bool, dedup mastodonDedupState) ([]webREvent, error) {
+func collectMastodonRSS(ctx context.Context, instance, acct string, limit int, ai *aiClient, translationModel string, translate bool, dedup mastodonDedupState) ([]webREvent, error) {
 	instance = strings.TrimRight(firstNonEmpty(instance, "https://fosstodon.org"), "/")
 	acct = strings.TrimPrefix(firstNonEmpty(acct, "R_Foundation"), "@")
 	sourceURL := fmt.Sprintf("%s/@%s.rss", instance, url.PathEscape(acct))
-	body, err := fetchBytes(sourceURL)
+	body, err := fetchMastodonBytes(ctx, sourceURL)
 	if err != nil {
 		return nil, err
 	}
-	var feed rssFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
+	feed, err := parseMastodonRSS(body)
+	if err != nil {
 		return nil, err
 	}
 	host := hostFromURL(instance)
 	events := make([]webREvent, 0, len(feed.Channel.Items)*2+2)
 	started := nowKST()
-	apiStatuses, apiErr := fetchMastodonAccountStatusesMap(instance, acct, limit)
+	apiStatuses, apiErr := fetchMastodonAccountStatusesMap(ctx, instance, acct, limit)
 	sourceMethod := "mastodon_public_rss_no_api"
 	if apiErr == nil && len(apiStatuses) > 0 {
 		sourceMethod = "mastodon_public_api_noauth+mastodon_public_rss_no_api"
@@ -6393,13 +6393,21 @@ func collectMastodonRSS(instance, acct string, limit int, ai *aiClient, translat
 	return events, nil
 }
 
-func fetchMastodonAccountStatusesMap(instance, acct string, limit int) (map[string]map[string]any, error) {
+func parseMastodonRSS(body []byte) (rssFeed, error) {
+	var feed rssFeed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return rssFeed{}, fmt.Errorf("decode Mastodon RSS: %w", err)
+	}
+	return feed, nil
+}
+
+func fetchMastodonAccountStatusesMap(ctx context.Context, instance, acct string, limit int) (map[string]map[string]any, error) {
 	out := map[string]map[string]any{}
 	instance = strings.TrimRight(instance, "/")
 	acct = strings.TrimPrefix(acct, "@")
 	lookupURL := instance + "/api/v1/accounts/lookup?acct=" + url.QueryEscape(acct)
 	var account map[string]any
-	if err := fetchJSON(lookupURL, &account); err != nil {
+	if err := fetchMastodonJSON(ctx, lookupURL, &account); err != nil {
 		return out, err
 	}
 	accountID := stringAny(account["id"])
@@ -6412,7 +6420,7 @@ func fetchMastodonAccountStatusesMap(instance, acct string, limit int) (map[stri
 	q.Set("exclude_reblogs", "false")
 	statusesURL := instance + "/api/v1/accounts/" + url.PathEscape(accountID) + "/statuses?" + q.Encode()
 	var statuses []map[string]any
-	if err := fetchJSON(statusesURL, &statuses); err != nil {
+	if err := fetchMastodonJSON(ctx, statusesURL, &statuses); err != nil {
 		return out, err
 	}
 	for _, status := range statuses {
@@ -9738,6 +9746,170 @@ func collectionFailureEvent(eventType, source, sourceURL, repository, packageNam
 func fetchBytes(targetURL string) ([]byte, error) {
 	body, _, err := fetchBytesWithContentType(targetURL)
 	return body, err
+}
+
+type mastodonHTTPStatusError struct {
+	statusCode int
+	body       string
+}
+
+func (e *mastodonHTTPStatusError) Error() string {
+	return fmt.Sprintf("Mastodon HTTP %d: %s", e.statusCode, truncate(e.body, 400))
+}
+
+type mastodonHTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+type mastodonHTTPSleep func(context.Context, time.Duration) error
+
+func fetchMastodonBytes(ctx context.Context, targetURL string) ([]byte, error) {
+	attempts := envInt("MASTODON_HTTP_ATTEMPTS", 4)
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 8 {
+		attempts = 8
+	}
+	timeoutSeconds := envInt("MASTODON_HTTP_TIMEOUT_SECONDS", 30)
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	if timeoutSeconds > 120 {
+		timeoutSeconds = 120
+	}
+	retryDelaySeconds := envInt("MASTODON_HTTP_RETRY_DELAY_SECONDS", 2)
+	if retryDelaySeconds < 0 {
+		retryDelaySeconds = 0
+	}
+	if retryDelaySeconds > 60 {
+		retryDelaySeconds = 60
+	}
+	client := &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second}
+	return fetchMastodonBytesWithRetry(
+		ctx,
+		client,
+		targetURL,
+		attempts,
+		time.Duration(retryDelaySeconds)*time.Second,
+		30*time.Second,
+		sleepContext,
+	)
+}
+
+func fetchMastodonBytesWithRetry(
+	ctx context.Context,
+	client mastodonHTTPDoer,
+	targetURL string,
+	attempts int,
+	initialDelay time.Duration,
+	maxDelay time.Duration,
+	sleep mastodonHTTPSleep,
+) ([]byte, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("Accept", "application/rss+xml,application/atom+xml,application/json,*/*")
+
+		resp, err := client.Do(req)
+		if err == nil {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(envInt("HTTP_MAX_BYTES", 20*1024*1024))))
+			closeErr := resp.Body.Close()
+			if readErr != nil {
+				err = readErr
+			} else if closeErr != nil {
+				err = closeErr
+			} else if resp.StatusCode/100 == 2 {
+				return body, nil
+			} else {
+				err = &mastodonHTTPStatusError{statusCode: resp.StatusCode, body: strings.TrimSpace(string(body))}
+			}
+		}
+
+		lastErr = err
+		if attempt == attempts || !retryableMastodonHTTPError(err) {
+			return nil, err
+		}
+		delay := mastodonHTTPBackoffDuration(attempt, initialDelay, maxDelay)
+		fmt.Printf("[mastodon] HTTP retry attempt=%d/%d delay=%s reason=%s\n", attempt+1, attempts, delay, mastodonHTTPRetryReason(err))
+		if err := sleep(ctx, delay); err != nil {
+			return nil, fmt.Errorf("Mastodon HTTP retry wait stopped: %w; last_error=%v", err, lastErr)
+		}
+	}
+	return nil, lastErr
+}
+
+func retryableMastodonHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *mastodonHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.statusCode == http.StatusRequestTimeout ||
+			statusErr.statusCode == http.StatusTooManyRequests ||
+			statusErr.statusCode >= 500 && statusErr.statusCode <= 599
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+func mastodonHTTPBackoffDuration(attempt int, initialDelay, maxDelay time.Duration) time.Duration {
+	if initialDelay <= 0 {
+		return 0
+	}
+	if maxDelay <= 0 || maxDelay < initialDelay {
+		maxDelay = initialDelay
+	}
+	delay := initialDelay
+	for i := 1; i < attempt; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
+func mastodonHTTPRetryReason(err error) string {
+	var statusErr *mastodonHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return fmt.Sprintf("http_%d", statusErr.statusCode)
+	}
+	return "network"
+}
+
+func fetchMastodonJSON(ctx context.Context, targetURL string, out any) error {
+	body, err := fetchMastodonBytes(ctx, targetURL)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode Mastodon JSON: %w", err)
+	}
+	return nil
 }
 
 func fetchBytesWithContentType(targetURL string) ([]byte, string, error) {
