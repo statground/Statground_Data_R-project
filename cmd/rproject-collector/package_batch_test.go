@@ -386,10 +386,10 @@ func TestRetryableClickHouseFallbackError(t *testing.T) {
 	}
 }
 
-func TestPackageRawEventInsertPrefixDefaultsToAsyncDistributedInsert(t *testing.T) {
+func TestPackageRawEventInsertPrefixHonorsDistributedSyncConfig(t *testing.T) {
 	got := packageRawEventInsertPrefix(clickHouseQueryConfig{})
 	if !strings.Contains(got, "insert_distributed_sync = 0") {
-		t.Fatalf("fallback insert should not wait for distributed sync by default: %s", got)
+		t.Fatalf("false config should preserve asynchronous delivery: %s", got)
 	}
 	if !strings.Contains(got, "insert_deduplicate = 1") {
 		t.Fatalf("fallback insert should request insert deduplication: %s", got)
@@ -398,6 +398,22 @@ func TestPackageRawEventInsertPrefixDefaultsToAsyncDistributedInsert(t *testing.
 	got = packageRawEventInsertPrefix(clickHouseQueryConfig{InsertDistributedSync: true})
 	if !strings.Contains(got, "insert_distributed_sync = 1") {
 		t.Fatalf("explicit distributed sync setting not reflected: %s", got)
+	}
+}
+
+func TestClickHouseQueryConfigDefaultsToSynchronousDistributedDelivery(t *testing.T) {
+	t.Setenv("CH_HOST", "127.0.0.1")
+	t.Setenv("CH_USER", "test-user")
+	t.Setenv("CH_PASSWORD", "test-password")
+	t.Setenv("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", "")
+	t.Setenv("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", "")
+
+	cfg, err := newClickHouseQueryConfig()
+	if err != nil {
+		t.Fatalf("newClickHouseQueryConfig: %v", err)
+	}
+	if !cfg.InsertDistributedSync {
+		t.Fatal("distributed delivery should be synchronous by default")
 	}
 }
 
@@ -732,10 +748,10 @@ func TestCommunityDigestDirectRowsBuildsClickHouseRows(t *testing.T) {
 	}
 }
 
-func TestCommunityDigestDirectInsertPrefixDefaultsAsync(t *testing.T) {
+func TestCommunityDigestDirectInsertPrefixHonorsAsyncConfig(t *testing.T) {
 	got := genericRawEventInsertPrefix(clickHouseQueryConfig{}, "Data_R_Community_Service.r_community_daily_digest")
 	if !strings.Contains(got, "insert_distributed_sync = 0") {
-		t.Fatalf("digest direct insert should not wait for distributed sync by default: %s", got)
+		t.Fatalf("false config should preserve asynchronous delivery: %s", got)
 	}
 	if !strings.Contains(got, "insert_deduplicate = 1") {
 		t.Fatalf("digest direct insert should request deduplication: %s", got)

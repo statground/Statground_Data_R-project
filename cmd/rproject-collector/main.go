@@ -8878,6 +8878,15 @@ func mastodonRawDirectRow(event webREvent, payload map[string]any) (map[string]a
 	if rowUUID == "" {
 		return nil, fmt.Errorf("mastodon raw event is missing payload.uuid")
 	}
+	editedAt := strings.TrimSpace(stringAny(payload["status_edited_at"]))
+	var normalizedEditedAt any
+	if editedAt != "" && editedAt != "<nil>" {
+		parsedEditedAt := parseKSTTime(editedAt, time.Time{})
+		if parsedEditedAt.IsZero() {
+			return nil, fmt.Errorf("mastodon raw event has invalid payload.status_edited_at=%q", editedAt)
+		}
+		normalizedEditedAt = formatKST(parsedEditedAt)
+	}
 	now := formatKST(time.Now())
 	return map[string]any{
 		"uuid":                   rowUUID,
@@ -8895,7 +8904,7 @@ func mastodonRawDirectRow(event webREvent, payload map[string]any) (map[string]a
 		"status_uri":             stringAny(payload["status_uri"]),
 		"status_url":             stringAny(payload["status_url"]),
 		"status_created_at":      firstNonEmpty(stringAny(payload["status_created_at"]), stringAny(payload["fetched_at"]), event.CreatedAt, now),
-		"status_edited_at":       nullableDirectString(stringAny(payload["status_edited_at"])),
+		"status_edited_at":       normalizedEditedAt,
 		"visibility":             firstNonEmpty(stringAny(payload["visibility"]), "unknown"),
 		"language":               stringAny(payload["language"]),
 		"language_code":          firstNonEmpty(stringAny(payload["language_code"]), "en"),
@@ -9819,7 +9828,7 @@ func newClickHouseQueryConfig() (clickHouseQueryConfig, error) {
 		Database:              envString("CH_DATABASE", envString("CLICKHOUSE_DATABASE", "Data_R_Community_Service")),
 		Secure:                envBool("CH_SECURE", envBool("CLICKHOUSE_SECURE", false)),
 		Timeout:               time.Duration(maxInt(10, envInt("CH_TIMEOUT", envInt("CLICKHOUSE_TIMEOUT", 60)))) * time.Second,
-		InsertDistributedSync: envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", envBool("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", false)),
+		InsertDistributedSync: envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", envBool("RPKG_CLICKHOUSE_FALLBACK_INSERT_DISTRIBUTED_SYNC", true)),
 	}
 	if cfg.Host == "" {
 		return cfg, errors.New("CH_HOST or CLICKHOUSE_HOST is required for DB-backed collectors")

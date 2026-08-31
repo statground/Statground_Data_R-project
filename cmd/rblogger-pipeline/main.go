@@ -1085,7 +1085,7 @@ func (r *ClickHouseReader) insertRowChunkWithSplit(ctx context.Context, table st
 func rbloggerInsertRowsStatement(table string, rows []map[string]any) (string, error) {
 	var body strings.Builder
 	insertDistributedSync := 0
-	if envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", false) {
+	if envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", true) {
 		insertDistributedSync = 1
 	}
 	body.WriteString(fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = %d, insert_deduplicate = 1 FORMAT JSONEachRow\n", table, insertDistributedSync))
@@ -1256,7 +1256,7 @@ SETTINGS mutations_sync = 1`, rbloggerDirectOutboxTable, sqlString(now), sqlStri
 
 func rbloggerInsertStatementFromRowsJSON(table, rowsJSON string) string {
 	insertDistributedSync := 0
-	if envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", false) {
+	if envBool("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", true) {
 		insertDistributedSync = 1
 	}
 	return fmt.Sprintf("INSERT INTO %s SETTINGS insert_distributed_sync = %d, insert_deduplicate = 1 FORMAT JSONEachRow\n%s", table, insertDistributedSync, ensureTrailingNewline(rowsJSON))

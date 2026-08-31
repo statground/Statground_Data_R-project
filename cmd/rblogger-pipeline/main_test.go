@@ -159,24 +159,24 @@ func TestRbloggerRawRowNormalizesArticleDatesForDirectInsert(t *testing.T) {
 	}
 }
 
-func TestRbloggerInsertRowsStatementUsesAsyncDeduplicatedInsert(t *testing.T) {
+func TestRbloggerInsertRowsStatementUsesSynchronousDeduplicatedInsertByDefault(t *testing.T) {
 	query, err := rbloggerInsertRowsStatement("Data_R_Community_Raw.r_blogger_article_raw", []map[string]any{{"uuid": "u1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query, "insert_distributed_sync = 0") {
-		t.Fatalf("insert should not wait for distributed sync by default: %s", query)
+	if !strings.Contains(query, "insert_distributed_sync = 1") {
+		t.Fatalf("insert should confirm distributed delivery by default: %s", query)
 	}
 	if !strings.Contains(query, "insert_deduplicate = 1") {
 		t.Fatalf("insert should request deduplication: %s", query)
 	}
 
-	t.Setenv("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", "true")
+	t.Setenv("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", "false")
 	query, err = rbloggerInsertRowsStatement("Data_R_Community_Raw.r_blogger_article_raw", []map[string]any{{"uuid": "u1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query, "insert_distributed_sync = 1") {
+	if !strings.Contains(query, "insert_distributed_sync = 0") {
 		t.Fatalf("explicit distributed sync setting not reflected: %s", query)
 	}
 }
