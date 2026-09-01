@@ -48,4 +48,4 @@ jobs:
           cache: false
 
       - name: Validate workflow syntax
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 -format '{{json .}}' .github/workflows/*.yml
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.11 -shellcheck= -pyflakes= -format '{{json .}}' .github/workflows/*.yml

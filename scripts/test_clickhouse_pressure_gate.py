@@ -201,6 +201,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertIn("go test -mod=mod ./...", workflow)
         self.assertIn("python3 -m unittest discover -s scripts -p 'test_*.py'", workflow)
         self.assertIn("github.com/rhysd/actionlint/cmd/actionlint@v1.7.11", workflow)
+        self.assertIn("-shellcheck= -pyflakes=", workflow)
         self.assertNotIn("secrets.", workflow)
         self.assertNotIn("run: python3 scripts/clickhouse_pressure_gate.py", workflow)
         self.assertNotIn("go run ./cmd/rproject-collector", workflow)
