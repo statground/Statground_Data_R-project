@@ -158,10 +158,12 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertLess(workflow.index(gate_step), workflow.index("- name: Record Web-R CDN2 releases"))
         self.assertEqual(
             workflow.count(
-                "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: ${{ vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME || secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME }}"
+                "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1"
             ),
             1,
         )
+        self.assertNotIn("secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
+        self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn(
             "if: steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true'",
             workflow,
