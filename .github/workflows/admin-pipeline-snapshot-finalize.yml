@@ -108,6 +108,29 @@ jobs:
           echo "Unable to publish the completed admin pipeline snapshot after 3 attempts" >&2
           exit 1
 
+      - name: Gate ClickHouse release record on storage pressure
+        id: clickhouse_gate
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
+          CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL }}
+          CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
+          CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: replica:Data_R_Community_Service.web_r_cdn_release_log_local
+          CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_BYTES: "107374182400"
+          CLICKHOUSE_PRESSURE_GATE_MAX_USED_RATIO: "0.90"
+          CLICKHOUSE_PRESSURE_GATE_MIN_AVAILABLE_INODES: "1000000"
+          CLICKHOUSE_PRESSURE_GATE_MAX_USED_INODE_RATIO: "0.95"
+          CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"
+          CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_QUEUE: "2000"
+          CLICKHOUSE_PRESSURE_GATE_MAX_REPLICA_DELAY_SECONDS: "900"
+          CLICKHOUSE_PRESSURE_GATE_MAX_IOWAIT_NORMALIZED: "0.50"
+          CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: "15"
+        run: python scripts/clickhouse_pressure_gate.py
+
       - name: Record Web-R CDN2 admin pipeline snapshot release
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -145,7 +168,7 @@ jobs:
           PY
 
       - name: Verify Web-R CDN2 admin pipeline snapshot release
-        if: always() && steps.snapshot.outcome == 'success'
+        if: always() && steps.snapshot.outcome == 'success' && steps.clickhouse_gate.outcome == 'success'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}

@@ -76,6 +76,26 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
         self.assertIn("verify_web_r_cdn_release.py", TEXT)
         self.assertGreaterEqual(TEXT.count("--scope web-r-admin-pipelines"), 2)
 
+    def test_release_record_is_pressure_gated_before_write(self) -> None:
+        gate_position = TEXT.index(
+            "- name: Gate ClickHouse release record on storage pressure"
+        )
+        record_position = TEXT.index(
+            "- name: Record Web-R CDN2 admin pipeline snapshot release"
+        )
+
+        self.assertLess(gate_position, record_position)
+        self.assertIn("id: clickhouse_gate", TEXT)
+        self.assertIn("python scripts/clickhouse_pressure_gate.py", TEXT)
+        self.assertIn(
+            "CLICKHOUSE_PRESSURE_GATE_TARGETS: "
+            "replica:Data_R_Community_Service.web_r_cdn_release_log_local",
+            TEXT,
+        )
+        self.assertIn(
+            'CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"', TEXT
+        )
+
     def test_both_admin_snapshot_publishers_rebuild_on_latest_main(self) -> None:
         finalizer_publish = TEXT.split(
             "- name: Commit and push completed admin pipeline snapshot", 1
@@ -119,7 +139,11 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
         )[1]
         self.assertIn("record_deferred", finalizer_record)
         self.assertIn("failed finalization", finalizer_record)
-        self.assertIn("if: always() && steps.snapshot.outcome == 'success'", finalizer_verify)
+        self.assertIn(
+            "if: always() && steps.snapshot.outcome == 'success' && "
+            "steps.clickhouse_gate.outcome == 'success'",
+            finalizer_verify,
+        )
         self.assertNotIn("skipping pointer verification", finalizer_verify)
 
         main_record = MAIN_WORKFLOW.split(
