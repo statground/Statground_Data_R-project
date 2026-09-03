@@ -92,9 +92,7 @@ class AdminPipelineSnapshotFinalizeWorkflowTest(unittest.TestCase):
             "replica:Data_R_Community_Service.web_r_cdn_release_log_local",
             TEXT,
         )
-        self.assertIn(
-            'CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_FILES: "10000"', TEXT
-        )
+        self.assertNotIn("CLICKHOUSE_PRESSURE_GATE_MAX_DISTRIBUTED_", TEXT)
 
     def test_both_admin_snapshot_publishers_rebuild_on_latest_main(self) -> None:
         finalizer_publish = TEXT.split(

@@ -202,7 +202,7 @@ class RecordWebRCDNReleaseTest(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         sql = request.data.decode("utf-8")
-        self.assertIn("SETTINGS insert_deduplicate = 1", sql)
+        self.assertIn("SETTINGS insert_distributed_sync = 1, insert_deduplicate = 1", sql)
         self.assertIn(f"insert_deduplication_token = '{token}'", sql)
         self.assertEqual(
             token,

@@ -991,7 +991,7 @@ SETTINGS mutations_sync = 2`)
 func (r *ClickHouseReader) InsertBoardPayloads(ctx context.Context, payloads []map[string]any, batchSize int) error {
 	for _, batch := range chunkPayloads(payloads, batchSize) {
 		var body strings.Builder
-		body.WriteString("INSERT INTO Data_R_Community_Service.r_blogger_board (uuid, title, content, active, created_at, updated_at, created_log, updated_log, language_code) FORMAT JSONEachRow\n")
+		body.WriteString(rbloggerBoardRebuildInsertPrefix())
 		for _, payload := range batch {
 			line, err := json.Marshal(payload)
 			if err != nil {
@@ -1005,6 +1005,13 @@ func (r *ClickHouseReader) InsertBoardPayloads(ctx context.Context, payloads []m
 		}
 	}
 	return nil
+}
+
+func rbloggerBoardRebuildInsertPrefix() string {
+	// The rebuild path writes through a Distributed table. It must confirm
+	// delivery before returning so it cannot create another asynchronous queue
+	// while the pressure gate deliberately ignores unrelated node-wide queues.
+	return "INSERT INTO Data_R_Community_Service.r_blogger_board (uuid, title, content, active, created_at, updated_at, created_log, updated_log, language_code) SETTINGS insert_distributed_sync = 1, insert_deduplicate = 1 FORMAT JSONEachRow\n"
 }
 
 func (r *ClickHouseReader) InsertRbloggerEvents(ctx context.Context, events []KafkaEvent, batchSize int) (map[string]int, error) {

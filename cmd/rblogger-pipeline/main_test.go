@@ -181,6 +181,17 @@ func TestRbloggerInsertRowsStatementUsesSynchronousDeduplicatedInsertByDefault(t
 	}
 }
 
+func TestRbloggerBoardRebuildAlwaysUsesSynchronousDeduplicatedDelivery(t *testing.T) {
+	t.Setenv("RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC", "false")
+	query := rbloggerBoardRebuildInsertPrefix()
+	if !strings.Contains(query, "insert_distributed_sync = 1") {
+		t.Fatalf("board rebuild must confirm Distributed delivery: %s", query)
+	}
+	if !strings.Contains(query, "insert_deduplicate = 1") {
+		t.Fatalf("board rebuild must request deduplication: %s", query)
+	}
+}
+
 func TestRbloggerDirectOutboxRowsExtraction(t *testing.T) {
 	query, err := rbloggerInsertRowsStatement("Data_R_Community_Raw.r_blogger_article_raw", []map[string]any{{"uuid": "u1"}, {"uuid": "u2"}})
 	if err != nil {

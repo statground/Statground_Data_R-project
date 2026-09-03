@@ -143,7 +143,10 @@ def insert_rows(env: dict[str, str], rows: list[dict[str, Any]]) -> None:
     password = env.get("CLICKHOUSE_PASSWORD", "")
     if not user:
         raise SystemExit("ClickHouse connection environment is incomplete")
-    body = "INSERT INTO Data_R_Community_Raw.r_community_item_raw FORMAT JSONEachRow\n"
+    body = (
+        "INSERT INTO Data_R_Community_Raw.r_community_item_raw "
+        "SETTINGS insert_distributed_sync = 1, insert_deduplicate = 1 FORMAT JSONEachRow\n"
+    )
     body += "\n".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) for row in rows)
     body += "\n"
 

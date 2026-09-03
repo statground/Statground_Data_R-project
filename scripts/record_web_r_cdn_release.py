@@ -226,7 +226,7 @@ def insert_json_each_row(
         sort_keys=True,
     )
     sql = (
-        f"INSERT INTO {table} SETTINGS insert_deduplicate = 1, "
+        f"INSERT INTO {table} SETTINGS insert_distributed_sync = 1, insert_deduplicate = 1, "
         f"insert_deduplication_token = '{token}' FORMAT JSONEachRow\n"
         f"{row_json}\n"
     )
