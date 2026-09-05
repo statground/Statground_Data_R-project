@@ -25,6 +25,7 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from clickhouse_http import build_clickhouse_url
+from workspace_paths import workspace_repo
 
 
 ENCRYPTED_SCHEMA = "web-r.r-ecosystem.encrypted.v1"
@@ -75,7 +76,7 @@ class ClickHouseExportError(RuntimeError):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
-    parser.add_argument("--cdn-root", default="../web-r_CDN2_contents", help="web-r_CDN2_contents checkout path")
+    parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_contents")), help="web-r_CDN2_contents checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--limit", type=int, default=0, help="optional row limit for smoke exports")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")

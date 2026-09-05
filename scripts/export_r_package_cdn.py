@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from workspace_paths import workspace_repo
 
 from export_r_ecosystem_cdn import (
     CONTENT_SCHEMA,
@@ -122,7 +123,7 @@ coalesce(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
-    parser.add_argument("--cdn-root", default="../web-r_CDN2_packages", help="web-r_CDN2_packages checkout path")
+    parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_packages")), help="web-r_CDN2_packages checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--package-limit", type=int, default=0, help="optional package row limit for smoke exports")
     parser.add_argument("--news-limit", type=int, default=0, help="optional package news limit for smoke exports")

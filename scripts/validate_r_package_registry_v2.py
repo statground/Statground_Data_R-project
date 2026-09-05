@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from workspace_paths import workspace_repo
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -146,7 +147,7 @@ def validate_registry_v2(root: Path, key: bytes, language: str = "ko") -> dict[s
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
-    parser.add_argument("--cdn-root", default="../web-r_CDN2_packages", help="package CDN checkout")
+    parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_packages")), help="package CDN checkout")
     parser.add_argument("--language", default="ko", help="content language")
     args = parser.parse_args()
     root = Path(args.cdn_root).resolve()

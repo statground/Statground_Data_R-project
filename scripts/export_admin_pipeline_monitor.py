@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from clickhouse_http import build_clickhouse_url
+from workspace_paths import workspace_repo
 
 
 KST = timezone(timedelta(hours=9), name="KST")
@@ -122,7 +123,7 @@ PIPELINES = [
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cdn-root", default="../web-r_CDN2", help="web-r_CDN2 checkout path")
+    parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2")), help="web-r_CDN2 checkout path")
     parser.add_argument("--language", default="ko")
     args = parser.parse_args()
 
