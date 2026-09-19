@@ -37,6 +37,9 @@ MANIFEST_SCHEMA = "web-r.community.manifest.plain.v1"
 CONTENT_SCHEMA = "web-r.community.content.plain.v1"
 WORKSHOP_MANIFEST_SCHEMA = "web-r.community.workshop.manifest.plain.v1"
 WORKSHOP_CONTENT_SCHEMA = "web-r.community.workshop.content.plain.v1"
+WORKSHOP_SOURCE_PARITY_SCHEMA = "web-r.community.workshop.source-parity.v1"
+WORKSHOP_WITHDRAWAL_AUTHORITY_SCHEMA = "web-r.community.workshop.withdrawal-authority.v1"
+WORKSHOP_AUTHORITY_REGISTRY_SCHEMA = "web-r.community.workshop.authority-registry.v1"
 KEY_PURPOSE = "web-r:community-content:v1"
 R_COMMUNITY_BOT_UUID = "019e1127-f5d7-7304-a916-31914e58e1e9"
 R_COMMUNITY_BOT_NAME = "R Community"
@@ -51,6 +54,7 @@ R_PROJECT_CONFERENCE_ID = "official:r:conferences"
 POSIT_COMMUNITY_EVENTS_ID = "community:posit:events"
 USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
 SAFE_ID_RE = re.compile(r"[^0-9A-Za-z._-]+")
 MONTH_LOOKUP = {
@@ -88,6 +92,16 @@ def main() -> int:
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--limit", type=int, default=0, help="optional per-source row limit for smoke exports")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
+    parser.add_argument(
+        "--workshop-withdrawal-authority-manifest",
+        default="",
+        help="explicit durable JSON authority for an empty Posit workshop source set",
+    )
+    parser.add_argument(
+        "--workshop-authority-registry",
+        default="",
+        help="published Posit workshop authority registry (defaults inside the CDN checkout)",
+    )
     args = parser.parse_args()
 
     repo_root = Path.cwd()
@@ -95,6 +109,11 @@ def main() -> int:
     language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
+    workshop_scope = workshop_source_scope(language)
+    workshop_authority_registry_path = resolve_optional_path(repo_root, args.workshop_authority_registry)
+    if workshop_authority_registry_path is None:
+        workshop_authority_registry_path = cdn_root / f"community/{language}/workshop/source-authority.json"
+    workshop_withdrawal_authority_path = resolve_optional_path(repo_root, args.workshop_withdrawal_authority_manifest)
 
     try:
         digest_rows = fetch_json_rows(env, digest_sql(args.limit), query_name="community_digest")
@@ -117,8 +136,7 @@ def main() -> int:
     workshop_manifest_items: dict[str, dict[str, Any]] = {}
     workshop_posts: dict[str, list[dict[str, Any]]] = {}
     duplicate_count = 0
-    posit_workshop_source_count = sum(1 for row in workshop_event_rows if is_posit_workshop_event(row))
-    posit_workshop_export_count = 0
+    posit_workshop_source_identities = workshop_posit_source_identity_set(workshop_event_rows)
 
     for row in digest_rows:
         uuid = normalize_uuid(row.get("uuid"))
@@ -223,18 +241,42 @@ def main() -> int:
         uuid = text(item.get("uuid"))
         if not uuid:
             continue
+        source_identity = workshop_source_identity(row) if is_posit_workshop_event(row) else ""
         if uuid in workshop_manifest_items:
+            if source_identity:
+                add_workshop_source_representation(workshop_manifest_items[uuid], source_identity)
             continue
+        if source_identity:
+            add_workshop_source_representation(item, source_identity)
         rel_path = workshop_payload_path(language, uuid, first_text(item.get("starts_at"), item.get("updated_at"), item.get("published_at")))
         item["path"] = rel_path
         item["url"] = f"/workshop/read/{urllib.parse.quote(uuid)}/"
         posts = workshop_posts.get(text(item.get("board_key")), [])
         payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
         workshop_manifest_items[uuid] = item
-        if is_posit_workshop_event(row):
-            posit_workshop_export_count += 1
 
-    require_posit_workshop_coverage(args.limit, posit_workshop_source_count, posit_workshop_export_count)
+    posit_workshop_represented_identities = workshop_represented_source_identity_set(workshop_manifest_items)
+    require_workshop_source_parity(
+        posit_workshop_source_identities,
+        posit_workshop_represented_identities,
+    )
+    current_workshop_authority = load_workshop_authority_registry(
+        workshop_authority_registry_path,
+        workshop_scope,
+    )
+    workshop_authority_revision, empty_withdrawal_authorized = authorize_empty_workshop_source(
+        source_identities=posit_workshop_source_identities,
+        scope=workshop_scope,
+        current_registry=current_workshop_authority,
+        authority_manifest_path=workshop_withdrawal_authority_path,
+    )
+    workshop_source_parity = workshop_source_parity_receipt(
+        source_identities=posit_workshop_source_identities,
+        represented_identities=posit_workshop_represented_identities,
+        scope=workshop_scope,
+        authority_revision=workshop_authority_revision,
+        empty_withdrawal_authorized=empty_withdrawal_authorized,
+    )
 
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -247,6 +289,7 @@ def main() -> int:
         "language": language,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "catalog_token": workshop_catalog_token(workshop_manifest_items, workshop_posts),
+        "source_parity": workshop_source_parity,
         "items": workshop_manifest_items,
     }
     current_payload_paths = {rel_path for rel_path, _payload in payloads.values()}
@@ -263,8 +306,9 @@ def main() -> int:
                     len(workshop_manifest_items),
                     len(payloads),
                     duplicate_count,
-                    posit_workshop_source_count,
-                    posit_workshop_export_count,
+                    len(posit_workshop_source_identities),
+                    len(posit_workshop_represented_identities),
+                    workshop_source_parity,
                 ),
                 ensure_ascii=False,
             )
@@ -281,6 +325,10 @@ def main() -> int:
     workshop_manifest_path = f"community/{language}/workshop/index.json"
     encrypted_workshop_manifest = encrypt_document(workshop_manifest, key, workshop_manifest_path, language, "")
     write_json_atomic(cdn_root / workshop_manifest_path, encrypted_workshop_manifest)
+    write_json_atomic(
+        workshop_authority_registry_path,
+        workshop_authority_registry(workshop_source_parity),
+    )
     pruned_payloads = 0
     if args.limit <= 0:
         pruned_payloads = prune_stale_notebook_payloads(cdn_root, language, current_payload_paths)
@@ -294,8 +342,9 @@ def main() -> int:
         len(workshop_manifest_items),
         len(payloads),
         duplicate_count,
-        posit_workshop_source_count,
-        posit_workshop_export_count,
+        len(posit_workshop_source_identities),
+        len(posit_workshop_represented_identities),
+        workshop_source_parity,
     )
     result["pruned_payloads"] = pruned_payloads
     print(json.dumps(result, ensure_ascii=False))
@@ -313,8 +362,9 @@ def community_export_result(
     duplicate_count: int,
     posit_workshop_source_count: int = 0,
     posit_workshop_export_count: int = 0,
+    workshop_source_parity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "digest": digest_count,
         "notebook": notebook_count,
         "community_export": community_export_count,
@@ -327,6 +377,9 @@ def community_export_result(
         "workshop_posit_export": posit_workshop_export_count,
         "export_deferred": False,
     }
+    if workshop_source_parity is not None:
+        result["workshop_source_parity"] = workshop_source_parity
+    return result
 
 
 def deferred_community_export_result(exc: ClickHouseExportError) -> dict[str, Any]:
@@ -716,19 +769,277 @@ def is_posit_workshop_event(row: dict[str, Any]) -> bool:
     return any(tag.lower() == "conferences & events" for tag in tags)
 
 
-def require_posit_workshop_coverage(limit: int, source_count: int, export_count: int) -> None:
-    if limit > 0:
+def workshop_source_scope(language: str) -> str:
+    return f"web-r-community:workshop:posit-events:{normalize_language(language)}"
+
+
+def workshop_source_identity(row: dict[str, Any]) -> str:
+    source_id = text(row.get("source_id"))
+    stable_id = first_text(row.get("external_id"), row.get("canonical_url"))
+    if not source_id or not stable_id:
+        raise SystemExit(
+            "Web-R workshop source row has no stable source_id plus external_id/canonical_url identity; "
+            "preserving the previous CDN release"
+        )
+    canonical = json.dumps(
+        {"source_id": source_id, "stable_id": stable_id},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def workshop_posit_source_identity_set(rows: list[dict[str, Any]]) -> set[str]:
+    return {
+        workshop_source_identity(row)
+        for row in rows
+        if is_posit_workshop_event(row)
+    }
+
+
+def add_workshop_source_representation(item: dict[str, Any], source_identity: str) -> None:
+    identity = text(source_identity).lower()
+    if not SHA256_RE.fullmatch(identity):
+        raise SystemExit("Web-R workshop export produced an invalid source identity")
+    raw = item.get("represented_source_identities")
+    if raw is None:
+        identities: list[str] = []
+    elif isinstance(raw, list):
+        identities = [text(value).lower() for value in raw]
+    else:
+        raise SystemExit("Web-R workshop export has an invalid represented source identity list")
+    if any(not SHA256_RE.fullmatch(value) for value in identities):
+        raise SystemExit("Web-R workshop export has a malformed represented source identity")
+    if identity not in identities:
+        identities.append(identity)
+    item["represented_source_identities"] = sorted(identities)
+
+
+def workshop_represented_source_identity_set(items: dict[str, dict[str, Any]]) -> set[str]:
+    represented: set[str] = set()
+    for item in items.values():
+        raw = item.get("represented_source_identities")
+        if raw is None:
+            continue
+        if not isinstance(raw, list):
+            raise SystemExit("Web-R workshop export has an invalid represented source identity list")
+        for value in raw:
+            identity = text(value).lower()
+            if not SHA256_RE.fullmatch(identity):
+                raise SystemExit("Web-R workshop export has a malformed represented source identity")
+            if identity in represented:
+                raise SystemExit(
+                    "Web-R workshop export represents one source identity in more than one catalog item; "
+                    "preserving the previous CDN release"
+                )
+            represented.add(identity)
+    return represented
+
+
+def workshop_source_identity_digest(identities: set[str]) -> str:
+    normalized = sorted(text(identity).lower() for identity in identities)
+    if any(not SHA256_RE.fullmatch(identity) for identity in normalized):
+        raise SystemExit("Web-R workshop source identity set is malformed")
+    body = json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()
+
+
+def require_workshop_source_parity(source_identities: set[str], represented_identities: set[str]) -> None:
+    source = set(source_identities)
+    represented = set(represented_identities)
+    if source == represented:
         return
-    if source_count <= 0:
+    missing = source - represented
+    unexpected = represented - source
+    raise SystemExit(
+        "Web-R workshop source/export identity parity failed "
+        f"source={len(source)} represented={len(represented)} "
+        f"missing={len(missing)} unexpected={len(unexpected)}; "
+        "preserving the previous CDN release"
+    )
+
+
+def resolve_optional_path(root: Path, value: str) -> Path | None:
+    raw = text(value)
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = root / path
+    return path.absolute()
+
+
+def load_json_object(path: Path, description: str) -> dict[str, Any]:
+    if path.is_symlink():
+        raise SystemExit(f"{description} must not be a symbolic link: {path}")
+    if not path.is_file():
+        raise SystemExit(f"{description} is missing: {path}")
+    if path.stat().st_size > 64 * 1024:
+        raise SystemExit(f"{description} is too large: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{description} is not valid JSON: {path}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{description} must be a JSON object: {path}")
+    return value
+
+
+def strict_uint(value: Any, field: str, *, allow_zero: bool) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SystemExit(f"{field} must be an unsigned JSON integer")
+    if value < 0 or value > (1 << 64) - 1 or (value == 0 and not allow_zero):
+        qualifier = "non-negative" if allow_zero else "strictly positive"
+        raise SystemExit(f"{field} must be a {qualifier} UInt64")
+    return value
+
+
+def validate_identity_receipt(value: dict[str, Any], source_identities: set[str], description: str) -> None:
+    expected_count = len(source_identities)
+    expected_digest = workshop_source_identity_digest(source_identities)
+    count = strict_uint(value.get("source_identity_count"), f"{description}.source_identity_count", allow_zero=True)
+    digest = text(value.get("source_identity_sha256")).lower()
+    if count != expected_count or digest != expected_digest:
         raise SystemExit(
-            "Web-R workshop export is missing the Posit Conferences & Events lane; "
+            f"{description} does not match the exact workshop source identity set; "
             "preserving the previous CDN release"
         )
-    if export_count <= 0:
+
+
+def load_workshop_authority_registry(path: Path, scope: str) -> dict[str, Any] | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    registry = load_json_object(path, "published workshop authority registry")
+    if registry.get("schema") != WORKSHOP_AUTHORITY_REGISTRY_SCHEMA:
+        raise SystemExit("published workshop authority registry has an unsupported schema")
+    if registry.get("scope") != scope:
+        raise SystemExit("published workshop authority registry scope does not match this export")
+    strict_uint(registry.get("authority_revision"), "published registry authority_revision", allow_zero=True)
+    source_count = strict_uint(
+        registry.get("source_identity_count"),
+        "published registry source_identity_count",
+        allow_zero=True,
+    )
+    source_digest = text(registry.get("source_identity_sha256")).lower()
+    if not SHA256_RE.fullmatch(source_digest):
+        raise SystemExit("published workshop authority registry source identity digest is invalid")
+    represented_count = strict_uint(
+        registry.get("represented_identity_count"),
+        "published registry represented_identity_count",
+        allow_zero=True,
+    )
+    represented_digest = text(registry.get("represented_identity_sha256")).lower()
+    if not SHA256_RE.fullmatch(represented_digest):
+        raise SystemExit("published workshop authority registry represented identity digest is invalid")
+    if (
+        registry.get("exact") is not True
+        or source_count != represented_count
+        or source_digest != represented_digest
+    ):
+        raise SystemExit("published workshop authority registry does not prove exact source/export parity")
+    empty_authorized = registry.get("empty_withdrawal_authorized")
+    if not isinstance(empty_authorized, bool):
+        raise SystemExit("published workshop authority registry withdrawal state is invalid")
+    if empty_authorized and (
+        source_count != 0 or source_digest != workshop_source_identity_digest(set())
+    ):
+        raise SystemExit("published workshop authority registry has an inconsistent empty withdrawal receipt")
+    return registry
+
+
+def authorize_empty_workshop_source(
+    *,
+    source_identities: set[str],
+    scope: str,
+    current_registry: dict[str, Any] | None,
+    authority_manifest_path: Path | None,
+) -> tuple[int, bool]:
+    current_revision = 0
+    if current_registry is not None:
+        current_revision = strict_uint(
+            current_registry.get("authority_revision"),
+            "published registry authority_revision",
+            allow_zero=True,
+        )
+    if source_identities:
+        return current_revision, False
+
+    expected_digest = workshop_source_identity_digest(source_identities)
+    if (
+        current_registry is not None
+        and current_registry.get("empty_withdrawal_authorized") is True
+        and current_registry.get("source_identity_count") == 0
+        and text(current_registry.get("source_identity_sha256")).lower() == expected_digest
+    ):
+        return current_revision, True
+
+    if authority_manifest_path is None:
         raise SystemExit(
-            "Web-R workshop export dropped every Posit Conferences & Events item; "
+            "Web-R workshop Posit source is empty without a durable withdrawal authority manifest; "
             "preserving the previous CDN release"
         )
+    if current_registry is None:
+        raise SystemExit(
+            "Web-R workshop withdrawal authority cannot be ordered without the current published registry; "
+            "preserving the previous CDN release"
+        )
+
+    authority = load_json_object(authority_manifest_path, "workshop withdrawal authority manifest")
+    if authority.get("schema") != WORKSHOP_WITHDRAWAL_AUTHORITY_SCHEMA:
+        raise SystemExit("workshop withdrawal authority manifest has an unsupported schema")
+    if authority.get("scope") != scope:
+        raise SystemExit("workshop withdrawal authority manifest scope does not match this export")
+    revision = strict_uint(authority.get("authority_revision"), "withdrawal authority_revision", allow_zero=False)
+    if revision <= current_revision:
+        raise SystemExit(
+            "workshop withdrawal authority_revision must be greater than the current published revision"
+        )
+    if authority.get("allow_empty_withdrawal") is not True:
+        raise SystemExit("workshop withdrawal authority does not explicitly allow an empty withdrawal")
+    validate_identity_receipt(authority, source_identities, "workshop withdrawal authority")
+    return revision, True
+
+
+def workshop_source_parity_receipt(
+    *,
+    source_identities: set[str],
+    represented_identities: set[str],
+    scope: str,
+    authority_revision: int,
+    empty_withdrawal_authorized: bool,
+) -> dict[str, Any]:
+    require_workshop_source_parity(source_identities, represented_identities)
+    revision = strict_uint(authority_revision, "workshop authority_revision", allow_zero=True)
+    if not isinstance(empty_withdrawal_authorized, bool):
+        raise SystemExit("workshop empty withdrawal authorization must be boolean")
+    return {
+        "schema": WORKSHOP_SOURCE_PARITY_SCHEMA,
+        "scope": scope,
+        "source_identity_count": len(source_identities),
+        "source_identity_sha256": workshop_source_identity_digest(source_identities),
+        "represented_identity_count": len(represented_identities),
+        "represented_identity_sha256": workshop_source_identity_digest(represented_identities),
+        "exact": True,
+        "authority_revision": revision,
+        "empty_withdrawal_authorized": empty_withdrawal_authorized,
+    }
+
+
+def workshop_authority_registry(source_parity: dict[str, Any]) -> dict[str, Any]:
+    if source_parity.get("schema") != WORKSHOP_SOURCE_PARITY_SCHEMA or source_parity.get("exact") is not True:
+        raise SystemExit("workshop source parity receipt is invalid")
+    return {
+        "schema": WORKSHOP_AUTHORITY_REGISTRY_SCHEMA,
+        "scope": source_parity.get("scope"),
+        "authority_revision": source_parity.get("authority_revision"),
+        "source_identity_count": source_parity.get("source_identity_count"),
+        "source_identity_sha256": source_parity.get("source_identity_sha256"),
+        "represented_identity_count": source_parity.get("represented_identity_count"),
+        "represented_identity_sha256": source_parity.get("represented_identity_sha256"),
+        "exact": source_parity.get("exact"),
+        "empty_withdrawal_authorized": source_parity.get("empty_withdrawal_authorized"),
+    }
 
 
 def event_date_range_from_text(value: str) -> tuple[str, str]:
