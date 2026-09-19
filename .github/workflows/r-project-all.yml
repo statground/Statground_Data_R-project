@@ -129,8 +129,8 @@ env:
   CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: "15"
 
 concurrency:
-  group: r-project-${{ inputs.scope || 'all' }}-${{ inputs.r_package_job || 'default' }}-${{ inputs.r_package_reverse_shard_index || '0' }}
-  cancel-in-progress: true
+  group: ${{ (inputs.scope == 'all' || inputs.scope == 'cdn') && 'r-project-publication' || format('r-project-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
+  cancel-in-progress: false
 
 jobs:
   collect:
@@ -333,7 +333,7 @@ jobs:
           RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.RPROJECT_CLICKHOUSE_ATTEMPTS || '3' }}
           RPROJECT_CLICKHOUSE_INSERT_DISTRIBUTED_SYNC: "true"
           RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT: ${{ vars.RPKG_DIRECT_OUTBOX_DRAIN_LIMIT || '10' }}
-          RPKG_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RPKG_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          RPKG_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RPKG_PUBLISH_TRANSIENT_FAIL_OPEN || 'false' }}
           RPKG_JOB_TIMEOUT_SECONDS: ${{ vars.RPKG_JOB_TIMEOUT_SECONDS || '7200' }}
           RPKG_SKIP_UNCHANGED_METADATA: ${{ vars.RPKG_SKIP_UNCHANGED_METADATA || 'true' }}
           RPKG_JOB: ${{ steps.opts.outputs.r_package_job }}
@@ -385,7 +385,7 @@ jobs:
           RPROJECT_CLICKHOUSE_ATTEMPTS: ${{ vars.R_YOUTUBE_CLICKHOUSE_ATTEMPTS || '6' }}
           RPROJECT_CLICKHOUSE_BACKOFF_SECONDS: ${{ vars.R_YOUTUBE_CLICKHOUSE_BACKOFF_SECONDS || '10' }}
           RPROJECT_CLICKHOUSE_SPLIT_ON_TIMEOUT: ${{ vars.R_YOUTUBE_CLICKHOUSE_SPLIT_ON_TIMEOUT || 'true' }}
-          R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN || 'false' }}
           R_YOUTUBE_DB_SEEDS_REQUIRED: ${{ vars.R_YOUTUBE_DB_SEEDS_REQUIRED || 'false' }}
           R_YOUTUBE_JOB: ${{ steps.opts.outputs.r_youtube_job }}
           R_YOUTUBE_SEED_LIMIT: ${{ vars.R_YOUTUBE_SEED_LIMIT || '200' }}
@@ -421,7 +421,7 @@ jobs:
           RBLOGGER_HTTP_ATTEMPTS: ${{ vars.RBLOGGER_HTTP_ATTEMPTS || '4' }}
           RBLOGGER_HTTP_RETRY_DELAY_SEC: ${{ vars.RBLOGGER_HTTP_RETRY_DELAY_SEC || '2' }}
           RBLOGGER_HTTP_TIMEOUT: ${{ vars.RBLOGGER_HTTP_TIMEOUT || '30' }}
-          RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN || 'false' }}
           RBLOGGER_DIRECT_OUTBOX_DRAIN_LIMIT: ${{ vars.RBLOGGER_DIRECT_OUTBOX_DRAIN_LIMIT || '25' }}
           SLEEP_SEC: ${{ vars.RBLOGGER_SLEEP_SEC || '0.5' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
@@ -496,7 +496,7 @@ jobs:
       - name: Show R Community collection report
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'community'
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
           report = json.loads(Path("data/collected/r/latest_report.json").read_text(encoding="utf-8"))
@@ -535,7 +535,7 @@ jobs:
           R_COMMUNITY_TRANSLATION_MODEL: ${{ vars.R_COMMUNITY_TRANSLATION_MODEL || vars.R_COMMUNITY_DIGEST_MODEL || vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.5-flash-lite' }}
           R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR: ${{ vars.R_COMMUNITY_FAIL_ON_TRANSLATION_ERROR || 'true' }}
           R_COMMUNITY_SKIP_EXISTING_CANONICAL: ${{ vars.R_COMMUNITY_SKIP_EXISTING_CANONICAL || 'true' }}
-          R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN || 'false' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -597,7 +597,7 @@ jobs:
           R_COMMUNITY_DIGEST_MISSING_ONLY: ${{ vars.R_COMMUNITY_DIGEST_MISSING_ONLY || 'true' }}
           R_COMMUNITY_DIGEST_LATEST_PER_SOURCE: ${{ vars.R_COMMUNITY_DIGEST_LATEST_PER_SOURCE || 'true' }}
           R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE: ${{ vars.R_COMMUNITY_DIGEST_INSERT_CLICKHOUSE || 'true' }}
-          R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN: ${{ vars.R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN || 'false' }}
           R_COMMUNITY_DIGEST_PUBLISH_KAFKA: ${{ vars.R_COMMUNITY_DIGEST_PUBLISH_KAFKA || 'false' }}
           R_COMMUNITY_DIGEST_PLAN_OUTPUT: /tmp/r_community_digest_plan.json
           RPROJECT_CLICKHOUSE_CHUNK_SIZE: ${{ vars.R_COMMUNITY_DIGEST_CLICKHOUSE_CHUNK_SIZE || '1' }}
@@ -668,7 +668,7 @@ jobs:
           WEBR_NOTEBOOK_DAILY_READ_BACKOFF_SECONDS: ${{ vars.WEBR_NOTEBOOK_DAILY_READ_BACKOFF_SECONDS || '3' }}
           WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS: ${{ vars.WEBR_NOTEBOOK_DAILY_INSERT_ATTEMPTS || '6' }}
           WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS: ${{ vars.WEBR_NOTEBOOK_DAILY_INSERT_BACKOFF_SECONDS || '10' }}
-          WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN: ${{ vars.WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN || 'false' }}
           WEBR_NOTEBOOK_SOURCE_CONTEXT_ENABLED: ${{ vars.WEBR_NOTEBOOK_SOURCE_CONTEXT_ENABLED || 'true' }}
           WEBR_NOTEBOOK_SOURCE_LOOKBACK_DAYS: ${{ vars.WEBR_NOTEBOOK_SOURCE_LOOKBACK_DAYS || '21' }}
           WEBR_NOTEBOOK_SOURCE_LIMIT: ${{ vars.WEBR_NOTEBOOK_SOURCE_LIMIT || '24' }}
@@ -741,7 +741,6 @@ jobs:
         run: |
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_contents --description "Statground Web-R CDN2 R ecosystem encrypted content"
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_packages --description "Statground Web-R CDN2 R package encrypted content"
-          python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2_community --description "Statground Web-R CDN2 community encrypted content"
           python scripts/ensure_cdn2_repo.py --repo statground/web-r_CDN2 --description "Statground Web-R CDN2 app assets and admin snapshots"
 
       - name: Checkout Web-R CDN2 contents
@@ -764,16 +763,6 @@ jobs:
           token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           persist-credentials: false
 
-      - name: Checkout Web-R CDN2 community
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        uses: actions/checkout@v7
-        with:
-          repository: statground/web-r_CDN2_community
-          ref: main
-          path: web-r_CDN2_community
-          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
-          persist-credentials: false
-
       - name: Export encrypted Web-R CDN2 content
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
@@ -790,18 +779,13 @@ jobs:
           R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_EXECUTION_TIME || '120' }}
           R_ECOSYSTEM_CDN_HTTP_TIMEOUT: ${{ vars.R_ECOSYSTEM_CDN_HTTP_TIMEOUT || '150' }}
           R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
-          R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
           R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME || '120' }}
           R_PACKAGE_CDN_HTTP_TIMEOUT: ${{ vars.R_PACKAGE_CDN_HTTP_TIMEOUT || '150' }}
           R_PACKAGE_CDN_CH_MAX_THREADS: ${{ vars.R_PACKAGE_CDN_CH_MAX_THREADS || '2' }}
-          R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
-          WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME || '120' }}
-          WEBR_COMMUNITY_CDN_HTTP_TIMEOUT: ${{ vars.WEBR_COMMUNITY_CDN_HTTP_TIMEOUT || '150' }}
-          WEBR_COMMUNITY_CDN_CH_MAX_THREADS: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_THREADS || '2' }}
-          WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'true' }}
+          R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
         run: |
           python scripts/test_export_r_package_cdn.py
-          python scripts/test_export_community_cdn.py
           python scripts/test_record_web_r_cdn_release.py
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
           previous_package_commit="$(git -C web-r_CDN2_packages rev-parse HEAD)"
@@ -813,7 +797,6 @@ jobs:
           python scripts/validate_r_package_registry_v2.py \
             --cdn-root web-r_CDN2_packages \
             --language ko
-          python scripts/export_community_cdn.py --cdn-root web-r_CDN2_community --language ko > /tmp/community_export.json
           python - <<'PY'
           import json
           import os
@@ -821,7 +804,6 @@ jobs:
 
           r_eco = json.loads(Path("/tmp/r_ecosystem_export.json").read_text(encoding="utf-8"))
           r_package = json.loads(Path("/tmp/r_package_export.json").read_text(encoding="utf-8"))
-          community = json.loads(Path("/tmp/community_export.json").read_text(encoding="utf-8"))
           required_package_news_sources = [
               source.strip()
               for source in os.environ.get("R_PACKAGE_REQUIRED_NEWS_SOURCES", "").split(",")
@@ -879,16 +861,6 @@ jobs:
                   "package_details": int(r_package.get("package_details") or 0),
                   "manifest_paths": ["packages/ko/index.json", "packages/ko/versions.json", "packages/ko/v2/registry.json"],
               },
-              "community": {
-                  "schema": "web-r.content-cdn.export-report.v2",
-                  "language": "ko",
-                  "scope": "web-r-community",
-                  "community": community,
-                  "community_export": int(community.get("community_export") or community.get("export") or 0),
-                  "workshop_export": int(community.get("workshop_export") or community.get("workshop") or 0),
-                  "workshop_posts": int(community.get("workshop_posts") or 0),
-                  "manifest_paths": ["community/ko/index.json", "community/ko/workshop/index.json"],
-              },
           }
           for key, report in reports.items():
               report["item_count"] = int(report.get("r_ecosystem_export") or 0) + int(report.get("community_export") or 0) + int(report.get("workshop_export") or 0) + int(report.get("packages") or 0) + int(report.get("news") or 0) + int(report.get("package_details") or 0)
@@ -898,7 +870,6 @@ jobs:
               "language": "ko",
               "r_ecosystem": r_eco,
               "r_package": r_package,
-              "community": community,
               "reports": reports,
           }
           Path("web_r_content_cdn_export_report.json").write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -968,28 +939,6 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push Web-R CDN2 community
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
-        id: web_r_cdn2_community
-        working-directory: web-r_CDN2_community
-        env:
-          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
-        run: |
-          git config user.name "statground-r-project-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${STATGROUND_CDN2_ADMIN_TOKEN}@github.com/statground/web-r_CDN2_community.git"
-          git add community
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "Web-R CDN2 community is already up to date."
-            exit 0
-          fi
-          git commit -m "Refresh Web-R CDN2 encrypted community"
-          git push origin HEAD:main
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Record Web-R CDN2 releases
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
         env:
@@ -999,7 +948,7 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
-          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'false' }}
           WEB_R_CDN_RELEASE_RECORD_ATTEMPTS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_ATTEMPTS || '3' }}
           WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS || '2' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
@@ -1032,19 +981,6 @@ jobs:
               --language ko > /tmp/web_r_cdn_record_packages.json
             cat /tmp/web_r_cdn_record_packages.json
           fi
-          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("community") or {}).get("export_deferred") else 1)'; then
-            echo "Web-R CDN2 community export was deferred; keeping the existing community release pointer."
-            printf '%s\n' '{"record_skipped":true,"reason":"export_deferred"}' > /tmp/web_r_cdn_record_community.json
-          else
-            python scripts/record_web_r_cdn_release.py \
-              --report web_r_cdn2_community_export_report.json \
-              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-              --repo statground/web-r_CDN2_community \
-              --branch main \
-              --scope web-r-community \
-              --language ko > /tmp/web_r_cdn_record_community.json
-            cat /tmp/web_r_cdn_record_community.json
-          fi
 
       - name: Verify Web-R CDN2 release pointers
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
@@ -1055,11 +991,11 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
-          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'false' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
-          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'false' }}
         run: |
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_contents_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_contents.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("r_ecosystem") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
             echo "Web-R CDN2 content release record was deferred or skipped; skipping content release pointer verification."
@@ -1086,22 +1022,6 @@ jobs:
               --repo statground/web-r_CDN2_packages \
               --commit-sha "${{ steps.web_r_cdn2_packages.outputs.commit_sha }}" \
               --manifest packages/ko/v2/registry.json
-          fi
-          if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_community_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_community.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("community") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
-            echo "Web-R CDN2 community release record was deferred or skipped; skipping community release pointer verification."
-          else
-            python scripts/verify_web_r_cdn_release.py \
-              --scope web-r-community \
-              --language ko \
-              --repo statground/web-r_CDN2_community \
-              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-              --manifest community/ko/index.json
-            python scripts/verify_web_r_cdn_release.py \
-              --scope web-r-community \
-              --language ko \
-              --repo statground/web-r_CDN2_community \
-              --commit-sha "${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
-              --manifest community/ko/workshop/index.json
           fi
 
       - name: Checkout Web-R CDN2 admin snapshots
@@ -1175,7 +1095,7 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
-          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN || 'false' }}
           WEB_R_CDN_RELEASE_RECORD_ATTEMPTS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_ATTEMPTS || '3' }}
           WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS: ${{ vars.WEB_R_CDN_RELEASE_RECORD_BACKOFF_SECONDS || '2' }}
           WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_RECORD_CH_MAX_EXECUTION_TIME || '45' }}
@@ -1212,11 +1132,11 @@ jobs:
           CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
           CH_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
           CH_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
-          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN || 'false' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_EXECUTION_TIME || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_HTTP_TIMEOUT || '45' }}
           WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_CH_MAX_THREADS || '1' }}
-          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'true' }}
+          WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN: ${{ vars.WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN || 'false' }}
         run: |
           python scripts/verify_web_r_cdn_release.py \
             --scope web-r-admin-pipelines \
@@ -1235,7 +1155,6 @@ jobs:
           checks = {
               "contents": ("web_r_cdn2_contents_export_report.json", "r_ecosystem"),
               "packages": ("web_r_cdn2_packages_export_report.json", "r_package"),
-              "community": ("web_r_cdn2_community_export_report.json", "community"),
           }
           deferred = []
           for scope, (path, key) in checks.items():
@@ -1247,6 +1166,20 @@ jobs:
               result = payload.get(key) or {}
               if result.get("export_deferred"):
                   deferred.append(f"{scope}:{result.get('deferred_reason') or 'deferred'}")
+          release_records = {
+              "contents": "/tmp/web_r_cdn_record_contents.json",
+              "packages": "/tmp/web_r_cdn_record_packages.json",
+          }
+          for scope, path in release_records.items():
+              record_path = Path(path)
+              if not record_path.exists():
+                  deferred.append(f"{scope}:release_record_missing")
+                  continue
+              record = json.loads(record_path.read_text(encoding="utf-8"))
+              if record.get("record_deferred") or record.get("record_skipped"):
+                  deferred.append(
+                      f"{scope}:{record.get('deferred_reason') or record.get('reason') or 'release_record_incomplete'}"
+                  )
           if deferred:
               summary = "CDN publish degraded: " + ", ".join(deferred)
               print(f"::error::{summary}")
@@ -1254,4 +1187,385 @@ jobs:
               summary_path.write_text("## CDN publish degraded\n\n" + summary + "\n", encoding="utf-8")
               raise SystemExit(1)
           print("All CDN export scopes produced fresh reports.")
+          PY
+
+  community-publication:
+    name: Publish exact Web-R community generation
+    needs: collect
+    if: inputs.scope == 'all' || inputs.scope == 'cdn'
+    runs-on:
+      group: statground-internal
+      labels: [self-hosted, linux, x64]
+    environment: web-r-community-publication
+    timeout-minutes: 45
+    env:
+      STATGROUND_SQL_COMMIT_SHA: 6ee7206c13d6694de1d1ef6bf95b3f6b2b7a7022
+      CLICKHOUSE_CLIENT_VERSION: 26.1.2.11
+      CLICKHOUSE_CLIENT_SHA512: 10a8e6bf05ddbbfeeedbf6fae7050b84e0104962a0ab8bf324b8bd83bf779fb87c00602e3660dc462d01b91b9f53c530498be32ba652e13a01cf86fd3edc33cc
+      CLICKHOUSE_COMMON_STATIC_SHA512: cdcb883b3ea3632434da3014bd8bca00a0ba1a5a50571fe14bddbf859ce31da3c43306e3bcee66185276cf8c05f4743730d2751dd6a86ac9ec6494d77f9cc0fb
+    steps:
+      - name: Define community publication runtime path
+        env:
+          RUNTIME_NAME: webr-community-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          import stat
+          from pathlib import Path
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          for stale in runner_temp.glob("webr-community-*"):
+              metadata = stale.lstat()
+              if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid() or not stale.is_dir():
+                  raise SystemExit("refusing unsafe stale community runtime cleanup")
+              shutil.rmtree(stale)
+          runtime = runner_temp / os.environ["RUNTIME_NAME"]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              print(f"COMMUNITY_RUNTIME_DIR={runtime}", file=output)
+          PY
+
+      - name: Checkout R Project publication source
+        uses: actions/checkout@v7
+
+      - name: Checkout immutable Statground SQL publisher
+        uses: actions/checkout@v7
+        with:
+          repository: statground/Statground_SQL
+          ref: 6ee7206c13d6694de1d1ef6bf95b3f6b2b7a7022
+          path: statground-sql
+          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Verify immutable Statground SQL checkout
+        run: |
+          test "$(git -C statground-sql rev-parse HEAD)" = "$STATGROUND_SQL_COMMIT_SHA" || {
+            echo "Statground_SQL checkout differs from the pinned publication contract" >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install community exporter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r scripts/requirements.txt
+
+      - name: Validate protected publication settings
+        env:
+          STATGROUND_SQL_READ_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+          WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
+          WEBR_COMMUNITY_READER_INVENTORY_B64: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
+          WEBR_COMMUNITY_READER_TOKENS_B64: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
+        run: |
+          test -n "$STATGROUND_SQL_READ_TOKEN" || { echo "STATGROUND_SQL_READ_TOKEN is required" >&2; exit 1; }
+          test -n "$STATGROUND_CDN2_ADMIN_TOKEN" || { echo "STATGROUND_CDN2_ADMIN_TOKEN is required" >&2; exit 1; }
+          test -n "$R_ECOSYSTEM_CONTENT_KEY" || { echo "R_ECOSYSTEM_CONTENT_KEY is required" >&2; exit 1; }
+          test -n "$WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64" || { echo "WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 is required" >&2; exit 1; }
+          test -n "$WEBR_COMMUNITY_READER_INVENTORY_B64" || { echo "WEBR_COMMUNITY_READER_INVENTORY_B64 is required" >&2; exit 1; }
+          test -n "$WEBR_COMMUNITY_READER_TOKENS_B64" || { echo "WEBR_COMMUNITY_READER_TOKENS_B64 is required" >&2; exit 1; }
+
+      - name: Materialize owner-only community publication runtime
+        env:
+          WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
+          WEBR_COMMUNITY_READER_INVENTORY_B64: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
+          WEBR_COMMUNITY_READER_TOKENS_B64: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
+        run: |
+          python scripts/materialize_community_publication_runtime.py \
+            --runtime-dir "$COMMUNITY_RUNTIME_DIR" \
+            --runner-temp "$RUNNER_TEMP"
+          test "$(stat -c '%a' "$COMMUNITY_RUNTIME_DIR")" = 700
+          if find "$COMMUNITY_RUNTIME_DIR" -type f ! -perm 0600 -print -quit | grep -q .; then
+            echo "community publication secret files are not owner-only" >&2
+            exit 1
+          fi
+
+      - name: Install checksum-pinned ClickHouse client
+        run: |
+          client_root="$COMMUNITY_RUNTIME_DIR/clickhouse-client"
+          archive_root="$COMMUNITY_RUNTIME_DIR/clickhouse-archives"
+          mkdir -m 700 "$client_root" "$archive_root"
+          client_archive="$archive_root/clickhouse-client.tgz"
+          common_archive="$archive_root/clickhouse-common-static.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
+            --output "$client_archive" \
+            "https://packages.clickhouse.com/tgz/stable/clickhouse-client-${CLICKHOUSE_CLIENT_VERSION}-amd64.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
+            --output "$common_archive" \
+            "https://packages.clickhouse.com/tgz/stable/clickhouse-common-static-${CLICKHOUSE_CLIENT_VERSION}-amd64.tgz"
+          printf '%s  %s\n' "$CLICKHOUSE_CLIENT_SHA512" "$client_archive" | sha512sum --check --strict
+          printf '%s  %s\n' "$CLICKHOUSE_COMMON_STATIC_SHA512" "$common_archive" | sha512sum --check --strict
+          tar --extract --gzip --file "$client_archive" --directory "$archive_root"
+          tar --extract --gzip --file "$common_archive" --directory "$archive_root"
+          mkdir -m 700 "$client_root/bin"
+          install -m 0755 \
+            "$archive_root/clickhouse-common-static-${CLICKHOUSE_CLIENT_VERSION}/usr/bin/clickhouse" \
+            "$client_root/bin/clickhouse"
+          ln -s clickhouse "$client_root/bin/clickhouse-client"
+          "$client_root/bin/clickhouse-client" --version
+
+      - name: Gate exact community publication write targets
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:mart_webr.community_feed_snapshot_v1_local,
+            local:mart_webr.community_feed_generation_proof_v1_local,
+            replica:mart_webr.community_feed_publish_lease_v1_local,
+            replica:mart_webr.community_feed_generation_marker_v1_local,
+            replica:mart_webr.community_feed_serving_pointer_v1_local,
+            replica:mart_webr.community_publication_reader_transition_ack_v2_local
+        run: python scripts/clickhouse_pressure_gate.py
+
+      - name: Checkout Web-R CDN2 community
+        uses: actions/checkout@v7
+        with:
+          repository: statground/web-r_CDN2_community
+          ref: main
+          path: web-r_CDN2_community
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
+
+      - name: Preflight and load exact community generation
+        id: community_loader
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          loader="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_loader.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          preflight_generation="$("$client" --config-file "$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml" \
+            --query "SELECT toString(now64(6, 'UTC')) FORMAT TSVRaw")"
+          python "$loader" preflight --generation "$preflight_generation" \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/loader-preflight.json"
+          generation="$("$client" --config-file "$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml" \
+            --query "SELECT toString(now64(6, 'UTC')) FORMAT TSVRaw")"
+          test "$generation" != "$preflight_generation" || {
+            echo "ClickHouse did not provide a fresh exact generation" >&2
+            exit 1
+          }
+          python "$loader" load --generation "$generation" \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/loader-receipt.json"
+          GENERATION="$generation" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "loader-receipt.json").read_text(encoding="utf-8"))
+          if (
+              receipt.get("status") != "candidate_loaded"
+              or receipt.get("generation") != os.environ["GENERATION"]
+              or int(receipt.get("row_count") or 0) <= 0
+              or int(receipt.get("visible_row_count") or 0) <= 0
+              or int(receipt.get("cdn_item_count") or 0) <= 0
+              or len(str(receipt.get("cdn_identity_hash") or "")) != 64
+          ):
+              raise SystemExit("exact community generation loader receipt is incomplete")
+          PY
+          echo "generation=$generation" >> "$GITHUB_OUTPUT"
+
+      - name: Export the exact loaded community generation
+        env:
+          CLICKHOUSE_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_PROTOCOL: ${{ secrets.CH_PROTOCOL || secrets.CLICKHOUSE_PROTOCOL || 'http' }}
+          CLICKHOUSE_HTTP_URL_PATH: ${{ secrets.CH_HTTP_URL_PATH || secrets.CLICKHOUSE_HTTP_URL_PATH }}
+          CLICKHOUSE_DEFAULT_DATABASE: Clickhouse_Statground
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+          WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_EXECUTION_TIME || '120' }}
+          WEBR_COMMUNITY_CDN_HTTP_TIMEOUT: ${{ vars.WEBR_COMMUNITY_CDN_HTTP_TIMEOUT || '150' }}
+          WEBR_COMMUNITY_CDN_CH_MAX_THREADS: ${{ vars.WEBR_COMMUNITY_CDN_CH_MAX_THREADS || '2' }}
+          WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN: "false"
+          GENERATION: ${{ steps.community_loader.outputs.generation }}
+        run: |
+          python scripts/test_export_community_cdn.py
+          python scripts/export_community_cdn.py \
+            --cdn-root web-r_CDN2_community \
+            --language ko \
+            --generation "${{ steps.community_loader.outputs.generation }}" \
+            > "$COMMUNITY_RUNTIME_DIR/community-export.json"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          generation = os.environ["GENERATION"]
+          report = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "community-export.json").read_text(encoding="utf-8"))
+          proof = json.loads(Path("web-r_CDN2_community/community/ko/generation-proof.json").read_text(encoding="utf-8"))
+          hashes = re.compile(r"[0-9a-f]{64}")
+          if report.get("export_deferred") or report.get("generation") != generation or report.get("generation_complete") is not True:
+              raise SystemExit("community export did not complete the exact loader generation")
+          if (
+              report.get("workshop_complete") is not True
+              or int(report.get("workshop_item_count") or 0) <= 0
+              or int(report.get("workshop_post_count") or 0) <= 0
+              or int(report.get("workshop_export") or 0) != int(report.get("workshop_item_count") or 0)
+              or not hashes.fullmatch(str(report.get("workshop_identity_hash") or ""))
+              or not hashes.fullmatch(str(report.get("workshop_content_hash") or ""))
+              or report.get("workshop_catalog_token") != report.get("workshop_content_hash")
+          ):
+              raise SystemExit("workshop export is incomplete")
+          if (
+              proof.get("schema") != "web-r.community.generation-proof.v2"
+              or proof.get("generation") != generation
+              or proof.get("complete") is not True
+              or int(proof.get("item_count") or 0) <= 0
+              or not hashes.fullmatch(str(proof.get("identity_hash") or ""))
+              or not hashes.fullmatch(str(proof.get("content_hash") or ""))
+          ):
+              raise SystemExit("community generation proof is incomplete")
+          PY
+
+      - name: Commit and push exact Web-R community generation
+        id: web_r_cdn2_community
+        working-directory: web-r_CDN2_community
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: |
+          git config user.name "statground-r-project-bot"
+          git config user.email "actions@users.noreply.github.com"
+          askpass="$COMMUNITY_RUNTIME_DIR/git-askpass.sh"
+          cat > "$askpass" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *Password*) printf '%s\n' "$STATGROUND_CDN2_ADMIN_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 0700 "$askpass"
+          export GIT_ASKPASS="$askpass"
+          export GIT_TERMINAL_PROMPT=0
+          git remote set-url origin "https://github.com/statground/web-r_CDN2_community.git"
+          git add community
+          if git diff --cached --quiet; then
+            echo "exact community generation produced no CDN commit" >&2
+            exit 1
+          fi
+          git commit -m "Publish exact Web-R community generation"
+          git -c credential.helper= push origin HEAD:main
+          commit_sha="$(git rev-parse HEAD)"
+          [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid community commit identity" >&2; exit 1; }
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable jsDelivr generation proof
+        run: |
+          python scripts/verify_community_generation_cdn.py \
+            --base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --asset community/ko/index.json web-r_CDN2_community/community/ko/index.json \
+            --asset community/ko/workshop/index.json web-r_CDN2_community/community/ko/workshop/index.json \
+            --attempts 8 \
+            --backoff-seconds 5
+
+      - name: Preflight exact application reader transition
+        id: community_preflight
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          publisher="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          python "$publisher" preflight \
+            --generation "${{ steps.community_loader.outputs.generation }}" \
+            --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/publisher-preflight.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "publisher-preflight.json").read_text(encoding="utf-8"))
+          if receipt.get("status") != "preflight_pass" or int(receipt.get("reader_count") or 0) <= 0:
+              raise SystemExit("community publisher preflight receipt is incomplete")
+          if receipt.get("current_generation") is None:
+              raise SystemExit("bootstrap_required: dispatch R Project Community Bootstrap")
+          PY
+
+      - name: Publish and reopen exact application readers
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          publisher="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          python "$publisher" publish \
+            --generation "${{ steps.community_loader.outputs.generation }}" \
+            --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
+            --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
+            --reader-timeout-seconds 60 \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/community-publish-receipt.json"
+          python - <<'PY'
+          import json
+          import os
+          import uuid
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "community-publish-receipt.json").read_text(encoding="utf-8"))
+          expected_generation = "${{ steps.community_loader.outputs.generation }}"
+          if (
+              receipt.get("status") not in {"released", "already_released"}
+              or receipt.get("generation") != expected_generation
+              or int(receipt.get("reader_count") or 0) <= 0
+              or receipt.get("withdrawal_ack") is not True
+              or int(receipt.get("fence_token") or 0) <= 0
+          ):
+              raise SystemExit("community publication receipt is incomplete")
+          for key in ("transition_id", "ack_uuid"):
+              value = uuid.UUID(str(receipt.get(key) or ""))
+              if value.int == 0 or str(value) != receipt[key]:
+                  raise SystemExit(f"community publication receipt has invalid {key}")
+          if receipt["status"] == "released":
+              for key in ("marker_id", "pointer_id"):
+                  value = uuid.UUID(str(receipt.get(key) or ""))
+                  if value.int == 0 or str(value) != receipt[key]:
+                      raise SystemExit(f"community publication receipt has invalid {key}")
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+
+      - name: Always remove community publication secrets
+        if: always()
+        run: |
+          RUNTIME_DIR="$COMMUNITY_RUNTIME_DIR" python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          runtime = Path(os.environ["RUNTIME_DIR"])
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          if runtime.parent.resolve(strict=True) != runner_temp:
+              raise SystemExit("refusing to clean a path outside RUNNER_TEMP")
+          if runtime.exists() and not runtime.is_symlink():
+              shutil.rmtree(runtime)
+          if runtime.exists() or runtime.is_symlink():
+              raise SystemExit("community publication runtime cleanup failed")
           PY

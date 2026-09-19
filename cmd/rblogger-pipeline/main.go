@@ -57,39 +57,39 @@ var allowedContentTags = map[string]bool{
 }
 
 type Config struct {
-	MaxPagesFromHome      int           `json:"max_pages_from_home"`
-	MaxURLs               int           `json:"max_urls"`
-	Sleep                 time.Duration `json:"sleep"`
-	TranslateEnabled      bool          `json:"translate_enabled"`
-	StaleTranslationLimit int           `json:"stale_translation_limit"`
-	FailOnListError       bool          `json:"fail_on_list_error"`
-	FailOnCrawlError      bool          `json:"fail_on_crawl_error"`
-	FailOnTranslationErr  bool          `json:"fail_on_translation_error"`
-	RbloggerHomeURL       string        `json:"rblogger_home_url"`
-	RbloggerPageURL       string        `json:"rblogger_page_url"`
-	TranslationModel      string        `json:"translation_model"`
-	AITimeout             time.Duration `json:"ai_timeout"`
-	RebuildLimit          int           `json:"rebuild_limit"`
-	RebuildBatchSize      int           `json:"rebuild_batch_size"`
-	PublishMode           string        `json:"publish_mode"`
+	MaxPagesFromHome      int              `json:"max_pages_from_home"`
+	MaxURLs               int              `json:"max_urls"`
+	Sleep                 time.Duration    `json:"sleep"`
+	TranslateEnabled      bool             `json:"translate_enabled"`
+	StaleTranslationLimit int              `json:"stale_translation_limit"`
+	FailOnListError       bool             `json:"fail_on_list_error"`
+	FailOnCrawlError      bool             `json:"fail_on_crawl_error"`
+	FailOnTranslationErr  bool             `json:"fail_on_translation_error"`
+	RbloggerHomeURL       string           `json:"rblogger_home_url"`
+	RbloggerPageURL       string           `json:"rblogger_page_url"`
+	TranslationModel      string           `json:"translation_model"`
+	AITimeout             time.Duration    `json:"ai_timeout"`
+	RebuildLimit          int              `json:"rebuild_limit"`
+	RebuildBatchSize      int              `json:"rebuild_batch_size"`
+	PublishMode           string           `json:"publish_mode"`
 	Kafka                 KafkaConfig      `json:"kafka"`
 	ClickHouse            ClickHouseConfig `json:"clickhouse"`
 }
 
 type KafkaConfig struct {
-	Brokers         []string      `json:"brokers"`
-	Username        string        `json:"username"`
-	Password        string        `json:"-"`
-	SecurityProtocol string      `json:"security_protocol"`
-	Topic           string        `json:"topic"`
-	ClientID        string        `json:"client_id"`
-	BatchSize       int           `json:"batch_size"`
-	BatchTimeout    time.Duration `json:"batch_timeout"`
-	WriteTimeout    time.Duration `json:"write_timeout"`
-	WriteChunkSize  int           `json:"write_chunk_size"`
-	MaxMessageBytes int           `json:"max_message_bytes"`
-	ProducerSource  string        `json:"producer_source"`
-	ProducerIP      string        `json:"producer_ip"`
+	Brokers          []string      `json:"brokers"`
+	Username         string        `json:"username"`
+	Password         string        `json:"-"`
+	SecurityProtocol string        `json:"security_protocol"`
+	Topic            string        `json:"topic"`
+	ClientID         string        `json:"client_id"`
+	BatchSize        int           `json:"batch_size"`
+	BatchTimeout     time.Duration `json:"batch_timeout"`
+	WriteTimeout     time.Duration `json:"write_timeout"`
+	WriteChunkSize   int           `json:"write_chunk_size"`
+	MaxMessageBytes  int           `json:"max_message_bytes"`
+	ProducerSource   string        `json:"producer_source"`
+	ProducerIP       string        `json:"producer_ip"`
 }
 
 type ClickHouseConfig struct {
@@ -527,19 +527,19 @@ func runBoardRebuild(ctx context.Context, cfg Config, dryRun bool) (map[string]a
 func loadConfig(rebuildBoard bool) (Config, error) {
 	publishMode := normalizePublishMode(envString("RPROJECT_PUBLISH_MODE", envString("R_DATA_PUBLISH_MODE", "clickhouse")))
 	kafkaCfg := KafkaConfig{
-		Brokers:         splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
-		Username:        firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
-		Password:        firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), os.Getenv("KAFKA_EXTERNAL_PASSWORD")),
+		Brokers:          splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
+		Username:         firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
+		Password:         firstNonEmpty(os.Getenv("KAFKA_PASSWORD"), os.Getenv("KAFKA_EXTERNAL_PASSWORD")),
 		SecurityProtocol: envString("KAFKA_SECURITY_PROTOCOL", ""),
-		Topic:           envString("KAFKA_TOPIC", "webr.events"),
-		ClientID:        envString("KAFKA_CLIENT_ID", "statground-rblogger-crawler"),
-		BatchSize:       maxInt(1, envInt("KAFKA_BATCH_SIZE", 50)),
-		BatchTimeout:    envFloatDuration("KAFKA_BATCH_TIMEOUT", 0.5),
-		WriteTimeout:    time.Duration(maxInt(1, envInt("KAFKA_WRITE_TIMEOUT", 30))) * time.Second,
-		WriteChunkSize:  maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 50)),
-		MaxMessageBytes: maxInt(131072, envInt("KAFKA_MAX_MESSAGE_BYTES", 524288)),
-		ProducerSource:  envString("PRODUCER_SOURCE", "github_actions"),
-		ProducerIP:      envString("PRODUCER_IP", "::"),
+		Topic:            envString("KAFKA_TOPIC", "webr.events"),
+		ClientID:         envString("KAFKA_CLIENT_ID", "statground-rblogger-crawler"),
+		BatchSize:        maxInt(1, envInt("KAFKA_BATCH_SIZE", 50)),
+		BatchTimeout:     envFloatDuration("KAFKA_BATCH_TIMEOUT", 0.5),
+		WriteTimeout:     time.Duration(maxInt(1, envInt("KAFKA_WRITE_TIMEOUT", 30))) * time.Second,
+		WriteChunkSize:   maxInt(1, envInt("KAFKA_WRITE_CHUNK_SIZE", 50)),
+		MaxMessageBytes:  maxInt(131072, envInt("KAFKA_MAX_MESSAGE_BYTES", 524288)),
+		ProducerSource:   envString("PRODUCER_SOURCE", "github_actions"),
+		ProducerIP:       envString("PRODUCER_IP", "::"),
 	}
 	if !rebuildBoard && usesKafkaPublishMode(publishMode) && len(kafkaCfg.Brokers) == 0 {
 		return Config{}, errors.New("KAFKA_BROKERS is required")
@@ -564,23 +564,23 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		}
 	}
 	return Config{
-		MaxPagesFromHome:     maxInt(1, envInt("MAX_PAGES_FROM_HOME", 1)),
-		MaxURLs:              maxInt(0, envInt("MAX_URLS", 0)),
-		Sleep:                envFloatDuration("SLEEP_SEC", 1.0),
-		TranslateEnabled:     translateEnabled,
+		MaxPagesFromHome:      maxInt(1, envInt("MAX_PAGES_FROM_HOME", 1)),
+		MaxURLs:               maxInt(0, envInt("MAX_URLS", 0)),
+		Sleep:                 envFloatDuration("SLEEP_SEC", 1.0),
+		TranslateEnabled:      translateEnabled,
 		StaleTranslationLimit: staleLimit,
-		FailOnListError:      envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
-		FailOnCrawlError:     envBool("FAIL_ON_CRAWL_ERROR", false),
-		FailOnTranslationErr: envBool("FAIL_ON_TRANSLATION_ERROR", false),
-		RbloggerHomeURL:      envString("RBLOGGER_HOME_URL", defaultHomeURL),
-		RbloggerPageURL:      envString("RBLOGGER_PAGE_URL", defaultPageURL),
-		TranslationModel:     envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free"),
-		AITimeout:            time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second,
-		RebuildLimit:         maxInt(0, envInt("RBLOGGER_REBUILD_LIMIT", 0)),
-		RebuildBatchSize:     maxInt(1, envInt("RBLOGGER_REBUILD_BATCH_SIZE", 50)),
-		PublishMode:          publishMode,
-		Kafka:                kafkaCfg,
-		ClickHouse:           clickHouseCfg,
+		FailOnListError:       envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
+		FailOnCrawlError:      envBool("FAIL_ON_CRAWL_ERROR", false),
+		FailOnTranslationErr:  envBool("FAIL_ON_TRANSLATION_ERROR", false),
+		RbloggerHomeURL:       envString("RBLOGGER_HOME_URL", defaultHomeURL),
+		RbloggerPageURL:       envString("RBLOGGER_PAGE_URL", defaultPageURL),
+		TranslationModel:      envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free"),
+		AITimeout:             time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second,
+		RebuildLimit:          maxInt(0, envInt("RBLOGGER_REBUILD_LIMIT", 0)),
+		RebuildBatchSize:      maxInt(1, envInt("RBLOGGER_REBUILD_BATCH_SIZE", 50)),
+		PublishMode:           publishMode,
+		Kafka:                 kafkaCfg,
+		ClickHouse:            clickHouseCfg,
 	}, nil
 }
 
@@ -1322,41 +1322,41 @@ func rbloggerRawRow(event KafkaEvent, payload map[string]any) map[string]any {
 	createdLog := mapValue(payload["created_log"])
 	articleLog := mapValue(createdLog["article"])
 	return map[string]any{
-		"uuid":                  firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
-		"created_at":            firstNullableClickHouseTimeString(stringValue(payload["created_at"]), event.CreatedAt),
-		"created_log":           nullableJSON(payload["created_log"]),
-		"updated_at":            nullableClickHouseTimeString(stringValue(payload["updated_at"])),
-		"updated_log":           nullableJSON(payload["updated_log"]),
-		"active":                nullableUInt8(payload["active"]),
-		"github_path":           nullableString(stringValue(payload["github_path"])),
-		"title":                 nullableString(stringValue(payload["title"])),
-		"content":               nullableString(stringValue(payload["content"])),
-		"url":                   nullableString(firstNonEmpty(stringValue(payload["url"]), event.URL)),
-		"url_hash":              firstNonEmpty(stringValue(payload["url_hash"]), hashString(firstNonEmpty(stringValue(payload["url"]), event.URL))),
-		"language_code":         firstNonEmpty(stringValue(payload["language_code"]), "en"),
-		"canonical_url":         firstNonEmpty(stringValue(payload["canonical_url"]), stringValue(articleLog["canonical_url"])),
-		"html_title":            firstNonEmpty(stringValue(payload["html_title"]), stringValue(articleLog["html_title"])),
-		"h1_title":              firstNonEmpty(stringValue(payload["h1_title"]), stringValue(articleLog["h1_title"])),
-		"meta_description":      firstNonEmpty(stringValue(payload["meta_description"]), stringValue(articleLog["meta_description"])),
-		"meta_keywords":         firstNonEmpty(stringValue(payload["meta_keywords"]), stringValue(articleLog["meta_keywords"])),
-		"og_title":              firstNonEmpty(stringValue(payload["og_title"]), stringValue(articleLog["og_title"])),
-		"og_description":        firstNonEmpty(stringValue(payload["og_description"]), stringValue(articleLog["og_description"])),
-		"og_image":              firstNonEmpty(stringValue(payload["og_image"]), stringValue(articleLog["og_image"])),
-		"twitter_title":         firstNonEmpty(stringValue(payload["twitter_title"]), stringValue(articleLog["twitter_title"])),
-		"twitter_description":   firstNonEmpty(stringValue(payload["twitter_description"]), stringValue(articleLog["twitter_description"])),
-		"article_headline":      firstNonEmpty(stringValue(payload["article_headline"]), stringValue(articleLog["article_headline"])),
-		"article_section":       firstNonEmpty(stringValue(payload["article_section"]), stringValue(articleLog["article_section"])),
-		"article_tags_json":     jsonString(firstNonEmptyValue(payload["article_tags"], articleLog["article_tags"]), "[]"),
-		"article_author":        firstNonEmpty(stringValue(payload["article_author"]), stringValue(articleLog["article_author"])),
-		"article_published_at":  nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_published"]), stringValue(articleLog["article_published"]))),
-		"article_modified_at":   nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_modified"]), stringValue(articleLog["article_modified"]))),
-		"word_count":            uint32Value(firstNonEmptyValue(payload["word_count"], articleLog["word_count"])),
-		"reading_time_min":      float32Value(firstNonEmptyValue(payload["reading_time_min"], articleLog["reading_time_min"])),
-		"internal_links_json":   jsonString(firstNonEmptyValue(payload["internal_links"], articleLog["internal_links"]), "[]"),
-		"external_links_json":   jsonString(firstNonEmptyValue(payload["external_links"], articleLog["external_links"]), "[]"),
-		"images_json":           jsonString(firstNonEmptyValue(payload["images"], articleLog["images"]), "[]"),
-		"main_text_excerpt":     firstNonEmpty(stringValue(payload["main_text_excerpt"]), stringValue(articleLog["main_text_excerpt"])),
-		"raw_article_json":      jsonString(articleLog, "{}"),
+		"uuid":                 firstNonEmpty(stringValue(payload["uuid"]), event.EventUUID),
+		"created_at":           firstNullableClickHouseTimeString(stringValue(payload["created_at"]), event.CreatedAt),
+		"created_log":          nullableJSON(payload["created_log"]),
+		"updated_at":           nullableClickHouseTimeString(stringValue(payload["updated_at"])),
+		"updated_log":          nullableJSON(payload["updated_log"]),
+		"active":               nullableUInt8(payload["active"]),
+		"github_path":          nullableString(stringValue(payload["github_path"])),
+		"title":                nullableString(stringValue(payload["title"])),
+		"content":              nullableString(stringValue(payload["content"])),
+		"url":                  nullableString(firstNonEmpty(stringValue(payload["url"]), event.URL)),
+		"url_hash":             firstNonEmpty(stringValue(payload["url_hash"]), hashString(firstNonEmpty(stringValue(payload["url"]), event.URL))),
+		"language_code":        firstNonEmpty(stringValue(payload["language_code"]), "en"),
+		"canonical_url":        firstNonEmpty(stringValue(payload["canonical_url"]), stringValue(articleLog["canonical_url"])),
+		"html_title":           firstNonEmpty(stringValue(payload["html_title"]), stringValue(articleLog["html_title"])),
+		"h1_title":             firstNonEmpty(stringValue(payload["h1_title"]), stringValue(articleLog["h1_title"])),
+		"meta_description":     firstNonEmpty(stringValue(payload["meta_description"]), stringValue(articleLog["meta_description"])),
+		"meta_keywords":        firstNonEmpty(stringValue(payload["meta_keywords"]), stringValue(articleLog["meta_keywords"])),
+		"og_title":             firstNonEmpty(stringValue(payload["og_title"]), stringValue(articleLog["og_title"])),
+		"og_description":       firstNonEmpty(stringValue(payload["og_description"]), stringValue(articleLog["og_description"])),
+		"og_image":             firstNonEmpty(stringValue(payload["og_image"]), stringValue(articleLog["og_image"])),
+		"twitter_title":        firstNonEmpty(stringValue(payload["twitter_title"]), stringValue(articleLog["twitter_title"])),
+		"twitter_description":  firstNonEmpty(stringValue(payload["twitter_description"]), stringValue(articleLog["twitter_description"])),
+		"article_headline":     firstNonEmpty(stringValue(payload["article_headline"]), stringValue(articleLog["article_headline"])),
+		"article_section":      firstNonEmpty(stringValue(payload["article_section"]), stringValue(articleLog["article_section"])),
+		"article_tags_json":    jsonString(firstNonEmptyValue(payload["article_tags"], articleLog["article_tags"]), "[]"),
+		"article_author":       firstNonEmpty(stringValue(payload["article_author"]), stringValue(articleLog["article_author"])),
+		"article_published_at": nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_published"]), stringValue(articleLog["article_published"]))),
+		"article_modified_at":  nullableClickHouseTimeString(firstNonEmpty(stringValue(payload["article_modified"]), stringValue(articleLog["article_modified"]))),
+		"word_count":           uint32Value(firstNonEmptyValue(payload["word_count"], articleLog["word_count"])),
+		"reading_time_min":     float32Value(firstNonEmptyValue(payload["reading_time_min"], articleLog["reading_time_min"])),
+		"internal_links_json":  jsonString(firstNonEmptyValue(payload["internal_links"], articleLog["internal_links"]), "[]"),
+		"external_links_json":  jsonString(firstNonEmptyValue(payload["external_links"], articleLog["external_links"]), "[]"),
+		"images_json":          jsonString(firstNonEmptyValue(payload["images"], articleLog["images"]), "[]"),
+		"main_text_excerpt":    firstNonEmpty(stringValue(payload["main_text_excerpt"]), stringValue(articleLog["main_text_excerpt"])),
+		"raw_article_json":     jsonString(articleLog, "{}"),
 	}
 }
 
@@ -1494,7 +1494,7 @@ func splittableClickHouseStatementError(err error) bool {
 }
 
 func shouldDeferRbloggerPublishFailure(err error) bool {
-	if !envBool("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+	if !envBool("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
 		return false
 	}
 	if isRbloggerOutboxPersistenceError(err) {
@@ -1739,18 +1739,18 @@ func (r *ClickHouseReader) endpoint() (string, error) {
 func rawPayload(rowUUID string, article Article, urlHash string, createdAt time.Time) map[string]any {
 	articleLog := compactArticleLog(article, urlHash)
 	return map[string]any{
-		"uuid":          rowUUID,
-		"created_at":    formatClickHouseTime(createdAt),
-		"created_log":   map[string]any{"type": "rblogger_crawl", "source": "Statground_Data_R-project", "article": articleLog},
-		"updated_at":    nil,
-		"updated_log":   nil,
-		"active":        1,
-		"github_path":   nil,
-		"title":         sourceTitle(article),
-		"content":       sourceContent(article),
-		"url":           firstNonEmpty(article.CanonicalURL, article.URL),
-		"url_hash":      urlHash,
-		"language_code": "en",
+		"uuid":                rowUUID,
+		"created_at":          formatClickHouseTime(createdAt),
+		"created_log":         map[string]any{"type": "rblogger_crawl", "source": "Statground_Data_R-project", "article": articleLog},
+		"updated_at":          nil,
+		"updated_log":         nil,
+		"active":              1,
+		"github_path":         nil,
+		"title":               sourceTitle(article),
+		"content":             sourceContent(article),
+		"url":                 firstNonEmpty(article.CanonicalURL, article.URL),
+		"url_hash":            urlHash,
+		"language_code":       "en",
 		"canonical_url":       article.CanonicalURL,
 		"html_title":          article.HTMLTitle,
 		"h1_title":            article.H1Title,
@@ -1798,11 +1798,11 @@ func boardPayloadWithUpdated(rowUUID, rawURL, title, content string, createdAt, 
 		"created_at": formatClickHouseTime(createdAt),
 		"updated_at": updated,
 		"created_log": map[string]any{
-			"type":            "rblogger_board_translation",
-			"source":          "Statground_Data_R-project",
-			"raw_url":         rawURL,
-			"prompt_language": "en",
-			"hyperlinks":      "removed",
+			"type":             "rblogger_board_translation",
+			"source":           "Statground_Data_R-project",
+			"raw_url":          rawURL,
+			"prompt_language":  "en",
+			"hyperlinks":       "removed",
 			"content_fallback": "title_when_blank",
 		},
 		"updated_log":   nil,

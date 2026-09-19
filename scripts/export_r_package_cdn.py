@@ -156,7 +156,7 @@ def main() -> int:
         fail_open = env_bool(
             env,
             "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
-            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False),
         )
         if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
@@ -334,7 +334,7 @@ def main() -> int:
         fail_open = env_bool(
             env,
             "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
-            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False),
         )
         if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(

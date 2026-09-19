@@ -8118,7 +8118,7 @@ func shouldDeferPackagePublishFailure(err error) bool {
 }
 
 func shouldDeferYouTubePublishFailure(err error) bool {
-	if !envBool("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+	if !envBool("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
 		return false
 	}
 	if isDirectOutboxPersistenceError(err) {
@@ -8128,7 +8128,7 @@ func shouldDeferYouTubePublishFailure(err error) bool {
 }
 
 func shouldDeferCommunityPublishFailure(err error) bool {
-	if !envBool("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", true) {
+	if !envBool("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", false) {
 		return false
 	}
 	if isDirectOutboxPersistenceError(err) {
@@ -8138,7 +8138,7 @@ func shouldDeferCommunityPublishFailure(err error) bool {
 }
 
 func shouldDeferCommunityDigestFailure(err error) bool {
-	if !envBool("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", true) {
+	if !envBool("R_COMMUNITY_DIGEST_TRANSIENT_FAIL_OPEN", false) {
 		return false
 	}
 	if isDirectOutboxPersistenceError(err) {

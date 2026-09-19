@@ -58,7 +58,7 @@ def main() -> int:
         try:
             row = latest_release_row(args.scope, args.language)
         except ClickHouseReleaseVerifyError as exc:
-            if env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+            if env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
                 print(
                     f"[warn] Web-R CDN release verification deferred scope={args.scope} reason={exc.category}",
                     file=sys.stderr,
@@ -109,7 +109,7 @@ def main() -> int:
         if attempt < attempts:
             time.sleep(max(0, args.retry_delay))
 
-    if last_pointer_mismatch and env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN", True):
+    if last_pointer_mismatch and env_bool(os.environ, "WEB_R_CDN_RELEASE_VERIFY_POINTER_MISMATCH_FAIL_OPEN", False):
         print(
             f"[warn] Web-R CDN release verification deferred scope={args.scope} reason=POINTER_MISMATCH",
             file=sys.stderr,

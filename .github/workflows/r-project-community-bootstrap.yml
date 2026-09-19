@@ -1,0 +1,328 @@
+name: R Project Community Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type BOOTSTRAP_WEBR_COMMUNITY_ONCE"
+        required: true
+        type: string
+      generation:
+        description: "Exact loaded UTC DateTime64(6) generation"
+        required: true
+        type: string
+      cdn_commit_sha:
+        description: "Exact 40-character web-r_CDN2_community commit"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: r-project-publication
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-community-publication:
+    name: Bootstrap and release first community generation
+    runs-on:
+      group: statground-internal
+      labels: [self-hosted, linux, x64]
+    environment: web-r-community-publication-bootstrap
+    timeout-minutes: 30
+    env:
+      STATGROUND_SQL_COMMIT_SHA: 6ee7206c13d6694de1d1ef6bf95b3f6b2b7a7022
+      CLICKHOUSE_CLIENT_VERSION: 26.1.2.11
+      CLICKHOUSE_CLIENT_SHA512: 10a8e6bf05ddbbfeeedbf6fae7050b84e0104962a0ab8bf324b8bd83bf779fb87c00602e3660dc462d01b91b9f53c530498be32ba652e13a01cf86fd3edc33cc
+      CLICKHOUSE_COMMON_STATIC_SHA512: cdcb883b3ea3632434da3014bd8bca00a0ba1a5a50571fe14bddbf859ce31da3c43306e3bcee66185276cf8c05f4743730d2751dd6a86ac9ec6494d77f9cc0fb
+    steps:
+      - name: Define community publication runtime path
+        env:
+          RUNTIME_NAME: webr-community-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          import stat
+          from pathlib import Path
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          for stale in runner_temp.glob("webr-community-*"):
+              metadata = stale.lstat()
+              if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.geteuid() or not stale.is_dir():
+                  raise SystemExit("refusing unsafe stale community runtime cleanup")
+              shutil.rmtree(stale)
+          runtime = runner_temp / os.environ["RUNTIME_NAME"]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              print(f"COMMUNITY_RUNTIME_DIR={runtime}", file=output)
+          PY
+
+      - name: Validate exact one-shot bootstrap inputs
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          GENERATION: ${{ inputs.generation }}
+          CDN_COMMIT_SHA: ${{ inputs.cdn_commit_sha }}
+        run: |
+          test "$CONFIRM" = "BOOTSTRAP_WEBR_COMMUNITY_ONCE" || {
+            echo "exact bootstrap confirmation is required" >&2
+            exit 1
+          }
+          [[ "$GENERATION" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$ ]] || {
+            echo "generation must be exact UTC DateTime64(6)" >&2
+            exit 1
+          }
+          [[ "$CDN_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "CDN commit must be an exact lowercase 40-character SHA" >&2
+            exit 1
+          }
+
+      - name: Checkout R Project publication source
+        uses: actions/checkout@v7
+
+      - name: Checkout immutable Statground SQL publisher
+        uses: actions/checkout@v7
+        with:
+          repository: statground/Statground_SQL
+          ref: 6ee7206c13d6694de1d1ef6bf95b3f6b2b7a7022
+          path: statground-sql
+          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout exact community CDN generation
+        uses: actions/checkout@v7
+        with:
+          repository: statground/web-r_CDN2_community
+          ref: ${{ inputs.cdn_commit_sha }}
+          path: web-r_CDN2_community
+          token: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          persist-credentials: false
+
+      - name: Verify immutable source identities
+        env:
+          CDN_COMMIT_SHA: ${{ inputs.cdn_commit_sha }}
+        run: |
+          test "$(git -C statground-sql rev-parse HEAD)" = "$STATGROUND_SQL_COMMIT_SHA" || {
+            echo "Statground_SQL checkout differs from the pinned publication contract" >&2
+            exit 1
+          }
+          test "$(git -C web-r_CDN2_community rev-parse HEAD)" = "$CDN_COMMIT_SHA" || {
+            echo "community CDN checkout differs from the requested exact commit" >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Materialize owner-only community publication runtime
+        env:
+          WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
+          WEBR_COMMUNITY_READER_INVENTORY_B64: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
+          WEBR_COMMUNITY_READER_TOKENS_B64: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
+        run: |
+          python scripts/materialize_community_publication_runtime.py \
+            --runtime-dir "$COMMUNITY_RUNTIME_DIR" \
+            --runner-temp "$RUNNER_TEMP"
+          test "$(stat -c '%a' "$COMMUNITY_RUNTIME_DIR")" = 700
+          if find "$COMMUNITY_RUNTIME_DIR" -type f ! -perm 0600 -print -quit | grep -q .; then
+            echo "community publication secret files are not owner-only" >&2
+            exit 1
+          fi
+
+      - name: Install checksum-pinned ClickHouse client
+        run: |
+          client_root="$COMMUNITY_RUNTIME_DIR/clickhouse-client"
+          archive_root="$COMMUNITY_RUNTIME_DIR/clickhouse-archives"
+          mkdir -m 700 "$client_root" "$archive_root"
+          client_archive="$archive_root/clickhouse-client.tgz"
+          common_archive="$archive_root/clickhouse-common-static.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
+            --output "$client_archive" \
+            "https://packages.clickhouse.com/tgz/stable/clickhouse-client-${CLICKHOUSE_CLIENT_VERSION}-amd64.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
+            --output "$common_archive" \
+            "https://packages.clickhouse.com/tgz/stable/clickhouse-common-static-${CLICKHOUSE_CLIENT_VERSION}-amd64.tgz"
+          printf '%s  %s\n' "$CLICKHOUSE_CLIENT_SHA512" "$client_archive" | sha512sum --check --strict
+          printf '%s  %s\n' "$CLICKHOUSE_COMMON_STATIC_SHA512" "$common_archive" | sha512sum --check --strict
+          tar --extract --gzip --file "$client_archive" --directory "$archive_root"
+          tar --extract --gzip --file "$common_archive" --directory "$archive_root"
+          mkdir -m 700 "$client_root/bin"
+          install -m 0755 \
+            "$archive_root/clickhouse-common-static-${CLICKHOUSE_CLIENT_VERSION}/usr/bin/clickhouse" \
+            "$client_root/bin/clickhouse"
+          ln -s clickhouse "$client_root/bin/clickhouse-client"
+          "$client_root/bin/clickhouse-client" --version
+
+      - name: Gate exact community publication write targets
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
+          CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: >-
+            local:mart_webr.community_feed_snapshot_v1_local,
+            local:mart_webr.community_feed_generation_proof_v1_local,
+            replica:mart_webr.community_feed_publish_lease_v1_local,
+            replica:mart_webr.community_feed_generation_marker_v1_local,
+            replica:mart_webr.community_feed_serving_pointer_v1_local,
+            replica:mart_webr.community_publication_reader_transition_ack_v2_local
+        run: python scripts/clickhouse_pressure_gate.py
+
+      - name: Verify exact immutable community CDN files
+        run: |
+          python scripts/verify_community_generation_cdn.py \
+            --base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ inputs.cdn_commit_sha }}" \
+            --proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --asset community/ko/index.json web-r_CDN2_community/community/ko/index.json \
+            --asset community/ko/workshop/index.json web-r_CDN2_community/community/ko/workshop/index.json \
+            --attempts 8 \
+            --backoff-seconds 5
+
+      - name: Preflight pristine community bootstrap
+        id: preflight
+        env:
+          GENERATION: ${{ inputs.generation }}
+          CDN_COMMIT_SHA: ${{ inputs.cdn_commit_sha }}
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          publisher="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          python "$publisher" preflight \
+            --generation "$GENERATION" \
+            --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@$CDN_COMMIT_SHA" \
+            --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/bootstrap-preflight.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "bootstrap-preflight.json").read_text(encoding="utf-8"))
+          current = receipt.get("current_generation")
+          expected = os.environ["GENERATION"]
+          if receipt.get("status") != "preflight_pass" or int(receipt.get("reader_count") or 0) <= 0:
+              raise SystemExit("community bootstrap preflight receipt is incomplete")
+          if current not in (None, expected):
+              raise SystemExit("community bootstrap is not pristine and does not match the exact resume generation")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("bootstrap_required=" + ("true" if current is None else "false"), file=output)
+          PY
+
+      - name: Bootstrap first community authority exactly once
+        if: steps.preflight.outputs.bootstrap_required == 'true'
+        env:
+          GENERATION: ${{ inputs.generation }}
+          CDN_COMMIT_SHA: ${{ inputs.cdn_commit_sha }}
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          publisher="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          python "$publisher" bootstrap \
+            --generation "$GENERATION" \
+            --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@$CDN_COMMIT_SHA" \
+            --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/bootstrap-receipt.json"
+          python - <<'PY'
+          import json
+          import os
+          import uuid
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "bootstrap-receipt.json").read_text(encoding="utf-8"))
+          if (
+              receipt.get("status") != "bootstrapped"
+              or receipt.get("generation") != os.environ["GENERATION"]
+              or receipt.get("transition_required") is not True
+              or receipt.get("withdrawal_ack") is not False
+              or int(receipt.get("reader_count") or 0) <= 0
+              or int(receipt.get("fence_token") or 0) != 1
+          ):
+              raise SystemExit("community bootstrap receipt is incomplete")
+          for key in ("marker_id", "pointer_id"):
+              value = uuid.UUID(str(receipt.get(key) or ""))
+              if value.int == 0 or str(value) != receipt[key]:
+                  raise SystemExit(f"community bootstrap receipt has invalid {key}")
+          PY
+
+      - name: Release and reopen bootstrapped application readers
+        env:
+          GENERATION: ${{ inputs.generation }}
+          CDN_COMMIT_SHA: ${{ inputs.cdn_commit_sha }}
+        run: |
+          client="$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client"
+          publisher="statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+          endpoints=(
+            --endpoint "s1r1=$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml"
+            --endpoint "s1r2=$COMMUNITY_RUNTIME_DIR/endpoints/s1r2.xml"
+            --endpoint "s2r1=$COMMUNITY_RUNTIME_DIR/endpoints/s2r1.xml"
+            --endpoint "s2r2=$COMMUNITY_RUNTIME_DIR/endpoints/s2r2.xml"
+          )
+          python "$publisher" publish \
+            --generation "$GENERATION" \
+            --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
+            --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@$CDN_COMMIT_SHA" \
+            --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
+            --reader-timeout-seconds 60 \
+            --clickhouse-client "$client" "${endpoints[@]}" \
+            > "$COMMUNITY_RUNTIME_DIR/community-publish-receipt.json"
+          python - <<'PY'
+          import json
+          import os
+          import uuid
+          from pathlib import Path
+
+          receipt = json.loads((Path(os.environ["COMMUNITY_RUNTIME_DIR"]) / "community-publish-receipt.json").read_text(encoding="utf-8"))
+          if (
+              receipt.get("status") not in {"released", "already_released"}
+              or receipt.get("generation") != os.environ["GENERATION"]
+              or int(receipt.get("reader_count") or 0) <= 0
+              or receipt.get("withdrawal_ack") is not True
+              or int(receipt.get("fence_token") or 0) <= 0
+          ):
+              raise SystemExit("community publication receipt is incomplete")
+          for key in ("transition_id", "ack_uuid"):
+              value = uuid.UUID(str(receipt.get(key) or ""))
+              if value.int == 0 or str(value) != receipt[key]:
+                  raise SystemExit(f"community publication receipt has invalid {key}")
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+
+      - name: Always remove community publication secrets
+        if: always()
+        run: |
+          RUNTIME_DIR="$COMMUNITY_RUNTIME_DIR" python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          runtime = Path(os.environ["RUNTIME_DIR"])
+          runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          if runtime.parent.resolve(strict=True) != runner_temp:
+              raise SystemExit("refusing to clean a path outside RUNNER_TEMP")
+          if runtime.exists() and not runtime.is_symlink():
+              shutil.rmtree(runtime)
+          if runtime.exists() or runtime.is_symlink():
+              raise SystemExit("community publication runtime cleanup failed")
+          PY

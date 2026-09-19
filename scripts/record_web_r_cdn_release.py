@@ -109,7 +109,7 @@ def main() -> int:
             backoff_seconds=backoff_seconds,
         )
     except ClickHouseReleaseRecordError as exc:
-        if env_bool(os.environ, "WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+        if env_bool(os.environ, "WEB_R_CDN_RELEASE_RECORD_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
                 f"[warn] Web-R CDN release record deferred scope={args.scope} "
                 f"reason={exc.category} attempts={attempts}",

@@ -92,7 +92,7 @@ def main() -> int:
         community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
         article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
     except ClickHouseExportError as exc:
-        if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+        if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
                 f"[warn] R ecosystem CDN export deferred query={exc.query_name} reason={exc.category}",
                 file=sys.stderr,
