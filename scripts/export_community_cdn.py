@@ -117,6 +117,8 @@ def main() -> int:
     workshop_manifest_items: dict[str, dict[str, Any]] = {}
     workshop_posts: dict[str, list[dict[str, Any]]] = {}
     duplicate_count = 0
+    posit_workshop_source_count = sum(1 for row in workshop_event_rows if is_posit_workshop_event(row))
+    posit_workshop_export_count = 0
 
     for row in digest_rows:
         uuid = normalize_uuid(row.get("uuid"))
@@ -229,6 +231,10 @@ def main() -> int:
         posts = workshop_posts.get(text(item.get("board_key")), [])
         payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
         workshop_manifest_items[uuid] = item
+        if is_posit_workshop_event(row):
+            posit_workshop_export_count += 1
+
+    require_posit_workshop_coverage(args.limit, posit_workshop_source_count, posit_workshop_export_count)
 
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -257,6 +263,8 @@ def main() -> int:
                     len(workshop_manifest_items),
                     len(payloads),
                     duplicate_count,
+                    posit_workshop_source_count,
+                    posit_workshop_export_count,
                 ),
                 ensure_ascii=False,
             )
@@ -286,6 +294,8 @@ def main() -> int:
         len(workshop_manifest_items),
         len(payloads),
         duplicate_count,
+        posit_workshop_source_count,
+        posit_workshop_export_count,
     )
     result["pruned_payloads"] = pruned_payloads
     print(json.dumps(result, ensure_ascii=False))
@@ -301,6 +311,8 @@ def community_export_result(
     workshop_export_count: int,
     export_count: int,
     duplicate_count: int,
+    posit_workshop_source_count: int = 0,
+    posit_workshop_export_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "digest": digest_count,
@@ -311,6 +323,8 @@ def community_export_result(
         "workshop_export": workshop_export_count,
         "export": export_count,
         "duplicates": duplicate_count,
+        "workshop_posit_source": posit_workshop_source_count,
+        "workshop_posit_export": posit_workshop_export_count,
         "export_deferred": False,
     }
 
@@ -462,6 +476,7 @@ SELECT external_id,
        canonical_url,
        title,
        summary,
+       tags_json,
        if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS published_at,
        formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS collected_at,
        toUInt64OrZero(extract(concat(title, ' ', canonical_url, ' ', summary), '([12][0-9]{{3}})')) AS event_year
@@ -480,6 +495,10 @@ SELECT external_id,
                   )
           )
           OR source_id = '{POSIT_COMMUNITY_EVENTS_ID}'
+          OR (
+                 platform = 'posit-community'
+                 AND has(JSONExtract(tags_json, 'Array(String)'), 'Conferences & Events')
+             )
        )
  ORDER BY event_year DESC,
           published_at DESC,
@@ -581,7 +600,7 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
     source_id = text(row.get("source_id"))
     published_at = first_text(row.get("published_at"), row.get("collected_at"))
     if not board_key:
-        if source_id != POSIT_COMMUNITY_EVENTS_ID:
+        if not is_posit_workshop_event(row):
             return {}
         start_at, end_at = event_date_range_from_text(" ".join([title, summary, canonical_url]))
         event_id = text(row.get("external_id")) or canonical_url or title
@@ -672,6 +691,44 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
         "is_new": False,
         "url": "",
     }
+
+
+def is_posit_workshop_event(row: dict[str, Any]) -> bool:
+    if text(row.get("source_id")) == POSIT_COMMUNITY_EVENTS_ID:
+        return True
+    if text(row.get("platform")).lower() != "posit-community":
+        return False
+    raw_tags = row.get("tags_json")
+    tags: list[str] = []
+    if isinstance(raw_tags, list):
+        tags = [text(value) for value in raw_tags]
+    else:
+        raw = text(raw_tags)
+        if raw:
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = []
+            if isinstance(decoded, list):
+                tags = [text(value) for value in decoded]
+            elif "conferences & events" in raw.lower():
+                return True
+    return any(tag.lower() == "conferences & events" for tag in tags)
+
+
+def require_posit_workshop_coverage(limit: int, source_count: int, export_count: int) -> None:
+    if limit > 0:
+        return
+    if source_count <= 0:
+        raise SystemExit(
+            "Web-R workshop export is missing the Posit Conferences & Events lane; "
+            "preserving the previous CDN release"
+        )
+    if export_count <= 0:
+        raise SystemExit(
+            "Web-R workshop export dropped every Posit Conferences & Events item; "
+            "preserving the previous CDN release"
+        )
 
 
 def event_date_range_from_text(value: str) -> tuple[str, str]:
