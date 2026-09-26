@@ -11,6 +11,7 @@ import http.client
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import urllib.error
@@ -36,6 +37,7 @@ ENCRYPTED_SCHEMA = "web-r.community.encrypted.v1"
 MANIFEST_SCHEMA = "web-r.community.manifest.plain.v1"
 GENERATION_MANIFEST_SCHEMA = "web-r.community.manifest.plain.v2"
 GENERATION_PROOF_SCHEMA = "web-r.community.generation-proof.v2"
+CANDIDATE_PROJECTION_SCHEMA = "web-r.community.candidate-cdn-projection.v1"
 CONTENT_SCHEMA = "web-r.community.content.plain.v1"
 WORKSHOP_MANIFEST_SCHEMA = "web-r.community.workshop.manifest.plain.v1"
 WORKSHOP_CONTENT_SCHEMA = "web-r.community.workshop.content.plain.v1"
@@ -54,6 +56,7 @@ POSIT_COMMUNITY_EVENTS_ID = "community:posit:events"
 USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 GENERATION_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
 SAFE_ID_RE = re.compile(r"[^0-9A-Za-z._-]+")
 MONTH_LOOKUP = {
@@ -94,6 +97,8 @@ def main() -> int:
         "--generation",
         help="exact preloaded mart_webr.community_feed_snapshot_v1_local generation",
     )
+    parser.add_argument("--candidate-receipt", type=Path, help="exact SQL loader receipt for --generation")
+    parser.add_argument("--candidate-projection", type=Path, help="owner-only SQL candidate CDN projection for --generation")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
@@ -103,6 +108,16 @@ def main() -> int:
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
     generation = normalize_generation(args.generation) if args.generation else ""
+    if generation:
+        if language != "ko" or args.limit != 0 or not args.candidate_receipt or not args.candidate_projection:
+            raise SystemExit("--generation requires ko, no --limit, and exact candidate receipt and projection")
+        candidate_receipt = load_candidate_json(args.candidate_receipt, 64 * 1024)
+        candidate_projection = load_candidate_json(args.candidate_projection, 16 * 1024 * 1024, owner_only=True)
+    else:
+        if args.candidate_receipt or args.candidate_projection:
+            raise SystemExit("candidate evidence requires --generation")
+        candidate_receipt = None
+        candidate_projection = None
 
     try:
         if generation:
@@ -271,6 +286,12 @@ def main() -> int:
     generation_proof: dict[str, Any] | None = None
     if generation:
         generation_proof = community_generation_proof(generation, manifest_items, generation_rows)
+        verify_candidate_evidence(
+            generation_proof,
+            generation_rows,
+            candidate_receipt,
+            candidate_projection,
+        )
         manifest = {
             "schema": GENERATION_MANIFEST_SCHEMA,
             "language": language,
@@ -538,6 +559,123 @@ def community_generation_proof(
         "account_authority_revision": account_revision,
         "category_authority_revision": category_revision,
     }
+
+
+def strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("candidate evidence contains a duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def load_candidate_json(path: Path, max_bytes: int, *, owner_only: bool = False) -> dict[str, Any]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size <= 0
+                or metadata.st_size > max_bytes
+                or (owner_only and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077))
+            ):
+                raise ValueError("candidate evidence file has an invalid owner, mode, or size")
+            body = source.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError("candidate evidence file is too large")
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=strict_json_object)
+        if not isinstance(value, dict):
+            raise ValueError("candidate evidence must be a JSON object")
+        return value
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"candidate evidence is unavailable or invalid: {exc}") from exc
+
+
+def candidate_projection_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def candidate_projection_item(row: dict[str, Any]) -> dict[str, str]:
+    def raw_string(key: str) -> str:
+        value = row.get(key)
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise SystemExit("candidate CDN row contains a non-string source field")
+        return value
+
+    return {
+        "source": raw_string("source"),
+        "uuid": raw_string("uuid"),
+        "user_uuid": raw_string("user_uuid"),
+        "title": raw_string("title"),
+        "content": raw_string("content"),
+        "url": raw_string("url"),
+        "created_at": raw_string("published_at")[:19],
+        "updated_at": raw_string("updated_at")[:19],
+        "source_type": raw_string("source_type"),
+        "source_id": raw_string("source_id"),
+        "source_name": raw_string("source_name"),
+        "platform": raw_string("platform"),
+    }
+
+
+def verify_candidate_evidence(
+    proof: dict[str, Any],
+    rows: list[dict[str, Any]],
+    receipt: dict[str, Any] | None,
+    projection: dict[str, Any] | None,
+) -> None:
+    if not isinstance(receipt, dict) or not isinstance(projection, dict):
+        raise SystemExit("candidate loader receipt and projection are required")
+    if receipt.get("status") != "candidate_loaded" or receipt.get("generation") != proof["generation"]:
+        raise SystemExit("candidate loader receipt does not identify the exported generation")
+    if (
+        type(receipt.get("row_count")) is not int
+        or type(receipt.get("visible_row_count")) is not int
+        or not receipt["row_count"] >= receipt["visible_row_count"] >= proof["item_count"] > 0
+    ):
+        raise SystemExit("candidate loader receipt has incomplete row counts")
+    expected_projection_keys = {
+        "schema", "generation", "source_sha256", "item_count", "identity_hash",
+        "withdrawal_revision", "account_authority_revision", "category_authority_revision",
+        "items", "projection_sha256",
+    }
+    if set(projection) != expected_projection_keys or projection.get("schema") != CANDIDATE_PROJECTION_SCHEMA:
+        raise SystemExit("candidate CDN projection has an invalid schema")
+    projection_digest = projection.get("projection_sha256")
+    if not isinstance(projection_digest, str) or not SHA256_RE.fullmatch(projection_digest):
+        raise SystemExit("candidate CDN projection digest is invalid")
+    projected_body = {key: value for key, value in projection.items() if key != "projection_sha256"}
+    if hashlib.sha256(candidate_projection_json_bytes(projected_body)).hexdigest() != projection_digest:
+        raise SystemExit("candidate CDN projection digest does not match its contents")
+    source_digest = receipt.get("source_sha256")
+    if not isinstance(source_digest, str) or not SHA256_RE.fullmatch(source_digest) or projection.get("source_sha256") != source_digest:
+        raise SystemExit("candidate source fingerprint does not match the loader receipt")
+    if projection.get("generation") != proof["generation"]:
+        raise SystemExit("candidate CDN projection generation does not match")
+    for field in ("item_count", "withdrawal_revision", "account_authority_revision", "category_authority_revision"):
+        value = proof[field]
+        if type(receipt.get("cdn_item_count" if field == "item_count" else field)) is not int or type(projection.get(field)) is not int:
+            raise SystemExit("candidate count or authority revision is invalid")
+        if receipt["cdn_item_count" if field == "item_count" else field] != value or projection[field] != value:
+            raise SystemExit("candidate count or authority revision differs from the exported generation")
+    if receipt.get("cdn_identity_hash") != proof["identity_hash"] or projection.get("identity_hash") != proof["identity_hash"]:
+        raise SystemExit("candidate CDN identities differ from the loaded generation")
+    projected_items = projection.get("items")
+    if not isinstance(projected_items, dict) or set(projected_items) != {row.get("uuid") for row in rows}:
+        raise SystemExit("candidate CDN projection identities differ from exported rows")
+    for row in rows:
+        uuid = row["uuid"]
+        item_digest = projected_items[uuid]
+        actual_digest = hashlib.sha256(candidate_projection_json_bytes(candidate_projection_item(row))).hexdigest()
+        if not isinstance(item_digest, str) or not SHA256_RE.fullmatch(item_digest) or item_digest != actual_digest:
+            raise SystemExit("candidate CDN source row differs from the loaded generation")
+    if receipt.get("cdn_projection_sha256") != projection_digest:
+        raise SystemExit("candidate CDN projection does not match the loader receipt")
 
 
 def digest_sql(limit: int) -> str:
