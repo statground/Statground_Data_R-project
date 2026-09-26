@@ -1,14 +1,23 @@
 import hashlib
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from export_community_cdn import (
     GENERATION_PROOF_SCHEMA,
+    CANDIDATE_PROJECTION_SCHEMA,
+    candidate_projection_item,
+    candidate_projection_json_bytes,
     community_generation_proof,
     digest_sql,
     generation_community_item,
     generation_community_sql,
     go_canonical_json_bytes,
+    load_candidate_json,
     normalize_generation,
+    verify_candidate_evidence,
     workshop_export_proof,
 )
 
@@ -130,6 +139,86 @@ class CommunityCDNExportTest(unittest.TestCase):
             community_generation_proof(
                 generation, {**items, second_item["uuid"]: second_item}, mixed
             )
+
+    def test_generation_export_requires_exact_loaded_candidate_content(self) -> None:
+        row = self.generation_row()
+        item = generation_community_item(row, "ko")
+        item["path"] = "community/ko/rcommunity/2026/09/x.json"
+        proof = community_generation_proof("2026-09-20 14:20:30.123456", {item["uuid"]: item}, [row])
+        receipt = {
+            "status": "candidate_loaded",
+            "generation": proof["generation"],
+            "source_sha256": "a" * 64,
+            "row_count": 2,
+            "visible_row_count": 1,
+            "cdn_item_count": proof["item_count"],
+            "cdn_identity_hash": proof["identity_hash"],
+            "withdrawal_revision": proof["withdrawal_revision"],
+            "account_authority_revision": proof["account_authority_revision"],
+            "category_authority_revision": proof["category_authority_revision"],
+        }
+        projection = {
+            "schema": CANDIDATE_PROJECTION_SCHEMA,
+            "generation": proof["generation"],
+            "source_sha256": receipt["source_sha256"],
+            "item_count": proof["item_count"],
+            "identity_hash": proof["identity_hash"],
+            "withdrawal_revision": proof["withdrawal_revision"],
+            "account_authority_revision": proof["account_authority_revision"],
+            "category_authority_revision": proof["category_authority_revision"],
+            "items": {
+                row["uuid"]: hashlib.sha256(
+                    candidate_projection_json_bytes(candidate_projection_item(row))
+                ).hexdigest(),
+            },
+        }
+
+        def seal() -> None:
+            projection["projection_sha256"] = hashlib.sha256(
+                candidate_projection_json_bytes({key: value for key, value in projection.items() if key != "projection_sha256"})
+            ).hexdigest()
+
+        seal()
+        receipt["cdn_projection_sha256"] = projection["projection_sha256"]
+        verify_candidate_evidence(proof, [row], receipt, projection)
+
+        changed_row = {**row, "title": "A changed title"}
+        with self.assertRaisesRegex(SystemExit, "source row differs"):
+            verify_candidate_evidence(proof, [changed_row], receipt, projection)
+
+        projection["withdrawal_revision"] += 1
+        seal()
+        with self.assertRaisesRegex(SystemExit, "authority revision differs"):
+            verify_candidate_evidence(proof, [row], receipt, projection)
+
+        projection["withdrawal_revision"] -= 1
+        seal()
+        receipt["cdn_identity_hash"] = "b" * 64
+        with self.assertRaisesRegex(SystemExit, "identities differ"):
+            verify_candidate_evidence(proof, [row], receipt, projection)
+
+        receipt["cdn_identity_hash"] = proof["identity_hash"]
+        receipt["cdn_projection_sha256"] = "c" * 64
+        with self.assertRaisesRegex(SystemExit, "loader receipt"):
+            verify_candidate_evidence(proof, [row], receipt, projection)
+
+    def test_candidate_projection_file_is_owner_only_and_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate.json"
+            candidate.write_text('{"schema":"x","schema":"y"}', encoding="utf-8")
+            candidate.chmod(0o600)
+            with self.assertRaisesRegex(SystemExit, "duplicate JSON key"):
+                load_candidate_json(candidate, 1024, owner_only=True)
+            candidate.write_text(json.dumps({"schema": "x"}), encoding="utf-8")
+            candidate.chmod(0o644)
+            with self.assertRaisesRegex(SystemExit, "invalid owner, mode"):
+                load_candidate_json(candidate, 1024, owner_only=True)
+            candidate.chmod(0o600)
+            alias = root / "alias.json"
+            os.symlink(candidate, alias)
+            with self.assertRaisesRegex(SystemExit, "unavailable or invalid"):
+                load_candidate_json(alias, 1024, owner_only=True)
 
     def test_workshop_export_proof_is_complete_and_order_independent(self) -> None:
         items = {
