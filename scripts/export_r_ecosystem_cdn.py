@@ -40,6 +40,11 @@ HANGUL_RE = re.compile(r"[가-힣]")
 NATIVE_ENGLISH_COMMUNITY_SOURCE_TYPES = frozenset({
     "official_release_notes", "official_blog", "official_journal", "organization_social", "organization_blog",
 })
+COMMUNITY_SOURCE_IDENTITY_FIELDS = (
+    "external_id", "source_id", "source_type", "platform", "source_url",
+    "canonical_url", "source_title", "source_summary", "author",
+    "source_language", "tags_json", "source_version",
+)
 SUPPORTED_LANGUAGES = (
     "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "pt-BR",
     "ru", "id", "vi", "th", "ms", "fil", "hi", "ar", "it", "nl",
@@ -120,6 +125,9 @@ def main() -> int:
     manifest_items: dict[str, dict[str, str]] = {}
     duplicate_count = 0
 
+    for row in community_rows:
+        row["source_sha256"] = community_source_sha256(row)
+
     # A new locale without any verified translations must not publish an
     # empty manifest that would mask the still-available Korean catalog.
     # Existing locale manifests may legitimately become empty on withdrawal.
@@ -170,6 +178,8 @@ def main() -> int:
             "source_id": payload["community_item"]["source_id"],
             "source_name": payload["community_item"]["source_name"],
             "source_type": payload["community_item"]["source_type"],
+            "source_version": text(row.get("source_version")),
+            "source_sha256": text(row.get("source_sha256")),
             "platform": payload["community_item"]["platform"],
             "title": payload["community_item"]["title"],
             "summary": payload["community_item"]["summary"],
@@ -358,6 +368,14 @@ def korean_community_authority(cdn_root: Path, key: bytes) -> dict[str, dict[str
         manifest = json.loads(plain)
         if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA or manifest.get("language") != "ko" or not isinstance(manifest.get("items"), dict):
             raise ValueError("invalid Korean manifest payload")
+        community_items = [item for item in manifest["items"].values() if isinstance(item, dict) and item.get("kind") == "community"]
+        if not community_items or any(
+            not text(item.get("source_type"))
+            or not text(item.get("source_version"))
+            or not re.fullmatch(r"[0-9a-f]{64}", text(item.get("source_sha256")))
+            for item in community_items
+        ):
+            raise SystemExit("Korean community manifest lacks source revision/hash; English export blocked")
         return manifest["items"]
     except (OSError, KeyError, TypeError, ValueError, UnicodeError, EOFError, binascii.Error, InvalidTag) as exc:
         raise SystemExit("Korean community publication authority could not be verified") from exc
@@ -368,6 +386,7 @@ def native_english_row_authorized(row: dict[str, Any], authority: dict[str, dict
     item = authority.get(uuid)
     if (
         text(row.get("language")) != "en"
+        or row.get("active") != 1
         or text(row.get("source_type")) not in NATIVE_ENGLISH_COMMUNITY_SOURCE_TYPES
         or not text(row.get("title"))
         or not text(row.get("summary"))
@@ -380,10 +399,25 @@ def native_english_row_authorized(row: dict[str, Any], authority: dict[str, dict
         and item.get("uuid") == uuid
         and item.get("kind") == "community"
         and item.get("language") == "ko"
+        and item.get("source_type") == text(row.get("source_type"))
+        and text(item.get("source_version")) == text(row.get("source_version"))
+        and bool(text(row.get("source_version")))
+        and text(item.get("source_sha256")) == text(row.get("source_sha256"))
+        and bool(re.fullmatch(r"[0-9a-f]{64}", text(row.get("source_sha256"))))
         and text(item.get("canonical_url")) == text(row.get("canonical_url"))
         and text(item.get("source_id")) == text(row.get("source_id"))
         and str(item.get("path", "")).startswith("contents/ko/")
     )
+
+
+def community_source_sha256(row: dict[str, Any]) -> str:
+    if any(field not in row or row[field] is None for field in COMMUNITY_SOURCE_IDENTITY_FIELDS):
+        raise SystemExit("R Community source revision fields are incomplete")
+    if not text(row.get("source_version")):
+        raise SystemExit("R Community source revision is missing")
+    identity = [row[field] if isinstance(row[field], str) else str(row[field]) for field in COMMUNITY_SOURCE_IDENTITY_FIELDS]
+    encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str, compress: bool = False) -> dict[str, Any]:
@@ -546,6 +580,11 @@ SELECT external_id,
        platform,
        source_url,
        canonical_url,
+       r.title AS source_title,
+       r.summary AS source_summary,
+       r.language AS source_language,
+       toString(r.version) AS source_version,
+       r.active AS active,
        coalesce(
            nullIf(
                multiIf(
@@ -673,7 +712,7 @@ SELECT external_id,
        toString(payload_json) AS payload_json,
        if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S')) AS published_at_text,
        formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S') AS collected_at_text
-  FROM Data_R_Community_Service.r_community_item_read_current
+  FROM Data_R_Community_Service.r_community_item_read_current AS r
  WHERE active = 1
    AND notEmpty(coalesce(nullIf(JSONExtractString(payload_json, 'title_ko'), ''), nullIf(JSONExtractString(raw_json, 'title_ko'), ''), title))
    AND notEmpty(canonical_url)
@@ -727,6 +766,8 @@ def native_english_community_sql(limit: int) -> str:
 SELECT external_id,
        toString(item_uuid) AS item_uuid,
        source_id, source_name, source_type, platform, source_url, canonical_url,
+       r.title AS source_title, r.summary AS source_summary,
+       r.language AS source_language, toString(r.version) AS source_version, r.active AS active,
        title, summary, author, language, tags_json,
        '' AS raw_json, '' AS payload_json,
        if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S')) AS published_at_text,
@@ -739,9 +780,9 @@ FROM
     FROM Data_R_Community_Service.r_community_item_read_current
     ORDER BY item_uuid ASC, version DESC, collected_at DESC, ingested_at DESC
     LIMIT 1 BY item_uuid
-)
-WHERE active = 1
-  AND language = 'en'
+) AS r
+WHERE r.active = 1
+  AND r.language = 'en'
   AND source_type IN ('official_release_notes', 'official_blog', 'official_journal', 'organization_social', 'organization_blog')
   AND notEmpty(trimBoth(title)) AND notEmpty(trimBoth(summary)) AND notEmpty(canonical_url)
   AND NOT match(title, '[가-힣]') AND NOT match(summary, '[가-힣]')
@@ -916,6 +957,13 @@ def source_language(value: str) -> str:
         if language.lower() == value.lower():
             return language
     raise SystemExit("unsupported R ecosystem content language")
+
+
+def approved_workflow_locales(raw: str, native_english_approved: bool) -> list[str]:
+    requested = list(dict.fromkeys(normalize_language(value) for value in raw.split(",") if value.strip()))
+    if "ko" in requested or len(requested) > 2:
+        raise SystemExit("additional R ecosystem locale export must be one or two non-Korean locales")
+    return [language for language in requested if language != "en" or native_english_approved]
 
 
 def normalize_path(value: str) -> str:
