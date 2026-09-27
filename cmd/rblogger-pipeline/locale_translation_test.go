@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,21 @@ func TestRbloggerAdditionalLocalesMatchWebRPublicMenu(t *testing.T) {
 	}
 	if len(rbloggerLocaleNames) != 22 {
 		t.Fatalf("supported additional locale count=%d, want 22", len(rbloggerLocaleNames))
+	}
+}
+
+func TestRbloggerWorkflowLocaleBackfillRemainsApprovalGated(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/r-project-all.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"RBLOGGER_EXTRA_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && vars.RBLOGGER_EXTRA_LOCALES || '' }}",
+		"RBLOGGER_EXTRA_LOCALE_LIMIT: ${{ vars.RBLOGGER_EXTRA_LOCALE_LIMIT || '2' }}",
+	} {
+		if !strings.Contains(string(workflow), required) {
+			t.Fatalf("scheduled locale backfill must remain bounded and approval gated: %q", required)
+		}
 	}
 }
 
