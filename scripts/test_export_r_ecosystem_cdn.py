@@ -13,10 +13,12 @@ from export_r_ecosystem_cdn import (
     approved_workflow_locales,
     article_sql,
     community_sql,
+    community_language_metadata,
     community_source_sha256,
     derive_key,
     encrypt_document,
     korean_community_authority,
+    locale_article_authorized,
     main,
     native_english_row_authorized,
     normalize_language,
@@ -162,16 +164,26 @@ class REcosystemLocaleExportTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             argv = ["export_r_ecosystem_cdn.py", "--cdn-root", tmp, "--language", "en", "--dry-run"]
+            authority = {row["uuid"]: {
+                "uuid": row["uuid"], "kind": "article", "language": "ko",
+                "article_source": "rproject", "canonical_url": row["url"],
+                "path": f"contents/ko/2026/09/{row['uuid']}.json",
+            }}
             with mock.patch.object(sys, "argv", argv), mock.patch(
                 "export_r_ecosystem_cdn.load_env", return_value={"R_ECOSYSTEM_CONTENT_KEY": "test-key"}
-            ), mock.patch("export_r_ecosystem_cdn.fetch_json_rows", side_effect=[[], [], [row]]) as fetch, mock.patch(
+            ), mock.patch("export_r_ecosystem_cdn.fetch_json_rows", side_effect=[[], [row]]) as fetch, mock.patch(
+                "export_r_ecosystem_cdn.korean_community_authority", return_value=authority
+            ), mock.patch(
                 "builtins.print"
             ) as output:
                 self.assertEqual(main(), 0)
-            self.assertEqual(fetch.call_count, 3)
+            self.assertEqual(fetch.call_count, 2)
             report = json.loads(output.call_args.args[0])
             self.assertEqual(report["article"], 1)
             self.assertEqual(report["export"], 1)
+            self.assertTrue(locale_article_authorized(row, authority))
+            self.assertFalse(locale_article_authorized({**row, "url": "https://example.org/changed"}, authority))
+            self.assertFalse(locale_article_authorized(row, {}))
 
     def test_native_english_payload_keeps_original_without_korean_overrides(self) -> None:
         row = native_english_community_row()
@@ -183,7 +195,7 @@ class REcosystemLocaleExportTests(unittest.TestCase):
             "source_sha256": community_source_sha256(row),
         }}
         with tempfile.TemporaryDirectory() as tmp:
-            argv = ["export_r_ecosystem_cdn.py", "--cdn-root", tmp, "--language", "en"]
+            argv = ["export_r_ecosystem_cdn.py", "--cdn-root", tmp, "--language", "en", "--include-native-english-community"]
             with mock.patch.object(sys, "argv", argv), mock.patch(
                 "export_r_ecosystem_cdn.load_env", return_value={"R_ECOSYSTEM_CONTENT_KEY": "test-key"}
             ), mock.patch("export_r_ecosystem_cdn.fetch_json_rows", side_effect=[[row], [], []]), mock.patch(
@@ -197,7 +209,21 @@ class REcosystemLocaleExportTests(unittest.TestCase):
             self.assertEqual(payload["summary"], row["summary"])
             self.assertEqual(payload["raw_json"], "")
             self.assertEqual(payload["payload_json"], "")
+            self.assertEqual(payload["translation_status"], "source")
             self.assertEqual(json.loads(output.call_args.args[0])["community"], 1)
+
+    def test_partial_korean_community_translation_marks_source_fallback(self) -> None:
+        row = native_english_community_row()
+        row["title"] = "한국어 제목"
+        meta = community_language_metadata(row, "ko")
+        self.assertEqual(meta["title_language"], "ko")
+        self.assertEqual(meta["summary_language"], "en")
+        self.assertEqual(meta["language"], "en")
+        self.assertEqual(meta["translation_status"], "partial")
+        row["summary"] = "한국어 요약"
+        self.assertEqual(community_language_metadata(row, "ko")["translation_status"], "translated")
+        row["title"], row["summary"] = row["source_title"], row["source_summary"]
+        self.assertEqual(community_language_metadata(row, "ko")["translation_status"], "source_fallback")
 
     def test_korean_manifest_records_exact_source_revision(self) -> None:
         row = native_english_community_row()
@@ -217,12 +243,11 @@ class REcosystemLocaleExportTests(unittest.TestCase):
             self.assertEqual(item["source_version"], row["source_version"])
             self.assertEqual(item["source_sha256"], community_source_sha256(row))
 
-    def test_workflow_native_english_publication_is_default_off(self) -> None:
-        self.assertEqual(approved_workflow_locales("en,ja", False), ["ja"])
-        self.assertEqual(approved_workflow_locales("en,ja", True), ["en", "ja"])
-        self.assertEqual(approved_workflow_locales("zh-Hant", False), ["zh-hant"])
+    def test_workflow_english_article_export_is_separate_from_native_community(self) -> None:
+        self.assertEqual(approved_workflow_locales("en,ja"), ["en", "ja"])
+        self.assertEqual(approved_workflow_locales("zh-Hant"), ["zh-hant"])
         with self.assertRaisesRegex(SystemExit, "one or two"):
-            approved_workflow_locales("en,ja,fr", True)
+            approved_workflow_locales("en,ja,fr")
 
 
 if __name__ == "__main__":

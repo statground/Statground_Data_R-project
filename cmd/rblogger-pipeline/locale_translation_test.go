@@ -80,19 +80,23 @@ func TestRbloggerLocaleCandidateQueryPreservesTombstonesAndChecksHash(t *testing
 	}))
 	defer server.Close()
 	reader := NewClickHouseReader(ClickHouseConfig{Host: server.URL, Timeout: time.Second})
-	rows, err := reader.MissingLocaleTranslations(context.Background(), "fr", 2)
+	rows, err := reader.MissingLocaleTranslations(context.Background(), "fr", 2, 6000)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("candidate query rows=%v err=%v", rows, err)
 	}
 	for _, required := range []string{
 		"WHERE rn = 1 AND coalesce(active, 0) = 1",
 		"coalesce(b.active, 0) = 1", "source_sha256", "unhex('0A')", "LIMIT 2",
+		"lengthUTF8(ifNull(r.title, '')) + lengthUTF8(ifNull(r.content, '')) <= 6000",
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("candidate query missing %q", required)
 		}
 	}
-	if _, err := reader.MissingLocaleTranslations(context.Background(), "ko", 2); err == nil {
+	if _, err := reader.MissingLocaleTranslations(context.Background(), "ko", 2, 6000); err == nil {
 		t.Fatal("invalid locale must fail before querying")
+	}
+	if _, err := reader.MissingLocaleTranslations(context.Background(), "fr", 2, 12001); err == nil {
+		t.Fatal("unbounded input must fail before querying")
 	}
 }
