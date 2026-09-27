@@ -36,7 +36,7 @@ jobs:
     environment: web-r-community-publication-bootstrap
     timeout-minutes: 30
     env:
-      STATGROUND_SQL_COMMIT_SHA: a2178fb8735d2c80864422cf84bb319384d1a111
+      STATGROUND_SQL_COMMIT_SHA: 0568361f5d1a1eca9c99d0f1c1b2954739c8b3b4
       CLICKHOUSE_CLIENT_VERSION: 26.1.2.11
       CLICKHOUSE_CLIENT_SHA512: 10a8e6bf05ddbbfeeedbf6fae7050b84e0104962a0ab8bf324b8bd83bf779fb87c00602e3660dc462d01b91b9f53c530498be32ba652e13a01cf86fd3edc33cc
       CLICKHOUSE_COMMON_STATIC_SHA512: cdcb883b3ea3632434da3014bd8bca00a0ba1a5a50571fe14bddbf859ce31da3c43306e3bcee66185276cf8c05f4743730d2751dd6a86ac9ec6494d77f9cc0fb
@@ -88,7 +88,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: statground/Statground_SQL
-          ref: a2178fb8735d2c80864422cf84bb319384d1a111
+          ref: 0568361f5d1a1eca9c99d0f1c1b2954739c8b3b4
           path: statground-sql
           token: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
           persist-credentials: false
