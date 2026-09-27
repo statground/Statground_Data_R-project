@@ -63,6 +63,7 @@ class CommunityCDNExportTest(unittest.TestCase):
             "article_active = 1",
             "user_blocked = 0",
             "user_active = 1",
+            "is_secret = 0",
             "language_code = 'ko'",
             "category_url IN ('rcommunity', 'notebook')",
         ):
