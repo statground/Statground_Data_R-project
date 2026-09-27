@@ -60,7 +60,19 @@ R_PROJECT_BOT_NAME = "R Project"
 R_PROJECT_BOT_ROLE = "Bot"
 R_PROJECT_CONFERENCE_ID = "official:r:conferences"
 POSIT_COMMUNITY_EVENTS_ID = "community:posit:events"
+POSIT_COMMUNITY_EVENT_TAG = "Conferences & Events"
 USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
+# These five identifiers are in Web-R's curated R Project conference catalog
+# but are absent from the current collected conference rows. Keep them as
+# source-attributed fallbacks only when the collected event did not provide the
+# same identifier; never invent a date for the three undated DSC entries.
+R_PROJECT_CONFERENCE_FALLBACKS = (
+    ("rconf-dsc-2005", "DSC 2005", "Directions in Statistical Computing", "Seattle, WA, USA", "2005-08-13 00:00:00", "2005-08-14 23:59:59", "https://www.r-project.org/conferences/DSC-2005/", ""),
+    ("rconf-dsc-2018", "DSC 2018", "Directions in Statistical Computing", "Stanford, CA, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2018의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-dsc-2019", "DSC 2019", "Directions in Statistical Computing", "Stanford, CA, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2019의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-dsc-2020", "DSC 2020", "Directions in Statistical Computing", "St Louis, MO, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2020의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-r-summit-2015", "R Summit 2015", "R Foundation Summit", "Copenhagen, Denmark", "2015-06-27 00:00:00", "2015-06-28 23:59:59", "https://www.r-project.org/conferences/rsummit-2015/rsummit2015/", ""),
+)
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 GENERATION_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -301,6 +313,8 @@ def main() -> int:
         posts = workshop_posts.get(text(item.get("board_key")), [])
         payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
         workshop_manifest_items[uuid] = item
+
+    add_r_project_conference_fallbacks(workshop_manifest_items, payloads, workshop_posts, language)
 
     generation_proof: dict[str, Any] | None = None
     if generation:
@@ -883,6 +897,7 @@ SELECT external_id,
        source_name,
        source_type,
        platform,
+       tags_json,
        source_url,
        canonical_url,
        title,
@@ -905,6 +920,10 @@ SELECT external_id,
                   )
           )
           OR source_id = '{POSIT_COMMUNITY_EVENTS_ID}'
+          OR (
+                 platform = 'posit-community'
+                 AND has(JSONExtract(tags_json, 'Array(String)'), '{POSIT_COMMUNITY_EVENT_TAG}')
+             )
        )
  ORDER BY event_year DESC,
           published_at DESC,
@@ -1004,13 +1023,13 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
     canonical_url = text(row.get("canonical_url"))
     board_key = classify_r_conference_key(" ".join([title, summary, canonical_url]))
     source_id = text(row.get("source_id"))
+    external_id = text(row.get("external_id"))
     published_at = first_text(row.get("published_at"), row.get("collected_at"))
     if not board_key:
-        if source_id != POSIT_COMMUNITY_EVENTS_ID:
+        if not is_posit_workshop_event_row(row) or not external_id:
             return {}
         start_at, end_at = event_date_range_from_text(" ".join([title, summary, canonical_url]))
-        event_id = text(row.get("external_id")) or canonical_url or title
-        event_hash = hashlib.sha256(("posit-community-event:" + event_id).encode("utf-8")).hexdigest()[:24]
+        event_hash = hashlib.sha256(("posit-community-event:" + external_id).encode("utf-8")).hexdigest()[:24]
         board_key = "posit-event-" + event_hash
         description = first_text(summary, title)
         return {
@@ -1097,6 +1116,82 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
         "is_new": False,
         "url": "",
     }
+
+
+def is_posit_workshop_event_row(row: dict[str, Any]) -> bool:
+    if text(row.get("source_id")) == POSIT_COMMUNITY_EVENTS_ID:
+        return True
+    if text(row.get("platform")).lower() != "posit-community":
+        return False
+    try:
+        tags = json.loads(text(row.get("tags_json")))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(tags, list) and POSIT_COMMUNITY_EVENT_TAG in tags
+
+
+def r_project_conference_fallback_items(language: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key, title, series, venue, starts_at, ends_at, canonical_url, note in R_PROJECT_CONFERENCE_FALLBACKS:
+        items.append({
+            "uuid": key,
+            "slug": key,
+            "board_key": key,
+            "language": language,
+            "published_at": starts_at,
+            "updated_at": "",
+            "path": f"community/{language}/workshop/curated/{safe_path_id(key)}.json",
+            "base_url": "",
+            "title": title,
+            "subtitle": series,
+            "summary": "R Project conferences entry.",
+            "description": ("R Project conferences entry.\n\n" + note).strip(),
+            "cover_image_url": "",
+            "venue": venue,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "capacity": 0,
+            "status": "published",
+            "registration_mode": "external",
+            "member_product_uuid": "",
+            "member_product_title": "",
+            "member_price": 0,
+            "nonmember_product_uuid": "",
+            "nonmember_product_title": "",
+            "nonmember_price": 0,
+            "active": True,
+            "sort_order": 80,
+            "paid_count": 0,
+            "total_count": 0,
+            "paid_amount": 0,
+            "external": True,
+            "source_id": R_PROJECT_CONFERENCE_ID,
+            "source_name": "R Project conferences",
+            "source_type": "official_events",
+            "source_url": "https://www.r-project.org/conferences/",
+            "canonical_url": canonical_url,
+            "external_id": "r-project-conference:" + key,
+            "source_note": note,
+            "is_new": False,
+            "url": f"/workshop/read/{urllib.parse.quote(key)}/",
+        })
+    return items
+
+
+def add_r_project_conference_fallbacks(
+    manifest_items: dict[str, dict[str, Any]],
+    payloads: dict[str, tuple[str, dict[str, Any]]],
+    posts_by_workshop: dict[str, list[dict[str, Any]]],
+    language: str,
+) -> None:
+    for item in r_project_conference_fallback_items(language):
+        uuid = item["uuid"]
+        if uuid in manifest_items:
+            continue
+        rel_path = item["path"]
+        posts = posts_by_workshop.get(item["board_key"], [])
+        payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
+        manifest_items[uuid] = item
 
 
 def event_date_range_from_text(value: str) -> tuple[str, str]:
