@@ -418,6 +418,9 @@ jobs:
           MAX_PAGES_FROM_HOME: ${{ vars.RBLOGGER_MAX_PAGES_FROM_HOME || '1' }}
           MAX_URLS: ${{ vars.RBLOGGER_MAX_URLS || '10' }}
           STALE_TRANSLATION_LIMIT: ${{ vars.RBLOGGER_STALE_TRANSLATION_LIMIT || '5' }}
+          # Keep locale backfill dormant until candidate count, provider cost, and DB grants are reviewed.
+          RBLOGGER_EXTRA_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && vars.RBLOGGER_EXTRA_LOCALES || '' }}
+          RBLOGGER_EXTRA_LOCALE_LIMIT: ${{ vars.RBLOGGER_EXTRA_LOCALE_LIMIT || '2' }}
           RBLOGGER_FAIL_ON_LIST_ERROR: ${{ vars.RBLOGGER_FAIL_ON_LIST_ERROR || 'false' }}
           RBLOGGER_HTTP_ATTEMPTS: ${{ vars.RBLOGGER_HTTP_ATTEMPTS || '4' }}
           RBLOGGER_HTTP_RETRY_DELAY_SEC: ${{ vars.RBLOGGER_HTTP_RETRY_DELAY_SEC || '2' }}
