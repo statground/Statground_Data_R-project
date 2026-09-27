@@ -99,7 +99,8 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertNotIn('"$publisher" bootstrap', MAIN_WORKFLOW)
         self.assertNotIn("drain-readers", MAIN_WORKFLOW)
         self.assertIn("bootstrap_required: dispatch R Project Community Bootstrap", MAIN_WORKFLOW)
-        self.assertIn("runs-on: [self-hosted, linux, x64, webr-community-publisher]", job)
+        self.assertIn("WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true'", job)
+        self.assertIn('"self-hosted","linux","x64","webr-community-publisher"', job)
         self.assertIn("environment: web-r-community-publication", job)
 
     def test_statground_sql_checkout_is_exact_immutable_commit(self) -> None:
@@ -198,7 +199,8 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         for forbidden in ("schedule:", "push:", "workflow_call:"):
             self.assertNotIn(forbidden, trigger)
         self.assertIn("BOOTSTRAP_WEBR_COMMUNITY_ONCE", BOOTSTRAP_WORKFLOW)
-        self.assertIn("runs-on: [self-hosted, linux, x64, webr-community-publisher]", BOOTSTRAP_WORKFLOW)
+        self.assertIn("WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true'", BOOTSTRAP_WORKFLOW)
+        self.assertIn('"self-hosted","linux","x64","webr-community-publisher"', BOOTSTRAP_WORKFLOW)
         self.assertIn("environment: web-r-community-publication-bootstrap", BOOTSTRAP_WORKFLOW)
         self.assertIn("group: r-project-publication", BOOTSTRAP_WORKFLOW)
         self.assertIn("cancel-in-progress: false", BOOTSTRAP_WORKFLOW)
@@ -218,6 +220,21 @@ class PublicationFailClosedContractTest(unittest.TestCase):
                 self.assertIn(checksum, workflow)
             self.assertGreaterEqual(workflow.count("sha512sum --check --strict"), 2)
             self.assertIn("https://packages.clickhouse.com/tgz/stable/", workflow)
+
+    def test_hosted_runner_requires_private_route_before_publication_writes(self) -> None:
+        for workflow in (MAIN_WORKFLOW, BOOTSTRAP_WORKFLOW):
+            self.assertIn("tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd", workflow)
+            self.assertIn("WEBR_COMMUNITY_TS_OAUTH_CLIENT_ID", workflow)
+            self.assertIn("WEBR_COMMUNITY_TS_OAUTH_SECRET", workflow)
+            self.assertIn("WEBR_COMMUNITY_TS_PING_TARGET", workflow)
+            self.assertIn("tag:webr-community-publication", workflow)
+            self.assertIn("args: --accept-routes", workflow)
+            self.assertIn("Verify four private publication endpoints", workflow)
+            self.assertIn("verify_hosted_publication_network.py", workflow)
+            self.assertLess(
+                workflow.index("Verify four private publication endpoints"),
+                workflow.index("Gate exact community publication write targets"),
+            )
 
     def test_runtime_helpers_also_default_to_fail_closed(self) -> None:
         expected = {

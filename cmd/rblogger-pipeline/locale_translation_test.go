@@ -33,7 +33,8 @@ func TestRbloggerWorkflowLocaleBackfillRemainsApprovalGated(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"RBLOGGER_EXTRA_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && vars.RBLOGGER_EXTRA_LOCALES || '' }}",
+		"RBLOGGER_EXTRA_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && steps.opts.outputs.locale_batch || '' }}",
+		"echo \"locale_batch=$locale_batch\" >> \"$GITHUB_OUTPUT\"",
 		"RBLOGGER_EXTRA_LOCALE_LIMIT: ${{ vars.RBLOGGER_EXTRA_LOCALE_LIMIT || '2' }}",
 	} {
 		if !strings.Contains(string(workflow), required) {

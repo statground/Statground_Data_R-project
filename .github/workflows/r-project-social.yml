@@ -18,6 +18,10 @@ on:
         description: "Translate missing or fallback Mastodon board rows only"
         required: false
         default: "false"
+      r_locale_batch:
+        description: "Optional one or two R ecosystem locales; empty rotates all non-Korean locales"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -31,4 +35,5 @@ jobs:
       r_youtube_job: ${{ inputs.r_youtube_job || vars.R_YOUTUBE_JOB || 'all' }}
       rblogger_rebuild_board: ${{ inputs.rblogger_rebuild_board || 'false' }}
       mastodon_backfill_board: ${{ inputs.mastodon_backfill_board || 'false' }}
+      r_locale_batch: ${{ inputs.r_locale_batch || '' }}
     secrets: inherit

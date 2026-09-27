@@ -25,6 +25,7 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from clickhouse_http import build_clickhouse_url
+from r_ecosystem_locale_batch import SUPPORTED_LANGUAGES
 from workspace_paths import workspace_repo
 
 
@@ -34,11 +35,6 @@ MANIFEST_SCHEMA = "web-r.r-ecosystem.manifest.plain.v1"
 KEY_PURPOSE = "web-r:r-ecosystem-content:v1"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
-SUPPORTED_LANGUAGES = (
-    "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "pt-BR",
-    "ru", "id", "vi", "th", "ms", "fil", "hi", "ar", "it", "nl",
-    "pl", "sv", "tr", "uk",
-)
 TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
     "TIMEOUT_EXCEEDED",
     "NOT_INITIALIZED",
