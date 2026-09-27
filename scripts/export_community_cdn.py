@@ -113,9 +113,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
+    language = normalize_language(args.language)
+    # Every selected community generation, digest, notebook, and workshop row
+    # currently comes from a Korean-only serving contract. Do not stamp those
+    # source bytes as a different language in a publishable CDN manifest.
+    if language != "ko":
+        raise SystemExit("community CDN export has only a Korean source contract")
     repo_root = Path.cwd()
     env = load_env(repo_root / args.env)
-    language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
     generation = normalize_generation(args.generation) if args.generation else ""

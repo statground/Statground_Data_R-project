@@ -791,6 +791,7 @@ jobs:
           R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
           R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
           R_ECOSYSTEM_EXPORT_LOCALES: ${{ (vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' || vars.MASTODON_LOCALE_BACKFILL_APPROVED == 'true') && vars.R_ECOSYSTEM_EXPORT_LOCALES || '' }}
+          R_COMMUNITY_NATIVE_EN_PUBLICATION_APPROVED: ${{ vars.R_COMMUNITY_NATIVE_EN_PUBLICATION_APPROVED || 'false' }}
           R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME || '120' }}
           R_PACKAGE_CDN_HTTP_TIMEOUT: ${{ vars.R_PACKAGE_CDN_HTTP_TIMEOUT || '150' }}
           R_PACKAGE_CDN_CH_MAX_THREADS: ${{ vars.R_PACKAGE_CDN_CH_MAX_THREADS || '2' }}
@@ -808,14 +809,14 @@ jobs:
           from pathlib import Path
 
           sys.path.insert(0, str(Path('scripts').resolve()))
-          from scripts.export_r_ecosystem_cdn import normalize_language
+          from scripts.export_r_ecosystem_cdn import approved_workflow_locales
 
           reports = {}
           ko_report = json.loads(Path('/tmp/r_ecosystem_export.json').read_text(encoding='utf-8'))
-          requested = [normalize_language(value) for value in os.environ.get('R_ECOSYSTEM_EXPORT_LOCALES', '').split(',') if value.strip()]
-          requested = list(dict.fromkeys(requested))
-          if 'ko' in requested or len(requested) > 2:
-              raise SystemExit('additional R ecosystem locale export must be one or two non-Korean locales')
+          requested = approved_workflow_locales(
+              os.environ.get('R_ECOSYSTEM_EXPORT_LOCALES', ''),
+              os.environ.get('R_COMMUNITY_NATIVE_EN_PUBLICATION_APPROVED', '') == 'true',
+          )
           if not ko_report.get('export_deferred'):
               for language in requested:
                   result = subprocess.run(

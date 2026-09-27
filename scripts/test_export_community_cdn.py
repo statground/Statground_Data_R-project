@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from export_community_cdn import (
     GENERATION_PROOF_SCHEMA,
@@ -18,6 +19,7 @@ from export_community_cdn import (
     go_canonical_json_bytes,
     load_candidate_json,
     load_generation_rows_file,
+    main,
     normalize_generation,
     verify_candidate_evidence,
     workshop_export_proof,
@@ -25,6 +27,13 @@ from export_community_cdn import (
 
 
 class CommunityCDNExportTest(unittest.TestCase):
+    def test_non_korean_export_fails_before_loading_secrets_or_data(self) -> None:
+        for language in ("en", "zh-Hant"):
+            with self.subTest(language=language), patch(
+                "sys.argv", ["export_community_cdn.py", "--language", language, "--env", "/missing-secret-env"]
+            ), self.assertRaisesRegex(SystemExit, "only a Korean source contract"):
+                main()
+
     def test_digest_export_uses_generation_timestamp_as_publication_time(self) -> None:
         query = digest_sql(10)
 
