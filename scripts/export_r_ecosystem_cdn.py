@@ -99,6 +99,8 @@ def main() -> int:
         # source rows exist, rather than relabeling their Korean text.
         community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community") if language == "ko" else []
         article_rows = fetch_json_rows(env, article_sql(args.limit, language), query_name="r_ecosystem_article")
+        if language != "ko":
+            article_rows.extend(fetch_json_rows(env, official_mastodon_sql(args.limit, language), query_name="r_ecosystem_official_locale"))
     except ClickHouseExportError as exc:
         if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
@@ -730,6 +732,53 @@ SELECT a.source,
  ORDER BY if(a.source = 'rblogger' AND rb.article_dt_utc IS NOT NULL, toUnixTimestamp(rb.article_dt_utc), toUnixTimestamp(a.created_at)) DESC,
           a.created_at DESC{suffix}
  FORMAT JSONEachRow
+"""
+
+
+def official_mastodon_sql(limit: int, language: str) -> str:
+    language = source_language(language)
+    if language == "ko":
+        raise ValueError("Korean official rows are owned by article_sql")
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    # Select the latest raw version before checking its active state. The
+    # translation must match that exact source hash; a withdrawal or source
+    # edit cannot leave an older localized board row visible in the CDN.
+    return f"""
+SELECT 'rproject' AS source,
+       b.uuid AS uuid,
+       coalesce(b.title, '') AS title,
+       coalesce(b.content, '') AS content,
+       r.status_url AS url,
+       r.status_created_at AS created_at,
+       'R Project' AS author,
+       'R Project' AS platform,
+       'Official announcement' AS category,
+       '{language}' AS language
+FROM
+(
+    SELECT toString(uuid) AS uuid, title, content, active, created_log,
+           row_number() OVER (PARTITION BY uuid ORDER BY version_at DESC, created_at DESC) AS rn
+    FROM Data_R_Community_Service.mastodon_board
+    WHERE language_code = '{language}'
+) AS b
+INNER JOIN
+(
+    SELECT toString(uuid) AS uuid, active, visibility, language_code, status_url, toString(status_created_at) AS status_created_at,
+           lower(hex(SHA256(concat(ifNull(content_text, ''), unhex('0A'), ifNull(content_html, ''), unhex('0A'),
+               ifNull(status_url, ''), unhex('0A'), toString(status_created_at), unhex('0A'),
+               ifNull(toString(status_edited_at), ''), unhex('0A'), ifNull(visibility, ''))))) AS source_sha256,
+           row_number() OVER (PARTITION BY uuid ORDER BY fetched_at DESC, ingested_at DESC, event_uuid DESC) AS rn
+    FROM Data_R_Community_Raw.mastodon_status_raw
+    WHERE instance_host = 'fosstodon.org' AND account_acct = 'R_Foundation'
+) AS r ON r.uuid = b.uuid
+WHERE b.rn = 1 AND r.rn = 1
+  AND coalesce(b.active, 0) = 1 AND r.active = 1 AND r.visibility IN ('public', 'unlisted') AND r.language_code = 'en'
+  AND notEmpty(coalesce(b.title, '')) AND notEmpty(coalesce(b.content, ''))
+  AND JSONExtractString(toString(b.created_log), 'target_language') = '{language}'
+  AND JSONExtractString(toString(b.created_log), 'source_sha256') = r.source_sha256
+ORDER BY r.status_created_at DESC, b.uuid ASC{suffix}
+SETTINGS max_execution_time = 30, max_threads = 2
+FORMAT JSONEachRow
 """
 
 
