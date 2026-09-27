@@ -12,10 +12,12 @@ from export_community_cdn import (
     candidate_projection_json_bytes,
     community_generation_proof,
     digest_sql,
+    encrypt_document,
     generation_community_item,
     generation_community_sql,
     go_canonical_json_bytes,
     load_candidate_json,
+    load_generation_rows_file,
     normalize_generation,
     verify_candidate_evidence,
     workshop_export_proof,
@@ -219,6 +221,47 @@ class CommunityCDNExportTest(unittest.TestCase):
             os.symlink(candidate, alias)
             with self.assertRaisesRegex(SystemExit, "unavailable or invalid"):
                 load_candidate_json(alias, 1024, owner_only=True)
+
+    def test_owner_only_generation_rows_preserve_exact_encrypted_bytes(self) -> None:
+        row = self.generation_row()
+        path = "community/ko/rcommunity/2026/09/00000000-0000-0000-0000-000000000001.json"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            source = root / "generation.jsonl"
+            source.write_bytes(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+            source.chmod(0o600)
+            loaded = load_generation_rows_file(source)
+            self.assertEqual(loaded, [row])
+
+            def encrypted_bytes(candidate: dict[str, object]) -> bytes:
+                item = generation_community_item(candidate, "ko")
+                item["path"] = path
+                proof = community_generation_proof("2026-09-20 14:20:30.123456", {item["uuid"]: item}, [candidate])
+                document = encrypt_document(
+                    {"schema": "web-r.community.content.plain.v1", "item": item},
+                    b"x" * 32, path, "ko", str(item["uuid"]),
+                )
+                return json.dumps({"proof": proof, "document": document}, ensure_ascii=False, separators=(",", ":")).encode()
+
+            self.assertEqual(encrypted_bytes(loaded[0]), encrypted_bytes(row))
+
+            source.write_bytes(json.dumps({**row, "email": "private@example.test"}).encode() + b"\n")
+            with self.assertRaisesRegex(SystemExit, "private fields"):
+                load_generation_rows_file(source)
+
+            source.write_bytes(json.dumps(row).encode() + b"\n")
+            source.chmod(0o644)
+            with self.assertRaisesRegex(SystemExit, "owner-only"):
+                load_generation_rows_file(source)
+            source.chmod(0o600)
+            source.write_bytes(json.dumps(row).encode())
+            with self.assertRaisesRegex(SystemExit, "incomplete"):
+                load_generation_rows_file(source)
+            alias = root / "alias.jsonl"
+            os.symlink(source, alias)
+            with self.assertRaisesRegex(SystemExit, "unavailable or invalid"):
+                load_generation_rows_file(alias)
 
     def test_workshop_export_proof_is_complete_and_order_independent(self) -> None:
         items = {
