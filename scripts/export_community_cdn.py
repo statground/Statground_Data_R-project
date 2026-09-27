@@ -489,6 +489,7 @@ SELECT uuid,
    AND article_active = 1
    AND user_blocked = 0
    AND user_active = 1
+   AND is_secret = 0
    AND language_code = 'ko'
    AND category_url IN ('rcommunity', 'notebook')
  ORDER BY uuid{suffix}
