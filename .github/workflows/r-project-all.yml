@@ -462,6 +462,9 @@ jobs:
           MASTODON_TRANSLATE_ENABLED: ${{ vars.MASTODON_TRANSLATE_ENABLED || 'true' }}
           MASTODON_STALE_TRANSLATION_LIMIT: ${{ vars.MASTODON_STALE_TRANSLATION_LIMIT || '5' }}
           MASTODON_TRANSLATION_MODEL: ${{ vars.MASTODON_TRANSLATION_MODEL || vars.RBLOGGER_TRANSLATION_MODEL || 'google/gemini-2.0-flash-exp:free' }}
+          # Opt in only after provider cost and exact board insert grants are verified.
+          MASTODON_EXTRA_LOCALES: ${{ vars.MASTODON_LOCALE_BACKFILL_APPROVED == 'true' && vars.MASTODON_EXTRA_LOCALES || '' }}
+          MASTODON_EXTRA_LOCALE_LIMIT: ${{ vars.MASTODON_EXTRA_LOCALE_LIMIT || '2' }}
           MASTODON_DIRECT_OUTBOX_DRAIN_LIMIT: ${{ vars.MASTODON_DIRECT_OUTBOX_DRAIN_LIMIT || '25' }}
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -482,6 +485,9 @@ jobs:
             go run ./cmd/rproject-collector mastodon --backfill-board
           else
             go run ./cmd/rproject-collector mastodon
+          fi
+          if [ -n "$MASTODON_EXTRA_LOCALES" ]; then
+            go run ./cmd/rproject-collector mastodon-locale --locales "$MASTODON_EXTRA_LOCALES" --limit "$MASTODON_EXTRA_LOCALE_LIMIT"
           fi
 
       - name: Collect R community sources
@@ -784,7 +790,7 @@ jobs:
           R_ECOSYSTEM_CDN_HTTP_TIMEOUT: ${{ vars.R_ECOSYSTEM_CDN_HTTP_TIMEOUT || '150' }}
           R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
           R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
-          R_ECOSYSTEM_EXPORT_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && vars.R_ECOSYSTEM_EXPORT_LOCALES || '' }}
+          R_ECOSYSTEM_EXPORT_LOCALES: ${{ (vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' || vars.MASTODON_LOCALE_BACKFILL_APPROVED == 'true') && vars.R_ECOSYSTEM_EXPORT_LOCALES || '' }}
           R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME || '120' }}
           R_PACKAGE_CDN_HTTP_TIMEOUT: ${{ vars.R_PACKAGE_CDN_HTTP_TIMEOUT || '150' }}
           R_PACKAGE_CDN_CH_MAX_THREADS: ${{ vars.R_PACKAGE_CDN_CH_MAX_THREADS || '2' }}

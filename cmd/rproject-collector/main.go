@@ -270,7 +270,7 @@ type atomLink struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: rproject-collector <package|youtube|community|community-digest|mastodon> [flags]"))
+		fatal(errors.New("usage: rproject-collector <package|youtube|community|community-digest|mastodon|mastodon-locale> [flags]"))
 	}
 	ctx := context.Background()
 	var err error
@@ -285,6 +285,8 @@ func main() {
 		err = runCommunityDigest(ctx, os.Args[2:])
 	case "mastodon":
 		err = runMastodon(ctx, os.Args[2:])
+	case "mastodon-locale":
+		err = runMastodonLocale(ctx, os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
