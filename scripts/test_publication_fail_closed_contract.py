@@ -16,7 +16,7 @@ FINALIZER_WORKFLOW = (
 BOOTSTRAP_WORKFLOW = (
     ROOT / ".github" / "workflows" / "r-project-community-bootstrap.yml"
 ).read_text(encoding="utf-8")
-SQL_SHA = "a2178fb8735d2c80864422cf84bb319384d1a111"
+SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
