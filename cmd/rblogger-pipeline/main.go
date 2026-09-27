@@ -62,6 +62,8 @@ type Config struct {
 	Sleep                 time.Duration    `json:"sleep"`
 	TranslateEnabled      bool             `json:"translate_enabled"`
 	StaleTranslationLimit int              `json:"stale_translation_limit"`
+	AdditionalLocales     []string         `json:"additional_locales"`
+	AdditionalLocaleLimit int              `json:"additional_locale_limit"`
 	FailOnListError       bool             `json:"fail_on_list_error"`
 	FailOnCrawlError      bool             `json:"fail_on_crawl_error"`
 	FailOnTranslationErr  bool             `json:"fail_on_translation_error"`
@@ -156,6 +158,7 @@ type StaleRawArticle struct {
 	URL                  string `json:"url"`
 	RawCreatedAt         string `json:"raw_created_at"`
 	PreviousTranslatedAt string `json:"previous_translated_at"`
+	SourceSHA256         string `json:"source_sha256"`
 }
 
 func main() {
@@ -187,6 +190,11 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 	ai := newAIClient(cfg.AITimeout)
 	if cfg.TranslateEnabled && !ai.enabled() {
 		return nil, errors.New("TRANSLATE_ENABLED is true, but no AI provider key is configured")
+	}
+	for _, locale := range cfg.AdditionalLocales {
+		if locale != "en" && !ai.enabled() {
+			return nil, errors.New("non-English RBLOGGER_EXTRA_LOCALES requires an AI provider key")
+		}
 	}
 	publisher := NewKafkaPublisher(cfg.Kafka)
 	if usesKafkaPublishMode(cfg.PublishMode) {
@@ -407,6 +415,13 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 			return nil, err
 		}
 	}
+	localeResults := map[string]map[string]int{}
+	if len(cfg.AdditionalLocales) > 0 && !directDeferred {
+		localeResults, err = runAdditionalLocaleBackfill(ctx, clickHouse, ai, cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	ok := (!cfg.FailOnListError || len(listErrors) == 0) && (!cfg.FailOnCrawlError || len(crawlErrors) == 0) && (!cfg.FailOnTranslationErr || len(translationErrors) == 0)
 	return map[string]any{
@@ -427,7 +442,71 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 		"crawl_errors":       crawlErrors,
 		"translation_errors": translationErrors,
 		"stale_errors":       staleErrors,
+		"additional_locales": localeResults,
 	}, nil
+}
+
+func runAdditionalLocaleBackfill(ctx context.Context, ch *ClickHouseReader, ai *AIClient, cfg Config) (map[string]map[string]int, error) {
+	results := make(map[string]map[string]int, len(cfg.AdditionalLocales))
+	for _, locale := range cfg.AdditionalLocales {
+		rows, err := ch.MissingLocaleTranslations(ctx, locale, cfg.AdditionalLocaleLimit)
+		if err != nil {
+			return nil, fmt.Errorf("R-blogger locale candidate read failed locale=%s: %w", locale, err)
+		}
+		counts := map[string]int{"candidates": len(rows), "published": 0, "source_changed": 0, "translation_failed": 0}
+		results[locale] = counts
+		for _, row := range rows {
+			matched, err := ch.RawSourceStillMatches(ctx, row)
+			if err != nil {
+				return nil, fmt.Errorf("R-blogger source preflight failed locale=%s: %w", locale, err)
+			}
+			if !matched {
+				counts["source_changed"]++
+				continue
+			}
+			title, content, err := translateArticleToLocale(ai, cfg.TranslationModel, Article{
+				ArticleHeadline: row.Title, MetaDescription: row.Content,
+			}, locale)
+			if err != nil {
+				counts["translation_failed"]++
+				if cfg.FailOnTranslationErr {
+					return nil, fmt.Errorf("R-blogger locale translation failed locale=%s", locale)
+				}
+				continue
+			}
+			matched, err = ch.RawSourceStillMatches(ctx, row)
+			if err != nil {
+				return nil, fmt.Errorf("R-blogger source readback failed locale=%s: %w", locale, err)
+			}
+			if !matched {
+				counts["source_changed"]++
+				continue
+			}
+			model := cfg.TranslationModel
+			if locale == "en" {
+				model = "source-copy"
+			}
+			payload := additionalLocaleBoardPayload(row, locale, model, title, content, nowKST())
+			if err := ch.InsertBoardPayloads(ctx, []map[string]any{payload}, 1); err != nil {
+				return nil, fmt.Errorf("R-blogger locale insert failed locale=%s: %w", locale, err)
+			}
+			verified := false
+			for attempt := 0; attempt < 3; attempt++ {
+				verified, err = ch.LocaleTranslationMatches(ctx, row, locale)
+				if err == nil && verified {
+					break
+				}
+				if attempt < 2 {
+					time.Sleep(time.Second)
+				}
+			}
+			if err != nil || !verified {
+				return nil, fmt.Errorf("R-blogger locale readback failed locale=%s", locale)
+			}
+			counts["published"]++
+		}
+	}
+	return results, nil
 }
 
 func runBoardRebuild(ctx context.Context, cfg Config, dryRun bool) (map[string]any, error) {
@@ -525,7 +604,14 @@ func runBoardRebuild(ctx context.Context, cfg Config, dryRun bool) (map[string]a
 }
 
 func loadConfig(rebuildBoard bool) (Config, error) {
+	additionalLocales, err := parseRbloggerAdditionalLocales(os.Getenv("RBLOGGER_EXTRA_LOCALES"))
+	if err != nil {
+		return Config{}, err
+	}
 	publishMode := normalizePublishMode(envString("RPROJECT_PUBLISH_MODE", envString("R_DATA_PUBLISH_MODE", "clickhouse")))
+	if len(additionalLocales) > 0 && !usesClickHousePublishMode(publishMode) {
+		return Config{}, errors.New("RBLOGGER_EXTRA_LOCALES requires ClickHouse direct publishing")
+	}
 	kafkaCfg := KafkaConfig{
 		Brokers:          splitCSV(firstNonEmpty(os.Getenv("KAFKA_BROKERS"), os.Getenv("KAFKA_BOOTSTRAP_SERVERS"))),
 		Username:         firstNonEmpty(os.Getenv("KAFKA_USERNAME"), os.Getenv("KAFKA_EXTERNAL_USER")),
@@ -569,6 +655,8 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		Sleep:                 envFloatDuration("SLEEP_SEC", 1.0),
 		TranslateEnabled:      translateEnabled,
 		StaleTranslationLimit: staleLimit,
+		AdditionalLocales:     additionalLocales,
+		AdditionalLocaleLimit: minInt(100, maxInt(1, envInt("RBLOGGER_EXTRA_LOCALE_LIMIT", 2))),
 		FailOnListError:       envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
 		FailOnCrawlError:      envBool("FAIL_ON_CRAWL_ERROR", false),
 		FailOnTranslationErr:  envBool("FAIL_ON_TRANSLATION_ERROR", false),
@@ -633,6 +721,8 @@ func (c Config) publicLogConfig() map[string]any {
 		"rblogger_page_url":         c.RbloggerPageURL,
 		"translation_model":         c.TranslationModel,
 		"stale_translation_limit":   c.StaleTranslationLimit,
+		"additional_locales":        c.AdditionalLocales,
+		"additional_locale_limit":   c.AdditionalLocaleLimit,
 		"publish_mode":              c.PublishMode,
 		"clickhouse_host":           c.ClickHouse.Host,
 		"clickhouse_database":       c.ClickHouse.Database,
@@ -906,6 +996,103 @@ ORDER BY created_at ASC, uuid ASC` + limitSQL
 		})
 	}
 	return out, nil
+}
+
+// MissingLocaleTranslations selects a bounded, source-hash-keyed backfill.
+// A deactivated board row is deliberately excluded: a withdrawal must not be
+// undone by a scheduled translation refresh.
+func (r *ClickHouseReader) MissingLocaleTranslations(ctx context.Context, locale string, limit int) ([]StaleRawArticle, error) {
+	if _, ok := rbloggerLocaleNames[locale]; !ok || limit < 1 || limit > 100 {
+		return nil, errors.New("invalid R-blogger locale backfill request")
+	}
+	query := fmt.Sprintf(`
+WITH raw_latest AS
+(
+    SELECT * FROM
+    (
+        SELECT uuid, title, content, url, created_at, updated_at, active,
+            row_number() OVER (PARTITION BY uuid ORDER BY coalesce(updated_at, created_at) DESC, created_at DESC) AS rn
+        FROM Data_R_Community_Raw.r_blogger_article_raw
+        WHERE language_code = 'en'
+    )
+    WHERE rn = 1 AND coalesce(active, 0) = 1
+), board_latest AS
+(
+    SELECT * FROM
+    (
+        SELECT uuid, active, created_log,
+            row_number() OVER (PARTITION BY uuid ORDER BY version_at DESC, created_at DESC) AS rn
+        FROM Data_R_Community_Service.r_blogger_board
+        WHERE language_code = '%s'
+    )
+    WHERE rn = 1
+)
+SELECT toString(r.uuid) AS uuid, ifNull(r.title, '') AS title,
+    ifNull(r.content, '') AS content, ifNull(r.url, '') AS url,
+    ifNull(toString(r.created_at), '') AS raw_created_at,
+    lower(hex(SHA256(concat(ifNull(r.title, ''), unhex('0A'), ifNull(r.content, ''))))) AS source_sha256
+FROM raw_latest r
+LEFT JOIN board_latest b ON b.uuid = r.uuid
+WHERE notEmpty(ifNull(r.title, ''))
+  AND (isNull(b.uuid) OR b.uuid = toUUID('00000000-0000-0000-0000-000000000000')
+       OR (coalesce(b.active, 0) = 1
+           AND JSONExtractString(ifNull(toString(b.created_log), '{}'), 'source_sha256')
+               != lower(hex(SHA256(concat(ifNull(r.title, ''), unhex('0A'), ifNull(r.content, '')))))))
+ORDER BY r.created_at ASC, r.uuid ASC
+LIMIT %d`, locale, limit)
+	rows, err := r.queryRows(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StaleRawArticle, 0, len(rows))
+	for _, row := range rows {
+		item := StaleRawArticle{
+			UUID: stringValue(row["uuid"]), Title: stringValue(row["title"]),
+			Content: stringValue(row["content"]), URL: stringValue(row["url"]),
+			RawCreatedAt: stringValue(row["raw_created_at"]),
+			SourceSHA256: stringValue(row["source_sha256"]),
+		}
+		if item.SourceSHA256 != rbloggerSourceSHA256(item.Title, item.Content) {
+			return nil, errors.New("R-blogger locale source hash mismatch")
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (r *ClickHouseReader) RawSourceStillMatches(ctx context.Context, row StaleRawArticle) (bool, error) {
+	query := fmt.Sprintf(`
+SELECT coalesce(active, 0) AS active,
+    lower(hex(SHA256(concat(ifNull(title, ''), unhex('0A'), ifNull(content, ''))))) AS source_sha256
+FROM Data_R_Community_Raw.r_blogger_article_raw
+WHERE uuid = toUUID('%s') AND language_code = 'en'
+ORDER BY coalesce(updated_at, created_at) DESC, created_at DESC
+LIMIT 1`, sqlString(row.UUID))
+	rows, err := r.queryRows(ctx, query)
+	if err != nil {
+		return false, err
+	}
+	return len(rows) == 1 && stringValue(rows[0]["active"]) == "1" &&
+		stringValue(rows[0]["source_sha256"]) == row.SourceSHA256, nil
+}
+
+func (r *ClickHouseReader) LocaleTranslationMatches(ctx context.Context, row StaleRawArticle, locale string) (bool, error) {
+	if _, ok := rbloggerLocaleNames[locale]; !ok {
+		return false, errors.New("unsupported R-blogger target locale")
+	}
+	query := fmt.Sprintf(`
+SELECT coalesce(active, 0) AS active,
+    JSONExtractString(ifNull(toString(created_log), '{}'), 'source_sha256') AS source_sha256
+FROM Data_R_Community_Service.r_blogger_board
+WHERE uuid = toUUID('%s') AND language_code = '%s'
+ORDER BY version_at DESC, created_at DESC
+LIMIT 1`, sqlString(row.UUID), locale)
+	rows, err := r.queryRows(ctx, query)
+	if err != nil {
+		return false, err
+	}
+	return len(rows) == 1 && stringValue(rows[0]["active"]) == "1" &&
+		stringValue(rows[0]["source_sha256"]) == row.SourceSHA256, nil
 }
 
 func (r *ClickHouseReader) KnownURLHashes(ctx context.Context, hashes []string) (map[string]bool, error) {
@@ -1808,6 +1995,74 @@ func boardPayloadWithUpdated(rowUUID, rawURL, title, content string, createdAt, 
 		"updated_log":   nil,
 		"language_code": "ko",
 	}
+}
+
+func rbloggerSourceSHA256(title, content string) string {
+	return hashString(title + "\n" + content)
+}
+
+func additionalLocaleBoardPayload(row StaleRawArticle, locale, model, title, content string, updatedAt time.Time) map[string]any {
+	createdAt := parseClickHouseTime(row.RawCreatedAt, updatedAt)
+	payload := boardPayloadWithUpdated(row.UUID, row.URL, title, content, createdAt, updatedAt)
+	payload["language_code"] = locale
+	payload["created_log"] = map[string]any{
+		"type":            "rblogger_board_locale_translation_v1",
+		"source":          "Statground_Data_R-project",
+		"raw_url":         row.URL,
+		"source_language": "en",
+		"source_sha256":   rbloggerSourceSHA256(row.Title, row.Content),
+		"target_language": locale,
+		"model":           model,
+		"prompt_revision": 1,
+		"hyperlinks":      "removed",
+	}
+	return payload
+}
+
+func translateArticleToLocale(ai *AIClient, model string, article Article, locale string) (string, string, error) {
+	name, ok := rbloggerLocaleNames[locale]
+	if !ok {
+		return "", "", fmt.Errorf("unsupported R-blogger target locale %q", locale)
+	}
+	srcTitle, srcContent := sourceTitle(article), sourceContent(article)
+	if locale == "en" {
+		content, err := sanitizeHTMLFragment("<p>" + html.EscapeString(srcContent) + "</p>")
+		if err != nil {
+			return "", "", err
+		}
+		return cleanTitleOutput(srcTitle), safeBoardContent(srcTitle, content), nil
+	}
+	if ai == nil || !ai.enabled() {
+		return "", "", errors.New("AI provider key is required for non-English R-blogger locale")
+	}
+	title, err := ai.chat(rbloggerLocaleTitlePrompt(name, srcTitle), model)
+	if err != nil {
+		return "", "", err
+	}
+	title = cleanTitleOutput(title)
+	if title == "" {
+		return "", "", errors.New("empty translated R-blogger title")
+	}
+	content, err := ai.chat(rbloggerLocaleContentPrompt(name, srcTitle, srcContent), model)
+	if err != nil {
+		return "", "", err
+	}
+	content, err = sanitizeHTMLFragment(content)
+	if err != nil {
+		return "", "", err
+	}
+	if content == "" {
+		return "", "", errors.New("empty translated R-blogger content")
+	}
+	return title, safeBoardContent(title, content), nil
+}
+
+func rbloggerLocaleTitlePrompt(language, title string) string {
+	return fmt.Sprintf("Translate this R/statistics blog title into %s. Return only one title, without links, labels, quotation marks, or invented facts. Preserve code, package names, proper nouns, and numbers.\n\nSource title:\n%s", language, title)
+}
+
+func rbloggerLocaleContentPrompt(language, title, content string) string {
+	return fmt.Sprintf("Translate this R/statistics blog summary into %s. Return only an HTML fragment using h2, h3, p, ul, ol, li, strong, em, code, pre, or blockquote. Do not add facts or links. Preserve code, package names, proper nouns, and numbers.\n\nSource title:\n%s\n\nSource summary:\n%s", language, title, content)
 }
 
 func translateArticle(ai *AIClient, model string, article Article) (string, string, error) {
@@ -2886,6 +3141,33 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return out
+}
+
+// These codes mirror web_r_go's public language menu. Korean remains the
+// existing board lane; English is a sanitized copy of the English source.
+var rbloggerLocaleNames = map[string]string{
+	"en": "English", "ja": "Japanese", "zh-Hans": "Simplified Chinese",
+	"zh-Hant": "Traditional Chinese", "es": "Spanish", "fr": "French",
+	"de": "German", "pt-BR": "Brazilian Portuguese", "ru": "Russian",
+	"id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
+	"ms": "Malay", "fil": "Filipino", "hi": "Hindi", "ar": "Arabic",
+	"it": "Italian", "nl": "Dutch", "pl": "Polish", "sv": "Swedish",
+	"tr": "Turkish", "uk": "Ukrainian",
+}
+
+func parseRbloggerAdditionalLocales(raw string) ([]string, error) {
+	seen := make(map[string]bool)
+	locales := make([]string, 0)
+	for _, locale := range splitCSV(raw) {
+		if _, ok := rbloggerLocaleNames[locale]; !ok {
+			return nil, fmt.Errorf("unsupported R-blogger target locale %q", locale)
+		}
+		if !seen[locale] {
+			seen[locale] = true
+			locales = append(locales, locale)
+		}
+	}
+	return locales, nil
 }
 
 func envString(key, fallback string) string {
