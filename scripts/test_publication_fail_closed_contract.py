@@ -16,13 +16,31 @@ FINALIZER_WORKFLOW = (
 BOOTSTRAP_WORKFLOW = (
     ROOT / ".github" / "workflows" / "r-project-community-bootstrap.yml"
 ).read_text(encoding="utf-8")
+RECONCILE_WORKFLOW = (
+    ROOT / ".github" / "workflows" / "r-project-community-publication.yml"
+).read_text(encoding="utf-8")
 SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
+    def test_new_posts_trigger_the_existing_fenced_publication_job(self) -> None:
+        self.assertIn('cron: "7,37 * * * *"', RECONCILE_WORKFLOW)
+        self.assertIn("workflow_dispatch:", RECONCILE_WORKFLOW)
+        self.assertIn("uses: ./.github/workflows/r-project-all.yml", RECONCILE_WORKFLOW)
+        self.assertIn("scope: publication", RECONCILE_WORKFLOW)
+        self.assertIn("all|package|social|community|community-digest|notebook|cdn|publication)", MAIN_WORKFLOW)
+        collect = MAIN_WORKFLOW.split("  collect:", 1)[1].split("  community-publication:", 1)[0]
+        self.assertIn("if: steps.opts.outputs.scope != 'publication'", collect)
+        self.assertIn("if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook'", collect)
+        job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
+        self.assertIn("inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'", job)
+        self.assertIn("Gate exact community publication write targets", job)
+        for workflow in (MAIN_WORKFLOW, BOOTSTRAP_WORKFLOW):
+            self.assertNotIn("group: statground-internal", workflow)
+
     def test_cdn_publication_scopes_share_one_non_cancelling_workflow_group(self) -> None:
         concurrency = MAIN_WORKFLOW.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-        self.assertIn("inputs.scope == 'all' || inputs.scope == 'cdn'", concurrency)
+        self.assertIn("inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'", concurrency)
         self.assertIn("'r-project-publication'", concurrency)
         self.assertIn("cancel-in-progress: false", concurrency)
         self.assertNotIn("cancel-in-progress: true", concurrency)
@@ -81,8 +99,7 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertNotIn('"$publisher" bootstrap', MAIN_WORKFLOW)
         self.assertNotIn("drain-readers", MAIN_WORKFLOW)
         self.assertIn("bootstrap_required: dispatch R Project Community Bootstrap", MAIN_WORKFLOW)
-        self.assertIn("group: statground-internal", job)
-        self.assertIn("labels: [self-hosted, linux, x64]", job)
+        self.assertIn("runs-on: [self-hosted, linux, x64, webr-community-publisher]", job)
         self.assertIn("environment: web-r-community-publication", job)
 
     def test_statground_sql_checkout_is_exact_immutable_commit(self) -> None:
@@ -181,8 +198,7 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         for forbidden in ("schedule:", "push:", "workflow_call:"):
             self.assertNotIn(forbidden, trigger)
         self.assertIn("BOOTSTRAP_WEBR_COMMUNITY_ONCE", BOOTSTRAP_WORKFLOW)
-        self.assertIn("group: statground-internal", BOOTSTRAP_WORKFLOW)
-        self.assertIn("labels: [self-hosted, linux, x64]", BOOTSTRAP_WORKFLOW)
+        self.assertIn("runs-on: [self-hosted, linux, x64, webr-community-publisher]", BOOTSTRAP_WORKFLOW)
         self.assertIn("environment: web-r-community-publication-bootstrap", BOOTSTRAP_WORKFLOW)
         self.assertIn("group: r-project-publication", BOOTSTRAP_WORKFLOW)
         self.assertIn("cancel-in-progress: false", BOOTSTRAP_WORKFLOW)

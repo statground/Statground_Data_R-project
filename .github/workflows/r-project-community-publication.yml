@@ -1,0 +1,18 @@
+name: R Project Community Publication
+
+on:
+  schedule:
+    # Reconcile user-written posts with the fenced public generation twice hourly.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publication:
+    name: Publish complete Web-R community generation
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: publication
+    secrets: inherit

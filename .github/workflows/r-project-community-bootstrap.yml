@@ -30,9 +30,7 @@ concurrency:
 jobs:
   bootstrap-community-publication:
     name: Bootstrap and release first community generation
-    runs-on:
-      group: statground-internal
-      labels: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, webr-community-publisher]
     environment: web-r-community-publication-bootstrap
     timeout-minutes: 30
     env:
