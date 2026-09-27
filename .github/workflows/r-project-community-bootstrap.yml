@@ -30,7 +30,7 @@ concurrency:
 jobs:
   bootstrap-community-publication:
     name: Bootstrap and release first community generation
-    runs-on: [self-hosted, linux, x64, webr-community-publisher]
+    runs-on: ${{ fromJSON(vars.WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true' && '"ubuntu-latest"' || '["self-hosted","linux","x64","webr-community-publisher"]') }}
     environment: web-r-community-publication-bootstrap
     timeout-minutes: 30
     env:
@@ -118,6 +118,30 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate hosted private network settings
+        if: vars.WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true'
+        env:
+          TS_CLIENT_ID: ${{ secrets.WEBR_COMMUNITY_TS_OAUTH_CLIENT_ID }}
+          TS_CLIENT_SECRET: ${{ secrets.WEBR_COMMUNITY_TS_OAUTH_SECRET }}
+          TS_PING_TARGET: ${{ vars.WEBR_COMMUNITY_TS_PING_TARGET }}
+        run: |
+          test -n "$TS_CLIENT_ID" && test -n "$TS_CLIENT_SECRET" && test -n "$TS_PING_TARGET" || {
+            echo "hosted private publication network is not configured" >&2
+            exit 1
+          }
+
+      - name: Connect hosted runner to private publication network
+        if: vars.WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true'
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+        with:
+          oauth-client-id: ${{ secrets.WEBR_COMMUNITY_TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.WEBR_COMMUNITY_TS_OAUTH_SECRET }}
+          tags: tag:webr-community-publication
+          args: --accept-routes
+          ping: ${{ vars.WEBR_COMMUNITY_TS_PING_TARGET }}
+          version: 1.94.2
+          use-cache: "false"
+
       - name: Materialize owner-only community publication runtime
         env:
           WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
@@ -132,6 +156,10 @@ jobs:
             echo "community publication secret files are not owner-only" >&2
             exit 1
           fi
+
+      - name: Verify four private publication endpoints
+        if: vars.WEBR_COMMUNITY_PUBLICATION_HOSTED == 'true'
+        run: python scripts/verify_hosted_publication_network.py --runtime-dir "$COMMUNITY_RUNTIME_DIR"
 
       - name: Install checksum-pinned ClickHouse client
         run: |

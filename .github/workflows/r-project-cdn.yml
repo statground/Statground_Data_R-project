@@ -8,6 +8,11 @@ on:
     tags:
       - "webr-cdn-publish-*"
   workflow_dispatch:
+    inputs:
+      r_locale_batch:
+        description: "Optional one or two R ecosystem locales; empty rotates all non-Korean locales"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -18,4 +23,5 @@ jobs:
     uses: ./.github/workflows/r-project-all.yml
     with:
       scope: cdn
+      r_locale_batch: ${{ inputs.r_locale_batch || '' }}
     secrets: inherit
