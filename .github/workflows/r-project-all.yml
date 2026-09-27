@@ -1398,12 +1398,19 @@ jobs:
         run: |
           python scripts/test_export_community_cdn.py
           python scripts/test_verify_community_generation_cdn.py
+          python scripts/test_dump_community_generation_rows.py
+          python scripts/dump_community_generation_rows.py \
+            --client "$COMMUNITY_RUNTIME_DIR/clickhouse-client/bin/clickhouse-client" \
+            --config "$COMMUNITY_RUNTIME_DIR/endpoints/s1r1.xml" \
+            --generation "${{ steps.community_loader.outputs.generation }}" \
+            --output "$COMMUNITY_RUNTIME_DIR/candidate-public-rows.jsonl"
           python scripts/export_community_cdn.py \
             --cdn-root web-r_CDN2_community \
             --language ko \
             --generation "${{ steps.community_loader.outputs.generation }}" \
             --candidate-receipt "$COMMUNITY_RUNTIME_DIR/loader-receipt.json" \
             --candidate-projection "$COMMUNITY_RUNTIME_DIR/candidate-cdn-projection.json" \
+            --generation-rows-file "$COMMUNITY_RUNTIME_DIR/candidate-public-rows.jsonl" \
             > "$COMMUNITY_RUNTIME_DIR/community-export.json"
           python - <<'PY'
           import json
