@@ -9,6 +9,9 @@ from unittest.mock import patch
 from export_community_cdn import (
     GENERATION_PROOF_SCHEMA,
     CANDIDATE_PROJECTION_SCHEMA,
+    POSIT_COMMUNITY_EVENTS_ID,
+    R_PROJECT_CONFERENCE_ID,
+    add_r_project_conference_fallbacks,
     candidate_projection_item,
     candidate_projection_json_bytes,
     community_generation_proof,
@@ -22,11 +25,78 @@ from export_community_cdn import (
     main,
     normalize_generation,
     verify_candidate_evidence,
+    workshop_event_item,
+    workshop_event_sql,
     workshop_export_proof,
 )
 
 
 class CommunityCDNExportTest(unittest.TestCase):
+    def test_workshop_source_query_includes_exact_posit_event_tag(self) -> None:
+        query = workshop_event_sql(0)
+        self.assertIn("tags_json,", query)
+        self.assertIn("source_id = 'community:posit:events'", query)
+        self.assertIn("platform = 'posit-community'", query)
+        self.assertIn("has(JSONExtract(tags_json, 'Array(String)'), 'Conferences & Events')", query)
+        self.assertIn("FROM Data_R_Community_Service.v_r_community_latest_dedup", query)
+
+    def test_posit_tagged_event_keeps_stable_identity_and_ignores_unrelated_topics(self) -> None:
+        row = {
+            "external_id": "forum-topic-123",
+            "source_id": "community:posit:latest-r-filtered",
+            "source_name": "Posit Community",
+            "source_type": "community_forum",
+            "platform": "posit-community",
+            "tags_json": '["R", "Conferences & Events"]',
+            "source_url": "https://forum.posit.co/latest",
+            "canonical_url": "https://forum.posit.co/t/workshop/123",
+            "title": "R workshop on health data",
+            "summary": "A conference category workshop",
+            "published_at": "2026-09-20 12:00:00",
+            "collected_at": "2026-09-21 12:00:00",
+        }
+        item = workshop_event_item(row, "ko")
+        expected = "posit-event-" + hashlib.sha256(b"posit-community-event:forum-topic-123").hexdigest()[:24]
+        self.assertEqual(item["uuid"], expected)
+        self.assertEqual(item["board_key"], expected)
+        self.assertEqual(item["source_id"], row["source_id"])
+        self.assertEqual(item["canonical_url"], row["canonical_url"])
+        self.assertEqual(item["language"], "ko")
+        self.assertTrue(item["active"])
+        for invalid in (
+            {**row, "tags_json": '["R"]'},
+            {**row, "tags_json": "invalid-json"},
+            {**row, "external_id": ""},
+            {**row, "platform": "unrelated"},
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(workshop_event_item(invalid, "ko"), {})
+        direct_source = {**row, "source_id": POSIT_COMMUNITY_EVENTS_ID, "tags_json": "[]"}
+        self.assertEqual(workshop_event_item(direct_source, "ko")["uuid"], expected)
+
+    def test_curated_conferences_fill_only_missing_verified_manifest_ids(self) -> None:
+        existing = {"rconf-dsc-2018": {"uuid": "rconf-dsc-2018", "source_id": "collected"}}
+        payloads: dict[str, tuple[str, dict[str, object]]] = {}
+        add_r_project_conference_fallbacks(existing, payloads, {}, "ko")
+        self.assertEqual(existing["rconf-dsc-2018"]["source_id"], "collected")
+        self.assertEqual(
+            set(existing),
+            {"rconf-dsc-2005", "rconf-dsc-2018", "rconf-dsc-2019", "rconf-dsc-2020", "rconf-r-summit-2015"},
+        )
+        self.assertEqual(len(payloads), 4)
+        for key, item in existing.items():
+            if key == "rconf-dsc-2018":
+                continue
+            self.assertEqual(item["uuid"], key)
+            self.assertEqual(item["board_key"], key)
+            self.assertEqual(item["source_id"], R_PROJECT_CONFERENCE_ID)
+            self.assertTrue(item["canonical_url"].startswith("https://www.r-project.org/"))
+            self.assertEqual(item["path"], f"community/ko/workshop/curated/{key}.json")
+            self.assertEqual(payloads["workshop:" + key][1]["workshop"], item)
+        for key in ("rconf-dsc-2019", "rconf-dsc-2020"):
+            self.assertEqual(existing[key]["starts_at"], "")
+            self.assertEqual(existing[key]["ends_at"], "")
+
     def test_non_korean_export_fails_before_loading_secrets_or_data(self) -> None:
         for language in ("en", "zh-Hant"):
             with self.subTest(language=language), patch(
