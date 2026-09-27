@@ -18,11 +18,12 @@ func TestParseMastodonLocalesBounds(t *testing.T) {
 }
 
 func TestMastodonLocaleQueriesFenceLatestSource(t *testing.T) {
-	q := mastodonLocaleCandidatesSQL("ja", 2)
+	q := mastodonLocaleCandidatesSQL("ja", 2, 6000)
 	for _, part := range []string{
 		"row_number() OVER (PARTITION BY uuid ORDER BY fetched_at DESC, ingested_at DESC, event_uuid DESC)",
 		"r.rn = 1 AND r.active = 1", "r.visibility IN ('public', 'unlisted')", "r.language_code = 'en'",
-		"b.rn = 1", "source_sha256') != r.source_sha256", "LIMIT 2",
+		"b.rn = 1", "coalesce(b.active, 0) = 1", "source_sha256') != r.source_sha256", "LIMIT 2",
+		"lengthUTF8(r.content_text) <= 6000",
 	} {
 		if !strings.Contains(q, part) {
 			t.Errorf("candidate query missing %q", part)
@@ -30,6 +31,9 @@ func TestMastodonLocaleQueriesFenceLatestSource(t *testing.T) {
 	}
 	if strings.Index(q, "row_number() OVER (PARTITION BY uuid ORDER BY fetched_at") > strings.Index(q, "r.rn = 1 AND r.active = 1") {
 		t.Fatal("active state was checked before latest source version")
+	}
+	if strings.Contains(q, "coalesce(b.active, 0) != 1") {
+		t.Fatal("withdrawn locale board row must not be republished")
 	}
 	filter, err := mastodonLocaleUUIDFilter(map[string]string{"11111111-2222-3333-4444-555555555555": "sha"})
 	if err != nil || !strings.Contains(filter, "toString(uuid) IN ('11111111-2222-3333-4444-555555555555')") {

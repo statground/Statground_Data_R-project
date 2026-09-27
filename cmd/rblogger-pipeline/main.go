@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
@@ -57,25 +58,26 @@ var allowedContentTags = map[string]bool{
 }
 
 type Config struct {
-	MaxPagesFromHome      int              `json:"max_pages_from_home"`
-	MaxURLs               int              `json:"max_urls"`
-	Sleep                 time.Duration    `json:"sleep"`
-	TranslateEnabled      bool             `json:"translate_enabled"`
-	StaleTranslationLimit int              `json:"stale_translation_limit"`
-	AdditionalLocales     []string         `json:"additional_locales"`
-	AdditionalLocaleLimit int              `json:"additional_locale_limit"`
-	FailOnListError       bool             `json:"fail_on_list_error"`
-	FailOnCrawlError      bool             `json:"fail_on_crawl_error"`
-	FailOnTranslationErr  bool             `json:"fail_on_translation_error"`
-	RbloggerHomeURL       string           `json:"rblogger_home_url"`
-	RbloggerPageURL       string           `json:"rblogger_page_url"`
-	TranslationModel      string           `json:"translation_model"`
-	AITimeout             time.Duration    `json:"ai_timeout"`
-	RebuildLimit          int              `json:"rebuild_limit"`
-	RebuildBatchSize      int              `json:"rebuild_batch_size"`
-	PublishMode           string           `json:"publish_mode"`
-	Kafka                 KafkaConfig      `json:"kafka"`
-	ClickHouse            ClickHouseConfig `json:"clickhouse"`
+	MaxPagesFromHome              int              `json:"max_pages_from_home"`
+	MaxURLs                       int              `json:"max_urls"`
+	Sleep                         time.Duration    `json:"sleep"`
+	TranslateEnabled              bool             `json:"translate_enabled"`
+	StaleTranslationLimit         int              `json:"stale_translation_limit"`
+	AdditionalLocales             []string         `json:"additional_locales"`
+	AdditionalLocaleLimit         int              `json:"additional_locale_limit"`
+	AdditionalLocaleMaxInputChars int              `json:"additional_locale_max_input_chars"`
+	FailOnListError               bool             `json:"fail_on_list_error"`
+	FailOnCrawlError              bool             `json:"fail_on_crawl_error"`
+	FailOnTranslationErr          bool             `json:"fail_on_translation_error"`
+	RbloggerHomeURL               string           `json:"rblogger_home_url"`
+	RbloggerPageURL               string           `json:"rblogger_page_url"`
+	TranslationModel              string           `json:"translation_model"`
+	AITimeout                     time.Duration    `json:"ai_timeout"`
+	RebuildLimit                  int              `json:"rebuild_limit"`
+	RebuildBatchSize              int              `json:"rebuild_batch_size"`
+	PublishMode                   string           `json:"publish_mode"`
+	Kafka                         KafkaConfig      `json:"kafka"`
+	ClickHouse                    ClickHouseConfig `json:"clickhouse"`
 }
 
 type KafkaConfig struct {
@@ -449,13 +451,17 @@ func runPipeline(ctx context.Context, cfg Config, dryRun bool) (map[string]any, 
 func runAdditionalLocaleBackfill(ctx context.Context, ch *ClickHouseReader, ai *AIClient, cfg Config) (map[string]map[string]int, error) {
 	results := make(map[string]map[string]int, len(cfg.AdditionalLocales))
 	for _, locale := range cfg.AdditionalLocales {
-		rows, err := ch.MissingLocaleTranslations(ctx, locale, cfg.AdditionalLocaleLimit)
+		rows, err := ch.MissingLocaleTranslations(ctx, locale, cfg.AdditionalLocaleLimit, cfg.AdditionalLocaleMaxInputChars)
 		if err != nil {
 			return nil, fmt.Errorf("R-blogger locale candidate read failed locale=%s: %w", locale, err)
 		}
 		counts := map[string]int{"candidates": len(rows), "published": 0, "source_changed": 0, "translation_failed": 0}
 		results[locale] = counts
 		for _, row := range rows {
+			if utf8.RuneCountInString(row.Title)+utf8.RuneCountInString(row.Content) > cfg.AdditionalLocaleMaxInputChars {
+				counts["oversize"]++
+				continue
+			}
 			matched, err := ch.RawSourceStillMatches(ctx, row)
 			if err != nil {
 				return nil, fmt.Errorf("R-blogger source preflight failed locale=%s: %w", locale, err)
@@ -650,25 +656,26 @@ func loadConfig(rebuildBoard bool) (Config, error) {
 		}
 	}
 	return Config{
-		MaxPagesFromHome:      maxInt(1, envInt("MAX_PAGES_FROM_HOME", 1)),
-		MaxURLs:               maxInt(0, envInt("MAX_URLS", 0)),
-		Sleep:                 envFloatDuration("SLEEP_SEC", 1.0),
-		TranslateEnabled:      translateEnabled,
-		StaleTranslationLimit: staleLimit,
-		AdditionalLocales:     additionalLocales,
-		AdditionalLocaleLimit: minInt(100, maxInt(1, envInt("RBLOGGER_EXTRA_LOCALE_LIMIT", 2))),
-		FailOnListError:       envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
-		FailOnCrawlError:      envBool("FAIL_ON_CRAWL_ERROR", false),
-		FailOnTranslationErr:  envBool("FAIL_ON_TRANSLATION_ERROR", false),
-		RbloggerHomeURL:       envString("RBLOGGER_HOME_URL", defaultHomeURL),
-		RbloggerPageURL:       envString("RBLOGGER_PAGE_URL", defaultPageURL),
-		TranslationModel:      envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free"),
-		AITimeout:             time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second,
-		RebuildLimit:          maxInt(0, envInt("RBLOGGER_REBUILD_LIMIT", 0)),
-		RebuildBatchSize:      maxInt(1, envInt("RBLOGGER_REBUILD_BATCH_SIZE", 50)),
-		PublishMode:           publishMode,
-		Kafka:                 kafkaCfg,
-		ClickHouse:            clickHouseCfg,
+		MaxPagesFromHome:              maxInt(1, envInt("MAX_PAGES_FROM_HOME", 1)),
+		MaxURLs:                       maxInt(0, envInt("MAX_URLS", 0)),
+		Sleep:                         envFloatDuration("SLEEP_SEC", 1.0),
+		TranslateEnabled:              translateEnabled,
+		StaleTranslationLimit:         staleLimit,
+		AdditionalLocales:             additionalLocales,
+		AdditionalLocaleLimit:         minInt(100, maxInt(1, envInt("RBLOGGER_EXTRA_LOCALE_LIMIT", 2))),
+		AdditionalLocaleMaxInputChars: minInt(12000, maxInt(1, envInt("RBLOGGER_EXTRA_LOCALE_MAX_INPUT_CHARS", 6000))),
+		FailOnListError:               envBool("FAIL_ON_LIST_ERROR", envBool("RBLOGGER_FAIL_ON_LIST_ERROR", false)),
+		FailOnCrawlError:              envBool("FAIL_ON_CRAWL_ERROR", false),
+		FailOnTranslationErr:          envBool("FAIL_ON_TRANSLATION_ERROR", false),
+		RbloggerHomeURL:               envString("RBLOGGER_HOME_URL", defaultHomeURL),
+		RbloggerPageURL:               envString("RBLOGGER_PAGE_URL", defaultPageURL),
+		TranslationModel:              envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free"),
+		AITimeout:                     time.Duration(maxInt(30, envInt("AI_TIMEOUT", 300))) * time.Second,
+		RebuildLimit:                  maxInt(0, envInt("RBLOGGER_REBUILD_LIMIT", 0)),
+		RebuildBatchSize:              maxInt(1, envInt("RBLOGGER_REBUILD_BATCH_SIZE", 50)),
+		PublishMode:                   publishMode,
+		Kafka:                         kafkaCfg,
+		ClickHouse:                    clickHouseCfg,
 	}, nil
 }
 
@@ -1001,8 +1008,8 @@ ORDER BY created_at ASC, uuid ASC` + limitSQL
 // MissingLocaleTranslations selects a bounded, source-hash-keyed backfill.
 // A deactivated board row is deliberately excluded: a withdrawal must not be
 // undone by a scheduled translation refresh.
-func (r *ClickHouseReader) MissingLocaleTranslations(ctx context.Context, locale string, limit int) ([]StaleRawArticle, error) {
-	if _, ok := rbloggerLocaleNames[locale]; !ok || limit < 1 || limit > 100 {
+func (r *ClickHouseReader) MissingLocaleTranslations(ctx context.Context, locale string, limit, maxInputChars int) ([]StaleRawArticle, error) {
+	if _, ok := rbloggerLocaleNames[locale]; !ok || limit < 1 || limit > 100 || maxInputChars < 1 || maxInputChars > 12000 {
 		return nil, errors.New("invalid R-blogger locale backfill request")
 	}
 	query := fmt.Sprintf(`
@@ -1034,12 +1041,13 @@ SELECT toString(r.uuid) AS uuid, ifNull(r.title, '') AS title,
 FROM raw_latest r
 LEFT JOIN board_latest b ON b.uuid = r.uuid
 WHERE notEmpty(ifNull(r.title, ''))
+  AND lengthUTF8(ifNull(r.title, '')) + lengthUTF8(ifNull(r.content, '')) <= %d
   AND (isNull(b.uuid) OR b.uuid = toUUID('00000000-0000-0000-0000-000000000000')
        OR (coalesce(b.active, 0) = 1
            AND JSONExtractString(ifNull(toString(b.created_log), '{}'), 'source_sha256')
                != lower(hex(SHA256(concat(ifNull(r.title, ''), unhex('0A'), ifNull(r.content, '')))))))
 ORDER BY r.created_at ASC, r.uuid ASC
-LIMIT %d`, locale, limit)
+LIMIT %d`, locale, maxInputChars, limit)
 	rows, err := r.queryRows(ctx, query)
 	if err != nil {
 		return nil, err

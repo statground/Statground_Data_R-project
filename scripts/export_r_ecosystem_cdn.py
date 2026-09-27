@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
 
 from clickhouse_http import build_clickhouse_url
+from r_ecosystem_locales import SUPPORTED_LANGUAGES
 from workspace_paths import workspace_repo
 
 
@@ -44,11 +45,6 @@ COMMUNITY_SOURCE_IDENTITY_FIELDS = (
     "external_id", "source_id", "source_type", "platform", "source_url",
     "canonical_url", "source_title", "source_summary", "author",
     "source_language", "tags_json", "source_version",
-)
-SUPPORTED_LANGUAGES = (
-    "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "pt-BR",
-    "ru", "id", "vi", "th", "ms", "fil", "hi", "ar", "it", "nl",
-    "pl", "sv", "tr", "uk",
 )
 TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
     "TIMEOUT_EXCEEDED",
@@ -94,6 +90,7 @@ def main() -> int:
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
     parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_contents")), help="web-r_CDN2_contents checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
+    parser.add_argument("--include-native-english-community", action="store_true", help="include source-English community rows only after separate publication approval")
     parser.add_argument("--limit", type=int, default=0, help="optional row limit for smoke exports")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
@@ -107,7 +104,7 @@ def main() -> int:
     try:
         # English source text may be reused verbatim only for current,
         # published community items. Other locales require verified translations.
-        community_rows = fetch_json_rows(env, community_sql(args.limit, language), query_name="r_ecosystem_community") if language in {"ko", "en"} else []
+        community_rows = fetch_json_rows(env, community_sql(args.limit, language), query_name="r_ecosystem_community") if language == "ko" or (language == "en" and args.include_native_english_community) else []
         article_rows = fetch_json_rows(env, article_sql(args.limit, language), query_name="r_ecosystem_article")
         if language != "ko":
             article_rows.extend(fetch_json_rows(env, official_mastodon_sql(args.limit, language), query_name="r_ecosystem_official_locale"))
@@ -131,9 +128,11 @@ def main() -> int:
     # A new locale without any verified translations must not publish an
     # empty manifest that would mask the still-available Korean catalog.
     # Existing locale manifests may legitimately become empty on withdrawal.
-    if language == "en" and community_rows:
+    if language != "ko" and (community_rows or article_rows):
         authority = korean_community_authority(cdn_root, key)
-        community_rows = [row for row in community_rows if native_english_row_authorized(row, authority)]
+        if community_rows:
+            community_rows = [row for row in community_rows if native_english_row_authorized(row, authority)]
+        article_rows = [row for row in article_rows if locale_article_authorized(row, authority)]
 
     if language != "ko" and not community_rows and not article_rows and not (cdn_root / f"contents/{language}/index.json").exists():
         print(json.dumps({**export_result(0, 0, 0, 0), "skipped": "no_verified_locale_rows"}, ensure_ascii=False))
@@ -146,6 +145,7 @@ def main() -> int:
         if uuid in payloads:
             duplicate_count += 1
             continue
+        language_meta = community_language_metadata(row, language)
         payload = {
             "schema": CONTENT_SCHEMA,
             "kind": "community",
@@ -161,7 +161,11 @@ def main() -> int:
                 "title": text(row.get("title")),
                 "summary": text(row.get("summary")),
                 "author": text(row.get("author")),
-                "language": text(row.get("language")) or language,
+                "language": language_meta["language"],
+                "source_language": language_meta["source_language"],
+                "title_language": language_meta["title_language"],
+                "summary_language": language_meta["summary_language"],
+                "translation_status": language_meta["translation_status"],
                 "tags_json": text(row.get("tags_json")),
                 # Web-R detail helpers prefer *_ko keys in these source JSON
                 # blobs. Exclude them for native English instead of letting a
@@ -185,6 +189,7 @@ def main() -> int:
             "summary": payload["community_item"]["summary"],
             "author": payload["community_item"]["author"],
             "canonical_url": payload["community_item"]["canonical_url"],
+            **language_meta,
         })
 
     for row in article_rows:
@@ -303,6 +308,39 @@ def source_label(source: str) -> str:
     return source
 
 
+def community_language_metadata(row: dict[str, Any], target_language: str) -> dict[str, str]:
+    """Record field provenance; a partial Korean translation must say so."""
+    source = text(row.get("source_language")).lower()
+    supported = {language.lower() for language in SUPPORTED_LANGUAGES}
+    if source not in supported:
+        source = "und"
+    title = text(row.get("title"))
+    summary = text(row.get("summary"))
+    source_title = text(row.get("source_title"))
+    source_summary = text(row.get("source_summary"))
+    title_language = target_language if source == target_language or (title and title != source_title) else source
+    summary_language = target_language if source == target_language or (summary and summary != source_summary) else source
+    if title_language == summary_language:
+        overall = title_language
+    else:
+        overall = source  # conservative for a reader with only one language field
+    if source == target_language:
+        status = "source"
+    elif title_language == target_language and summary_language == target_language:
+        status = "translated"
+    elif title_language == target_language or summary_language == target_language:
+        status = "partial"
+    else:
+        status = "source_fallback"
+    return {
+        "language": overall,
+        "source_language": source,
+        "title_language": title_language,
+        "summary_language": summary_language,
+        "translation_status": status,
+    }
+
+
 def article_category_key(source: str) -> str:
     source = text(source).lower()
     if source == "rblogger":
@@ -375,7 +413,7 @@ def korean_community_authority(cdn_root: Path, key: bytes) -> dict[str, dict[str
             or not re.fullmatch(r"[0-9a-f]{64}", text(item.get("source_sha256")))
             for item in community_items
         ):
-            raise SystemExit("Korean community manifest lacks source revision/hash; English export blocked")
+            raise SystemExit("Korean community manifest lacks source revision/hash; locale export blocked")
         return manifest["items"]
     except (OSError, KeyError, TypeError, ValueError, UnicodeError, EOFError, binascii.Error, InvalidTag) as exc:
         raise SystemExit("Korean community publication authority could not be verified") from exc
@@ -406,6 +444,22 @@ def native_english_row_authorized(row: dict[str, Any], authority: dict[str, dict
         and bool(re.fullmatch(r"[0-9a-f]{64}", text(row.get("source_sha256"))))
         and text(item.get("canonical_url")) == text(row.get("canonical_url"))
         and text(item.get("source_id")) == text(row.get("source_id"))
+        and str(item.get("path", "")).startswith("contents/ko/")
+    )
+
+
+def locale_article_authorized(row: dict[str, Any], authority: dict[str, dict[str, Any]]) -> bool:
+    """A locale can only add text for an article in the current Korean release."""
+    uuid = normalize_uuid(row.get("uuid"))
+    source = text(row.get("source"))
+    item = authority.get(uuid)
+    return bool(
+        uuid and source and item and isinstance(item, dict)
+        and item.get("uuid") == uuid
+        and item.get("kind") == "article"
+        and item.get("language") == "ko"
+        and item.get("article_source") == source
+        and item.get("canonical_url") == text(row.get("url"))
         and str(item.get("path", "")).startswith("contents/ko/")
     )
 
@@ -959,11 +1013,11 @@ def source_language(value: str) -> str:
     raise SystemExit("unsupported R ecosystem content language")
 
 
-def approved_workflow_locales(raw: str, native_english_approved: bool) -> list[str]:
+def approved_workflow_locales(raw: str) -> list[str]:
     requested = list(dict.fromkeys(normalize_language(value) for value in raw.split(",") if value.strip()))
     if "ko" in requested or len(requested) > 2:
         raise SystemExit("additional R ecosystem locale export must be one or two non-Korean locales")
-    return [language for language in requested if language != "en" or native_english_approved]
+    return requested
 
 
 def normalize_path(value: str) -> str:

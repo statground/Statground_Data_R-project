@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The public language menu has 23 entries; Korean is owned by the existing
@@ -65,6 +66,7 @@ func runMastodonLocale(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("mastodon-locale", flag.ExitOnError)
 	rawLocales := fs.String("locales", envString("MASTODON_EXTRA_LOCALES", ""), "one or two comma-separated target locales")
 	limit := fs.Int("limit", envInt("MASTODON_EXTRA_LOCALE_LIMIT", 2), "maximum current source rows per locale (1-100)")
+	maxInputChars := fs.Int("max-input-chars", envInt("MASTODON_EXTRA_LOCALE_MAX_INPUT_CHARS", 6000), "maximum source characters sent for one locale translation (1-12000)")
 	model := fs.String("translation-model", envString("MASTODON_TRANSLATION_MODEL", envString("RBLOGGER_TRANSLATION_MODEL", "google/gemini-2.0-flash-exp:free")), "AI model for non-English locales")
 	dryRun := fs.Bool("dry-run", envBool("DRY_RUN", false), "read and translate without database writes")
 	fs.Parse(args)
@@ -74,6 +76,9 @@ func runMastodonLocale(ctx context.Context, args []string) error {
 	}
 	if *limit < 1 || *limit > 100 {
 		return errors.New("Mastodon locale limit must be 1-100")
+	}
+	if *maxInputChars < 1 || *maxInputChars > 12000 {
+		return errors.New("Mastodon locale input limit must be 1-12000 characters")
 	}
 	pub := newPublisher(defaultWebRTopic, "statground-mastodon-locale-go-collector", *dryRun)
 	if !pub.usesClickHouse() || pub.usesKafka() {
@@ -97,7 +102,7 @@ func runMastodonLocale(ctx context.Context, args []string) error {
 		return err
 	}
 	for _, locale := range locales {
-		rows, err := cfg.queryJSONEachRow(mastodonLocaleCandidatesSQL(locale, *limit))
+		rows, err := cfg.queryJSONEachRow(mastodonLocaleCandidatesSQL(locale, *limit, *maxInputChars))
 		if err != nil {
 			return fmt.Errorf("Mastodon locale candidate read failed locale=%s: %w", locale, err)
 		}
@@ -107,6 +112,9 @@ func runMastodonLocale(ctx context.Context, args []string) error {
 			candidate, err := mastodonLocaleCandidateFromRow(row)
 			if err != nil {
 				return err
+			}
+			if utf8.RuneCountInString(candidate.ContentText) > *maxInputChars {
+				return errors.New("Mastodon locale candidate exceeds input limit")
 			}
 			title, content, err := translateMastodonLocale(ai, *model, candidate, locale)
 			if err != nil {
@@ -215,7 +223,7 @@ func mastodonLocaleRawSQL(uuidFilter string) string {
  WHERE instance_host = 'fosstodon.org' AND account_acct = 'R_Foundation'` + uuidFilter
 }
 
-func mastodonLocaleCandidatesSQL(locale string, limit int) string {
+func mastodonLocaleCandidatesSQL(locale string, limit, maxInputChars int) string {
 	return fmt.Sprintf(`SELECT r.uuid, r.status_url, r.content_text, r.status_created_at, r.source_version, r.source_sha256
 FROM (%s) AS r
 LEFT JOIN
@@ -226,14 +234,15 @@ LEFT JOIN
    WHERE language_code = '%s'
 ) AS b ON b.uuid = r.uuid AND b.rn = 1
 WHERE r.rn = 1 AND r.active = 1 AND r.visibility IN ('public', 'unlisted')
+  AND lengthUTF8(r.content_text) <= %d
   AND r.language_code = 'en' AND notEmpty(r.content_text)
-  AND (b.uuid IS NULL OR coalesce(b.active, 0) != 1
-       OR JSONExtractString(toString(b.created_log), 'target_language') != '%s'
-       OR JSONExtractString(toString(b.created_log), 'source_sha256') != r.source_sha256)
+  AND (b.uuid IS NULL OR (coalesce(b.active, 0) = 1
+       AND (JSONExtractString(toString(b.created_log), 'target_language') != '%s'
+       OR JSONExtractString(toString(b.created_log), 'source_sha256') != r.source_sha256)))
 ORDER BY r.status_created_at DESC, r.uuid ASC
 LIMIT %d
 SETTINGS join_use_nulls = 1, max_execution_time = 30, max_threads = 2
-FORMAT JSONEachRow`, mastodonLocaleRawSQL(""), locale, locale, limit)
+FORMAT JSONEachRow`, mastodonLocaleRawSQL(""), locale, maxInputChars, locale, limit)
 }
 
 func mastodonLocaleUUIDFilter(expected map[string]string) (string, error) {
