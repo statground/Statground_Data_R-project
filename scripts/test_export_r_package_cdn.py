@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -16,13 +17,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from export_r_ecosystem_cdn import derive_key, write_json_atomic  # noqa: E402
+from export_r_ecosystem_cdn import SUPPORTED_LANGUAGES, derive_key, write_json_atomic  # noqa: E402
 from export_r_package_cdn import (  # noqa: E402
     PACKAGE_REGISTRY_SCHEMA,
     build_package_registry_v2,
     build_package_detail_documents_from_spool,
     document_metadata,
     filter_package_detail_sql,
+    main as package_export_main,
     package_detail_queries,
     package_detail_spool_path,
     package_v2_shard_id,
@@ -49,6 +51,15 @@ def decrypt_document(document: dict[str, object], key: bytes, path: str) -> dict
 
 
 class PackageRegistryV2Tests(unittest.TestCase):
+    def test_untranslated_locale_cannot_be_published_as_korean_content(self) -> None:
+        for language in SUPPORTED_LANGUAGES:
+            if language == "ko":
+                continue
+            with self.subTest(language=language):
+                with patch.object(sys, "argv", ["export_r_package_cdn.py", "--language", language, "--env", "/missing"]):
+                    with self.assertRaisesRegex(SystemExit, "no verified localized source rows"):
+                        package_export_main()
+
     def setUp(self) -> None:
         self.key = derive_key("unit-test-package-registry-v2-secret")
         self.packages = {

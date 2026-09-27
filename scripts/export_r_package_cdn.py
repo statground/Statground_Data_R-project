@@ -142,9 +142,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
+    language = normalize_language(args.language)
+    if language != "ko":
+        raise SystemExit("R package CDN export has no verified localized source rows; only ko may be published")
     repo_root = Path.cwd()
     env = package_export_env(load_env(repo_root / args.env))
-    language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
