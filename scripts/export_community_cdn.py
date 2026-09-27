@@ -38,6 +38,13 @@ MANIFEST_SCHEMA = "web-r.community.manifest.plain.v1"
 GENERATION_MANIFEST_SCHEMA = "web-r.community.manifest.plain.v2"
 GENERATION_PROOF_SCHEMA = "web-r.community.generation-proof.v2"
 CANDIDATE_PROJECTION_SCHEMA = "web-r.community.candidate-cdn-projection.v1"
+GENERATION_ROW_FIELDS = frozenset({
+    "uuid", "source", "category", "category_url", "category_url_sub",
+    "source_type", "source_id", "source_name", "platform", "title", "content",
+    "user_uuid", "user_nickname", "user_role", "url", "deduped_item_count",
+    "published_at", "updated_at", "withdrawal_revision",
+    "account_authority_revision", "category_authority_revision",
+})
 CONTENT_SCHEMA = "web-r.community.content.plain.v1"
 WORKSHOP_MANIFEST_SCHEMA = "web-r.community.workshop.manifest.plain.v1"
 WORKSHOP_CONTENT_SCHEMA = "web-r.community.workshop.content.plain.v1"
@@ -99,6 +106,10 @@ def main() -> int:
     )
     parser.add_argument("--candidate-receipt", type=Path, help="exact SQL loader receipt for --generation")
     parser.add_argument("--candidate-projection", type=Path, help="owner-only SQL candidate CDN projection for --generation")
+    parser.add_argument(
+        "--generation-rows-file", type=Path,
+        help="owner-only exact public-serving JSONEachRow output from the SQL publisher principal",
+    )
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
@@ -114,18 +125,21 @@ def main() -> int:
         candidate_receipt = load_candidate_json(args.candidate_receipt, 64 * 1024)
         candidate_projection = load_candidate_json(args.candidate_projection, 16 * 1024 * 1024, owner_only=True)
     else:
-        if args.candidate_receipt or args.candidate_projection:
+        if args.candidate_receipt or args.candidate_projection or args.generation_rows_file:
             raise SystemExit("candidate evidence requires --generation")
         candidate_receipt = None
         candidate_projection = None
 
     try:
         if generation:
-            generation_rows = fetch_json_rows(
-                env,
-                generation_community_sql(generation, args.limit),
-                query_name="community_generation",
-            )
+            if args.generation_rows_file:
+                generation_rows = load_generation_rows_file(args.generation_rows_file)
+            else:
+                generation_rows = fetch_json_rows(
+                    env,
+                    generation_community_sql(generation, args.limit),
+                    query_name="community_generation",
+                )
             digest_rows: list[dict[str, Any]] = []
             notebook_rows: list[dict[str, Any]] = []
         else:
@@ -592,6 +606,61 @@ def load_candidate_json(path: Path, max_bytes: int, *, owner_only: bool = False)
         return value
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise SystemExit(f"candidate evidence is unavailable or invalid: {exc}") from exc
+
+
+def load_generation_rows_file(path: Path) -> list[dict[str, Any]]:
+    """Read only public-serving columns from an owner-only native query result.
+
+    The candidate receipt and per-UUID projection are still checked before any
+    CDN write. This input avoids passing the offline publisher password to the
+    HTTP client used for the unrelated workshop export.
+    """
+    max_bytes = 64 * 1024 * 1024
+    try:
+        directory = path.parent
+        directory_info = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.geteuid()
+            or directory_info.st_mode & 0o077
+        ):
+            raise ValueError("generation rows directory must be owner-only")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_size <= 0
+                or metadata.st_size > max_bytes
+            ):
+                raise ValueError("generation rows file must be owner-only and bounded")
+            body = source.read(max_bytes + 1)
+        if len(body) > max_bytes or not body.endswith(b"\n"):
+            raise ValueError("generation rows file is incomplete or too large")
+        rows: list[dict[str, Any]] = []
+        for line in body.splitlines():
+            if not line or len(rows) >= 100000:
+                raise ValueError("generation rows file has an invalid row count")
+            row = json.loads(line.decode("utf-8"), object_pairs_hook=strict_json_object)
+            if not isinstance(row, dict) or set(row) != GENERATION_ROW_FIELDS:
+                raise ValueError("generation row contains missing or private fields")
+            for key, value in row.items():
+                if key in {
+                    "deduped_item_count", "withdrawal_revision",
+                    "account_authority_revision", "category_authority_revision",
+                }:
+                    if type(value) is not int and not (isinstance(value, str) and value.isdecimal()):
+                        raise ValueError("generation row contains an invalid count or revision")
+                elif not isinstance(value, str):
+                    raise ValueError("generation row contains an invalid public string")
+            rows.append(row)
+        if not rows:
+            raise ValueError("generation rows file is empty")
+        return rows
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"generation rows input is unavailable or invalid: {exc}") from exc
 
 
 def candidate_projection_json_bytes(value: Any) -> bytes:
