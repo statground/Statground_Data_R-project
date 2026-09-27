@@ -784,14 +784,55 @@ jobs:
           R_ECOSYSTEM_CDN_HTTP_TIMEOUT: ${{ vars.R_ECOSYSTEM_CDN_HTTP_TIMEOUT || '150' }}
           R_ECOSYSTEM_CDN_CH_MAX_THREADS: ${{ vars.R_ECOSYSTEM_CDN_CH_MAX_THREADS || '2' }}
           R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
+          R_ECOSYSTEM_EXPORT_LOCALES: ${{ vars.RBLOGGER_LOCALE_BACKFILL_APPROVED == 'true' && vars.R_ECOSYSTEM_EXPORT_LOCALES || '' }}
           R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME: ${{ vars.R_PACKAGE_CDN_CH_MAX_EXECUTION_TIME || '120' }}
           R_PACKAGE_CDN_HTTP_TIMEOUT: ${{ vars.R_PACKAGE_CDN_HTTP_TIMEOUT || '150' }}
           R_PACKAGE_CDN_CH_MAX_THREADS: ${{ vars.R_PACKAGE_CDN_CH_MAX_THREADS || '2' }}
           R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN: ${{ vars.R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN || 'false' }}
         run: |
           python scripts/test_export_r_package_cdn.py
+          python scripts/test_export_r_ecosystem_cdn.py
           python scripts/test_record_web_r_cdn_release.py
           python scripts/export_r_ecosystem_cdn.py --cdn-root web-r_CDN2_contents --language ko > /tmp/r_ecosystem_export.json
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          from scripts.export_r_ecosystem_cdn import normalize_language
+
+          reports = {}
+          ko_report = json.loads(Path('/tmp/r_ecosystem_export.json').read_text(encoding='utf-8'))
+          requested = [normalize_language(value) for value in os.environ.get('R_ECOSYSTEM_EXPORT_LOCALES', '').split(',') if value.strip()]
+          requested = list(dict.fromkeys(requested))
+          if 'ko' in requested or len(requested) > 2:
+              raise SystemExit('additional R ecosystem locale export must be one or two non-Korean locales')
+          if not ko_report.get('export_deferred'):
+              for language in requested:
+                  result = subprocess.run(
+                      [sys.executable, 'scripts/export_r_ecosystem_cdn.py', '--cdn-root', 'web-r_CDN2_contents', '--language', language],
+                      check=True, capture_output=True, text=True,
+                  )
+                  report = json.loads(result.stdout.strip())
+                  if report.get('export_deferred') or report.get('skipped'):
+                      continue
+                  manifest = f'contents/{language}/index.json'
+                  if not (Path('web-r_CDN2_contents') / manifest).is_file():
+                      raise SystemExit('R ecosystem locale manifest was not written')
+                  reports[language] = {
+                      'schema': 'web-r.content-cdn.export-report.v2',
+                      'scope': 'web-r-content',
+                      'language': language,
+                      'r_ecosystem_export': report['export'],
+                      'manifest_paths': [manifest],
+                      'item_count': report['export'],
+                  }
+          Path('/tmp/r_ecosystem_locale_reports.json').write_text(json.dumps(reports, sort_keys=True), encoding='utf-8')
+          print(json.dumps({'locale_exports': {key: value['item_count'] for key, value in reports.items()}}, sort_keys=True))
+          PY
           previous_package_commit="$(git -C web-r_CDN2_packages rev-parse HEAD)"
           python scripts/export_r_package_cdn.py \
             --cdn-root web-r_CDN2_packages \
@@ -972,6 +1013,28 @@ jobs:
               --language ko > /tmp/web_r_cdn_record_contents.json
             cat /tmp/web_r_cdn_record_contents.json
           fi
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          reports = json.loads(Path('/tmp/r_ecosystem_locale_reports.json').read_text(encoding='utf-8'))
+          statuses = {}
+          for language, report in reports.items():
+              path = Path('/tmp') / f'r_ecosystem_locale_report_{language}.json'
+              path.write_text(json.dumps(report, sort_keys=True), encoding='utf-8')
+              result = subprocess.run([
+                  sys.executable, 'scripts/record_web_r_cdn_release.py',
+                  '--report', str(path),
+                  '--commit-sha', '${{ steps.web_r_cdn2_contents.outputs.commit_sha }}',
+                  '--repo', 'statground/web-r_CDN2_contents',
+                  '--branch', 'main', '--scope', 'web-r-content', '--language', language,
+              ], check=True, capture_output=True, text=True)
+              statuses[language] = json.loads(result.stdout.strip())
+          Path('/tmp/r_ecosystem_locale_record_status.json').write_text(json.dumps(statuses, sort_keys=True), encoding='utf-8')
+          print(json.dumps({'locale_records': {key: 'deferred' if value.get('record_deferred') else 'recorded' for key, value in statuses.items()}}, sort_keys=True))
+          PY
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") else 1)'; then
             echo "Web-R CDN2 package export was deferred; keeping the existing package release pointer."
             printf '%s\n' '{"record_skipped":true,"reason":"export_deferred"}' > /tmp/web_r_cdn_record_packages.json
@@ -1011,6 +1074,25 @@ jobs:
               --commit-sha "${{ steps.web_r_cdn2_contents.outputs.commit_sha }}" \
               --manifest contents/ko/index.json
           fi
+          python - <<'PY'
+          import json
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          reports = json.loads(Path('/tmp/r_ecosystem_locale_reports.json').read_text(encoding='utf-8'))
+          statuses = json.loads(Path('/tmp/r_ecosystem_locale_record_status.json').read_text(encoding='utf-8'))
+          for language in reports:
+              if statuses.get(language, {}).get('record_deferred'):
+                  continue
+              subprocess.run([
+                  sys.executable, 'scripts/verify_web_r_cdn_release.py',
+                  '--scope', 'web-r-content', '--language', language,
+                  '--repo', 'statground/web-r_CDN2_contents',
+                  '--commit-sha', '${{ steps.web_r_cdn2_contents.outputs.commit_sha }}',
+                  '--manifest', f'contents/{language}/index.json',
+              ], check=True)
+          PY
           if python -c 'import json, pathlib, sys; report=json.loads(pathlib.Path("web_r_cdn2_packages_export_report.json").read_text(encoding="utf-8")); status_path=pathlib.Path("/tmp/web_r_cdn_record_packages.json"); status=json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}; sys.exit(0 if (report.get("r_package") or {}).get("export_deferred") or status.get("record_deferred") or status.get("record_skipped") else 1)'; then
             echo "Web-R CDN2 package release record was deferred or skipped; skipping package release pointer verification."
           else

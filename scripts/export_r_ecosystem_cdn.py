@@ -34,6 +34,11 @@ MANIFEST_SCHEMA = "web-r.r-ecosystem.manifest.plain.v1"
 KEY_PURPOSE = "web-r:r-ecosystem-content:v1"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
+SUPPORTED_LANGUAGES = (
+    "ko", "en", "ja", "zh-Hans", "zh-Hant", "es", "fr", "de", "pt-BR",
+    "ru", "id", "vi", "th", "ms", "fil", "hi", "ar", "it", "nl",
+    "pl", "sv", "tr", "uk",
+)
 TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
     "TIMEOUT_EXCEEDED",
     "NOT_INITIALIZED",
@@ -89,8 +94,11 @@ def main() -> int:
     cdn_root = (repo_root / args.cdn_root).resolve()
 
     try:
-        community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
-        article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
+        # Community source rows currently have only the Korean publication
+        # contract. Keep them out of other language manifests until translated
+        # source rows exist, rather than relabeling their Korean text.
+        community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community") if language == "ko" else []
+        article_rows = fetch_json_rows(env, article_sql(args.limit, language), query_name="r_ecosystem_article")
     except ClickHouseExportError as exc:
         if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
@@ -104,6 +112,13 @@ def main() -> int:
     payloads: dict[str, dict[str, Any]] = {}
     manifest_items: dict[str, dict[str, str]] = {}
     duplicate_count = 0
+
+    # A new locale without any verified translations must not publish an
+    # empty manifest that would mask the still-available Korean catalog.
+    # Existing locale manifests may legitimately become empty on withdrawal.
+    if language != "ko" and not article_rows and not (cdn_root / f"contents/{language}/index.json").exists():
+        print(json.dumps({**export_result(0, 0, 0, 0), "skipped": "no_verified_locale_rows"}, ensure_ascii=False))
+        return 0
 
     for row in community_rows:
         uuid = normalize_uuid(row.get("item_uuid"))
@@ -629,13 +644,47 @@ SELECT external_id,
 """
 
 
-def article_sql(limit: int) -> str:
+def article_sql(limit: int, language: str = "ko") -> str:
+    language = source_language(language)
     suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    locale_guard = ""
+    locale_filter = "a.source IN ('rblogger', 'rproject')" if language == "ko" else "a.source = 'rblogger'"
+    title_expr = "a.title" if language == "ko" else "verified_locale.title"
+    content_expr = "a.content" if language == "ko" else "verified_locale.content"
+    if language != "ko":
+        # The additional-locale writer records the exact raw source hash in
+        # the board row. Only its latest active version may be published, and
+        # a newer raw withdrawal or edit invalidates an older translation.
+        locale_guard = f"""
+  INNER JOIN
+  (
+      SELECT b.uuid, b.title, b.content
+      FROM
+      (
+          SELECT uuid, active, created_log, title, content,
+                 row_number() OVER (PARTITION BY uuid ORDER BY version_at DESC, created_at DESC) AS rn
+          FROM Data_R_Community_Service.r_blogger_board
+          WHERE language_code = '{language}'
+      ) AS b
+      INNER JOIN
+      (
+          SELECT uuid, active, title, content,
+                 row_number() OVER (PARTITION BY uuid ORDER BY coalesce(updated_at, created_at) DESC, created_at DESC) AS rn
+          FROM Data_R_Community_Raw.r_blogger_article_raw
+          WHERE language_code = 'en'
+      ) AS r ON r.uuid = b.uuid
+      WHERE b.rn = 1 AND r.rn = 1
+        AND coalesce(b.active, 0) = 1 AND coalesce(r.active, 0) = 1
+        AND notEmpty(ifNull(b.title, '')) AND notEmpty(ifNull(b.content, ''))
+        AND JSONExtractString(toString(b.created_log), 'target_language') = '{language}'
+        AND JSONExtractString(toString(b.created_log), 'source_sha256') =
+            lower(hex(SHA256(concat(ifNull(r.title, ''), unhex('0A'), ifNull(r.content, '')))))
+  ) AS verified_locale ON verified_locale.uuid = a.uuid"""
     return f"""
 SELECT a.source,
        toString(a.uuid) AS uuid,
-       coalesce(a.title, '') AS title,
-       coalesce(a.content, '') AS content,
+       coalesce({title_expr}, '') AS title,
+       coalesce({content_expr}, '') AS content,
        if(a.source = 'rblogger',
           coalesce(
              nullIf(if(positionCaseInsensitive(coalesce(raw.canonical_url, ''), 'r-bloggers.com') > 0, coalesce(raw.canonical_url, ''), ''), ''),
@@ -673,8 +722,11 @@ SELECT a.source,
        WHERE active = 1
        GROUP BY uuid
   ) raw ON raw.uuid = a.uuid
- WHERE a.source IN ('rblogger', 'rproject')
-   AND a.language_code = 'ko'
+{locale_guard}
+ WHERE {locale_filter}
+   AND a.language_code = '{language}'
+   AND notEmpty(coalesce({title_expr}, ''))
+   AND notEmpty(coalesce({content_expr}, ''))
  ORDER BY if(a.source = 'rblogger' AND rb.article_dt_utc IS NOT NULL, toUnixTimestamp(rb.article_dt_utc), toUnixTimestamp(a.created_at)) DESC,
           a.created_at DESC{suffix}
  FORMAT JSONEachRow
@@ -697,8 +749,15 @@ def normalize_uuid(value: Any) -> str:
 
 
 def normalize_language(value: str) -> str:
-    value = (value or "ko").strip().lower()
-    return value or "ko"
+    return source_language(value).lower()
+
+
+def source_language(value: str) -> str:
+    value = (value or "ko").strip()
+    for language in SUPPORTED_LANGUAGES:
+        if language.lower() == value.lower():
+            return language
+    raise SystemExit("unsupported R ecosystem content language")
 
 
 def normalize_path(value: str) -> str:
