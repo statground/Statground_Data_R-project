@@ -189,7 +189,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertNotIn("secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn(
-            "if: steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true'",
+            "if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')",
             workflow,
         )
         self.assertIn('case "${{ steps.opts.outputs.scope }}" in', workflow)

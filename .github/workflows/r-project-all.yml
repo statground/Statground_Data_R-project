@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, community-digest, notebook, or cdn"
+        description: "Worker scope: all, package, social, community, community-digest, notebook, cdn, or publication"
         required: false
         type: string
         default: "all"
@@ -66,7 +66,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, community-digest, notebook, or cdn"
+        description: "Worker scope: all, package, social, community, community-digest, notebook, cdn, or publication"
         required: false
         default: "all"
       r_package_job:
@@ -129,7 +129,7 @@ env:
   CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: "15"
 
 concurrency:
-  group: ${{ (inputs.scope == 'all' || inputs.scope == 'cdn') && 'r-project-publication' || format('r-project-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
+  group: ${{ (inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication') && 'r-project-publication' || format('r-project-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
   cancel-in-progress: false
 
 jobs:
@@ -144,7 +144,7 @@ jobs:
         run: |
           scope="${{ inputs.scope || 'all' }}"
           case "$scope" in
-            all|package|social|community|community-digest|notebook|cdn) ;;
+            all|package|social|community|community-digest|notebook|cdn|publication) ;;
             *)
               echo "Unsupported R Project workflow scope: $scope"
               exit 1
@@ -172,7 +172,7 @@ jobs:
           cache: true
 
       - uses: actions/setup-python@v6
-        if: steps.opts.outputs.scope != 'package'
+        if: steps.opts.outputs.scope != 'package' && steps.opts.outputs.scope != 'publication'
         with:
           python-version: "3.12"
           cache: pip
@@ -212,6 +212,7 @@ jobs:
             --output /tmp/webr_notebook_style_validation.json
 
       - name: Validate ClickHouse settings
+        if: steps.opts.outputs.scope != 'publication'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
@@ -226,7 +227,7 @@ jobs:
           fi
 
       - name: Gate ClickHouse writes on storage pressure
-        if: steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true'
+        if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -1192,10 +1193,8 @@ jobs:
   community-publication:
     name: Publish exact Web-R community generation
     needs: collect
-    if: inputs.scope == 'all' || inputs.scope == 'cdn'
-    runs-on:
-      group: statground-internal
-      labels: [self-hosted, linux, x64]
+    if: inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'
+    runs-on: [self-hosted, linux, x64, webr-community-publisher]
     environment: web-r-community-publication
     timeout-minutes: 45
     env:
