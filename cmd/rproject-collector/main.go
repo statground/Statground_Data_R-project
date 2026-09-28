@@ -2648,8 +2648,12 @@ func runYouTube(ctx context.Context, args []string) error {
 	videoLimit := fs.Int("video-limit", envInt("R_YOUTUBE_VIDEO_LIMIT", 30), "YouTube video metadata enrichment limit")
 	transcriptLimit := fs.Int("transcript-limit", envInt("R_YOUTUBE_TRANSCRIPT_VIDEO_LIMIT", 10), "YouTube transcript enrichment video limit")
 	commentLimit := fs.Int("comment-limit", envInt("R_YOUTUBE_COMMENT_VIDEO_LIMIT", 10), "YouTube comment enrichment video limit")
-	backfillLimit := fs.Int("backfill-limit", envInt("R_YOUTUBE_BACKFILL_LIMIT", 30), "existing weak current video metadata backfill limit")
+	backfillLimit := fs.Int("backfill-limit", envInt("R_YOUTUBE_BACKFILL_LIMIT", 30), "oldest current video availability and metadata refresh limit")
+	refreshVideoID := fs.String("refresh-video-id", "", "refresh only this current YouTube video (backfill-metadata job only)")
 	fs.Parse(args)
+	if *refreshVideoID != "" && (*job != "backfill-metadata" || !youtubeVideoIDRE.MatchString(*refreshVideoID)) {
+		return errors.New("refresh-video-id requires backfill-metadata and one valid 11-character YouTube video id")
+	}
 
 	pub := newPublisher(*topic, "statground-ryoutube-go-collector", *dryRun)
 	if err := pub.validate(ctx); err != nil {
@@ -2658,7 +2662,7 @@ func runYouTube(ctx context.Context, args []string) error {
 	jobs := expandJobs(*job, []string{"seeds", "pages", "search", "links", "videos", "transcripts", "comments", "backfill-metadata"})
 	total := 0
 	for _, currentJob := range jobs {
-		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit, *transcriptLimit, *commentLimit)
+		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit, *transcriptLimit, *commentLimit, *refreshVideoID)
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
@@ -4953,7 +4957,7 @@ func collectBibliometricMentions(records []cranRecord, limit int) ([]genericEven
 	return events, nil
 }
 
-func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLimit, transcriptLimit, commentLimit int) ([]genericEvent, error) {
+func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLimit, transcriptLimit, commentLimit int, refreshVideoID string) ([]genericEvent, error) {
 	var seeds []map[string]any
 	var err error
 	if job != "backfill-metadata" {
@@ -4978,7 +4982,7 @@ func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLim
 	case "comments":
 		return youtubeCommentEvents(seeds, commentLimit), nil
 	case "backfill-metadata":
-		return youtubeMetadataBackfillEvents(backfillLimit)
+		return youtubeMetadataBackfillEvents(backfillLimit, refreshVideoID)
 	default:
 		return nil, fmt.Errorf("unknown youtube job %q", job)
 	}
@@ -5067,7 +5071,7 @@ FORMAT JSONEachRow`, queryLimit),
 	return firstNAnyMaps(rows, queryLimit), nil
 }
 
-func loadYouTubeMetadataBackfillRows(limit int) ([]map[string]any, error) {
+func loadYouTubeMetadataBackfillRows(limit int, videoID string) ([]map[string]any, error) {
 	cfg, err := newClickHouseQueryConfig()
 	if err != nil {
 		return nil, err
@@ -5077,6 +5081,13 @@ func loadYouTubeMetadataBackfillRows(limit int) ([]map[string]any, error) {
 		queryLimit = envInt("R_YOUTUBE_BACKFILL_QUERY_LIMIT", 100)
 	}
 	queryLimit = maxInt(1, queryLimit)
+	videoFilter := ""
+	if videoID != "" {
+		if !youtubeVideoIDRE.MatchString(videoID) {
+			return nil, errors.New("invalid YouTube refresh video id")
+		}
+		videoFilter = " AND youtube_video_id = '" + videoID + "'"
+	}
 	query := fmt.Sprintf(`SELECT
     youtube_video_id,
     source_tag,
@@ -5127,27 +5138,28 @@ FROM
             youtube_video_id,
             source_tag,
             uuid_article,
-            argMax(toString(uuid), collected_at) AS stable_uuid,
-            argMax(canonical_url, collected_at) AS canonical_url,
-            argMax(video_title, collected_at) AS video_title,
-            argMax(video_description, collected_at) AS video_description,
-            argMax(thumbnail_url, collected_at) AS thumbnail_url,
-            argMax(youtube_channel_id, collected_at) AS youtube_channel_id,
-            argMax(channel_title, collected_at) AS channel_title,
-            ifNull(toString(argMax(published_at, collected_at)), '') AS published_at,
-            toString(ifNull(argMax(duration_seconds, collected_at), 0)) AS duration_seconds,
-            toString(argMax(view_count, collected_at)) AS view_count,
-            toString(argMax(like_count, collected_at)) AS like_count,
-            toString(argMax(comment_count, collected_at)) AS comment_count,
-            toString(argMax(caption_available, collected_at)) AS caption_available,
-            argMax(default_audio_language, collected_at) AS default_audio_language,
-            argMax(default_language, collected_at) AS default_language,
-            argMax(tags_json, collected_at) AS tags_json,
-            argMax(source_method, collected_at) AS source_method,
-            argMax(source_category, collected_at) AS source_category,
-            argMax(source_confidence, collected_at) AS source_confidence,
-            argMax(language_code, collected_at) AS language_code,
-            argMax(payload_json, collected_at) AS payload_json,
+            argMax(toString(uuid), snapshot_version) AS stable_uuid,
+            argMax(canonical_url, snapshot_version) AS canonical_url,
+            argMax(video_title, snapshot_version) AS video_title,
+            argMax(video_description, snapshot_version) AS video_description,
+            argMax(thumbnail_url, snapshot_version) AS thumbnail_url,
+            argMax(youtube_channel_id, snapshot_version) AS youtube_channel_id,
+            argMax(channel_title, snapshot_version) AS channel_title,
+            ifNull(toString(argMax(tuple(published_at), snapshot_version).1), '') AS published_at,
+            toString(ifNull(argMax(tuple(duration_seconds), snapshot_version).1, 0)) AS duration_seconds,
+            toString(argMax(view_count, snapshot_version)) AS view_count,
+            toString(argMax(like_count, snapshot_version)) AS like_count,
+            toString(argMax(comment_count, snapshot_version)) AS comment_count,
+            toString(argMax(caption_available, snapshot_version)) AS caption_available,
+            argMax(default_audio_language, snapshot_version) AS default_audio_language,
+            argMax(default_language, snapshot_version) AS default_language,
+            argMax(tags_json, snapshot_version) AS tags_json,
+            argMax(source_method, snapshot_version) AS source_method,
+            argMax(source_category, snapshot_version) AS source_category,
+            argMax(source_confidence, snapshot_version) AS source_confidence,
+            argMax(language_code, snapshot_version) AS language_code,
+            argMax(payload_json, snapshot_version) AS payload_json,
+            argMax(active, snapshot_version) AS current_active,
             max(collected_at) AS last_collected_at
         FROM
         (
@@ -5176,18 +5188,34 @@ FROM
                 source_confidence,
                 language_code,
                 payload_json,
-                collected_at
+                active,
+                collected_at,
+                tuple(collected_at, active = 0, toString(uuid), payload_json) AS snapshot_version
             FROM Data_R_Community_Service.r_youtube_video_current
-            WHERE active = 1
-              AND notEmpty(youtube_video_id)
+            WHERE notEmpty(youtube_video_id)%s
         )
         GROUP BY youtube_video_id, source_tag, uuid_article
     )
 )
-WHERE metadata_quality_score > 0
-ORDER BY metadata_quality_score DESC, last_collected_at ASC, youtube_video_id
+LEFT JOIN
+(
+    SELECT
+        JSONExtractString(payload, 'youtube_video_id') AS checked_video_id,
+        max(collected_at) AS last_checked_at
+    FROM Data_R_Community_Raw.r_youtube_event_raw
+    WHERE event_type = 'r.youtube.availability.check.v1'
+      AND collected_at >= now() - INTERVAL 14 DAY
+    GROUP BY checked_video_id
+) AS availability ON youtube_video_id = checked_video_id
+WHERE current_active = 1
+ORDER BY greatest(last_collected_at, ifNull(last_checked_at, last_collected_at)) ASC,
+    metadata_quality_score DESC, youtube_video_id
 LIMIT %d
-FORMAT JSONEachRow`, youtubeBoilerplateDescription, queryLimit)
+SETTINGS optimize_skip_unused_shards = 0,
+    optimize_distributed_group_by_sharding_key = 0,
+    distributed_group_by_no_merge = 0,
+    skip_unavailable_shards = 0
+FORMAT JSONEachRow`, youtubeBoilerplateDescription, videoFilter, queryLimit)
 	return cfg.queryJSONEachRow(query)
 }
 
@@ -5234,10 +5262,11 @@ func youtubePageEvents(seeds []map[string]any, limit int) []genericEvent {
 				"source_tag":             "r_project_ecosystem_youtube",
 				"source_category":        stringAny(seedPayload["category"]),
 				"source_confidence":      firstNonEmpty(stringAny(seedPayload["source_confidence"]), "html_discovered"),
-				"collection_status":      "collected",
+				"active":                 "0",
+				"collection_status":      "candidate",
 			}
 			finalizeYouTubeVideoPayload(payload)
-			events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_public_html", targetURL, "R-YouTube", "", "", "", payload))
+			events = append(events, newGenericEvent("r.youtube.video.candidate.v1", "youtube_public_html", targetURL, "R-YouTube", "", "", "", payload))
 		}
 	}
 	return events
@@ -5497,11 +5526,15 @@ func youtubeCommentPayload(videoID, threadID, parentID string, comment map[strin
 	}
 }
 
-func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
-	rows, err := loadYouTubeMetadataBackfillRows(limit)
+func youtubeMetadataBackfillEvents(limit int, videoID string) ([]genericEvent, error) {
+	rows, err := loadYouTubeMetadataBackfillRows(limit, videoID)
 	if err != nil {
 		return nil, err
 	}
+	return youtubeMetadataRefreshEvents(rows, fetchYouTubeVideoSnapshotPayload), nil
+}
+
+func youtubeMetadataRefreshEvents(rows []map[string]any, fetch func(string, string, map[string]any) (map[string]any, error)) []genericEvent {
 	events := make([]genericEvent, 0, len(rows)*3)
 	for _, row := range rows {
 		videoID := stringAny(row["youtube_video_id"])
@@ -5509,11 +5542,6 @@ func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 			continue
 		}
 		stableUUID := firstNonEmpty(stringAny(row["stable_uuid"]), stableYouTubeVideoUUID(videoID, stringAny(row["source_tag"]), stringAny(row["uuid_article"])))
-		currentPayload := currentYouTubeSnapshotPayload(row, stableUUID, "0")
-		deactivate := newGenericEvent("r.youtube.video.snapshot.v1", "youtube_metadata_refresh_backfill", stringAny(currentPayload["canonical_url"]), "R-YouTube", "", "", stringAny(currentPayload["published_at"]), currentPayload)
-		deactivate.CollectedAt = time.Now().UTC().Add(-2 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")
-		events = append(events, deactivate)
-
 		seed := map[string]any{
 			"title":             stringAny(row["video_title"]),
 			"url":               firstNonEmpty(stringAny(row["canonical_url"]), "https://www.youtube.com/watch?v="+videoID),
@@ -5526,8 +5554,19 @@ func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 			"uuid_article":      stringAny(row["uuid_article"]),
 			"source_code":       "current_video_refresh",
 		}
-		payload, err := fetchYouTubeVideoSnapshotPayload(videoID, stringAny(seed["url"]), seed)
+		payload, err := fetch(videoID, stringAny(seed["url"]), seed)
 		if err != nil {
+			reason, unavailable := youtubeUnavailableReason(err)
+			checkStatus := "unknown"
+			if unavailable {
+				checkStatus = "unavailable"
+				currentPayload := currentYouTubeSnapshotPayload(row, stableUUID, "0")
+				currentPayload["source_method"] = "youtube_availability_refresh"
+				currentPayload["collection_status"] = "unavailable"
+				currentPayload["availability_reason"] = reason
+				events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", "youtube_availability_refresh", stringAny(currentPayload["canonical_url"]), "R-YouTube", "", "", stringAny(currentPayload["published_at"]), currentPayload))
+			}
+			events = append(events, youtubeAvailabilityCheckEvent(videoID, stringAny(seed["url"]), checkStatus, reason))
 			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_metadata_refresh_backfill", stringAny(seed["url"]), "R-YouTube", "", err))
 			continue
 		}
@@ -5542,12 +5581,13 @@ func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 		payload["source_method"] = firstNonEmpty(stringAny(payload["source_method"]), "youtube_public_metadata") + "+current_metadata_refresh"
 		event := newGenericEvent("r.youtube.video.snapshot.v1", stringAny(payload["source_method"]), stringAny(payload["canonical_url"]), "R-YouTube", "", "", stringAny(payload["published_at"]), payload)
 		events = append(events, event)
+		events = append(events, youtubeAvailabilityCheckEvent(videoID, stringAny(payload["canonical_url"]), "available", ""))
 		if strings.Contains(stringAny(payload["source_method"]), "youtube_data_api") {
 			events = append(events, youtubeQuotaUsageEvent(stringAny(payload["canonical_url"])))
 		}
 		events = append(events, youtubeMetadataPackageMentionEvents(videoID, payload)...)
 	}
-	return events, nil
+	return events
 }
 
 func youtubeQuotaUsageEvent(sourceURL string) genericEvent {
@@ -5621,6 +5661,9 @@ func fetchYouTubeVideoSnapshotPayload(videoID, canonicalURL string, seed map[str
 			mergePayload(payload, apiPayload)
 			methods = append(methods, "youtube_data_api_v3_videos_list")
 		} else {
+			if _, unavailable := youtubeUnavailableReason(err); unavailable {
+				return payload, err
+			}
 			errs = append(errs, "youtube_data_api: "+err.Error())
 		}
 	}
@@ -5629,6 +5672,9 @@ func fetchYouTubeVideoSnapshotPayload(videoID, canonicalURL string, seed map[str
 			mergePayload(payload, dlPayload)
 			methods = append(methods, "yt_dlp_public_metadata_no_api")
 		} else {
+			if _, unavailable := youtubeUnavailableReason(err); unavailable {
+				return payload, err
+			}
 			errs = append(errs, "yt_dlp: "+err.Error())
 		}
 	}
@@ -5641,19 +5687,17 @@ func fetchYouTubeVideoSnapshotPayload(videoID, canonicalURL string, seed map[str
 		}
 	}
 	if needsYouTubeMetadataFill(payload) {
-		page := fetchWebsitePayload(canonicalURL)
-		if stringAny(page["collection_status"]) == "collected" {
-			mergePayload(payload, map[string]any{
-				"video_title":       stringAny(page["title"]),
-				"video_description": stringAny(page["description"]),
-				"thumbnail_url":     stringAny(page["og_image"]),
-			})
-			methods = append(methods, "youtube_public_html_meta")
-		} else if errCode := stringAny(page["error_code"]); errCode != "" {
-			errs = append(errs, "html: "+errCode)
+		if watchPayload, err := fetchYouTubeWatchVideoPayload(videoID, canonicalURL); err == nil {
+			mergePayload(payload, watchPayload)
+			methods = append(methods, "youtube_watch_playability_metadata")
+		} else {
+			if _, unavailable := youtubeUnavailableReason(err); unavailable {
+				return payload, err
+			}
+			errs = append(errs, "watch: "+err.Error())
 		}
 	}
-	if len(methods) == 0 {
+	if len(methods) == 0 || isBadYouTubeTitleValue(payload["video_title"]) {
 		payload["source_method"] = "youtube_metadata_unavailable"
 		payload["collection_status"] = "failed"
 		payload["metadata_errors_json"] = mustJSON(errs)
@@ -5754,17 +5798,29 @@ func fetchYouTubeAPIVideoPayload(videoID, apiKey string, seed map[string]any) (m
 	q.Set("key", apiKey)
 	var decoded map[string]any
 	if err := fetchJSON(endpoint+"?"+q.Encode(), &decoded); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("YouTube Data API metadata request failed (%T)", err)
+	}
+	if _, valid := decoded["items"].([]any); !valid {
+		return nil, errors.New("videos.list response has no valid items array")
 	}
 	items := anySlice(decoded["items"])
 	if len(items) == 0 {
-		return nil, errors.New("videos.list returned no items")
+		return nil, youtubeVideoUnavailableError{reason: "api_video_not_public"}
 	}
 	item := mapAny(items[0])
 	snippet := mapAny(item["snippet"])
 	content := mapAny(item["contentDetails"])
 	stats := mapAny(item["statistics"])
 	status := mapAny(item["status"])
+	if stringAny(item["id"]) != videoID {
+		return nil, errors.New("videos.list returned a different video id")
+	}
+	if err := youtubeAPIAvailabilityError(status); err != nil {
+		return nil, err
+	}
+	if isBadYouTubeTitleValue(snippet["title"]) {
+		return nil, errors.New("videos.list returned no usable video title")
+	}
 	thumbnails := mapAny(snippet["thumbnails"])
 	bestThumb, thumbJSON := bestYouTubeAPIThumbnail(thumbnails)
 	return map[string]any{
@@ -5824,13 +5880,22 @@ func fetchYTDLPVideoPayload(canonicalURL string, seed map[string]any) (map[strin
 		return nil, ctx.Err()
 	}
 	if err != nil {
+		if unavailable := youtubeYTDLPAvailabilityError(string(out)); unavailable != nil {
+			return nil, unavailable
+		}
 		return nil, fmt.Errorf("%w: %s", err, truncate(string(out), 800))
 	}
 	decoded, err := parseYTDLPPrintedMetadata(string(out))
 	if err != nil {
 		return nil, err
 	}
+	if stringAny(decoded["availability"]) == "private" {
+		return nil, youtubeVideoUnavailableError{reason: "ytdlp_private"}
+	}
 	videoID := firstNonEmpty(stringAny(decoded["id"]), parseYouTubeRef(canonicalURL)["parsed_video_id"])
+	if isBadYouTubeTitleValue(decoded["title"]) || videoID != parseYouTubeRef(canonicalURL)["parsed_video_id"] {
+		return nil, errors.New("yt-dlp returned no usable matching video metadata")
+	}
 	thumbnails := anySlice(decoded["thumbnails"])
 	language := firstNonEmpty(stringAny(decoded["language"]), stringAny(seed["language_hint"]))
 	return map[string]any{
@@ -6062,6 +6127,9 @@ func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {
 	var decoded map[string]any
 	if err := fetchJSON(sourceURL, &decoded); err != nil {
 		return nil, err
+	}
+	if isBadYouTubeTitleValue(decoded["title"]) {
+		return nil, errors.New("oEmbed returned no usable video title")
 	}
 	return map[string]any{
 		"video_title":   stringAny(decoded["title"]),
@@ -7538,7 +7606,7 @@ func isBadYouTubeTitleValue(value any) bool {
 	return isBadYouTubeMetadataValue(value) ||
 		lower == "youtube" ||
 		lower == "- youtube" ||
-		strings.HasPrefix(text, "YouTube video ")
+		youtubePlaceholderTitleRE.MatchString(text)
 }
 
 func cleanYouTubeTitleValue(value any) string {

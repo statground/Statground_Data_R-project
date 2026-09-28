@@ -1,0 +1,17 @@
+name: R YouTube Availability Refresh
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  availability:
+    uses: ./.github/workflows/r-project-all.yml
+    with:
+      scope: youtube-availability
+      r_youtube_job: backfill-metadata
+    secrets: inherit
