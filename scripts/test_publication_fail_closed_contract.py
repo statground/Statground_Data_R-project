@@ -28,7 +28,7 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertIn("workflow_dispatch:", RECONCILE_WORKFLOW)
         self.assertIn("uses: ./.github/workflows/r-project-all.yml", RECONCILE_WORKFLOW)
         self.assertIn("scope: publication", RECONCILE_WORKFLOW)
-        self.assertIn("all|package|social|community|community-digest|notebook|cdn|publication)", MAIN_WORKFLOW)
+        self.assertIn("all|package|social|youtube-availability|community|community-digest|notebook|cdn|publication)", MAIN_WORKFLOW)
         collect = MAIN_WORKFLOW.split("  collect:", 1)[1].split("  community-publication:", 1)[0]
         self.assertIn("if: steps.opts.outputs.scope != 'publication'", collect)
         self.assertIn("if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook'", collect)

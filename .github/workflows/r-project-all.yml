@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, community-digest, notebook, cdn, or publication"
+        description: "Worker scope: all, package, social, youtube-availability, community, community-digest, notebook, cdn, or publication"
         required: false
         type: string
         default: "all"
@@ -66,7 +66,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: "Worker scope: all, package, social, community, community-digest, notebook, cdn, or publication"
+        description: "Worker scope: all, package, social, youtube-availability, community, community-digest, notebook, cdn, or publication"
         required: false
         default: "all"
       r_package_job:
@@ -136,6 +136,11 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # All entrypoints that can update YouTube share one write owner, even
+    # when their workflow-level publication queues use different groups.
+    concurrency:
+      group: ${{ (inputs.scope == 'all' || inputs.scope == 'social' || inputs.scope == 'youtube-availability') && 'r-project-youtube-ingest' || format('r-project-collect-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
 
@@ -144,7 +149,7 @@ jobs:
         run: |
           scope="${{ inputs.scope || 'all' }}"
           case "$scope" in
-            all|package|social|community|community-digest|notebook|cdn|publication) ;;
+            all|package|social|youtube-availability|community|community-digest|notebook|cdn|publication) ;;
             *)
               echo "Unsupported R Project workflow scope: $scope"
               exit 1
@@ -178,7 +183,7 @@ jobs:
             --approved "$LOCALE_ROTATION_APPROVED" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v6
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'youtube-availability' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
         with:
           go-version-file: go.mod
           cache: true
@@ -196,7 +201,7 @@ jobs:
           node-version: "22"
 
       - name: Validate Go collector packages
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'package' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'youtube-availability' || steps.opts.outputs.scope == 'community' || steps.opts.outputs.scope == 'community-digest'
         run: go test ./cmd/rproject-collector ./cmd/rblogger-pipeline
 
       - name: Install Python collector dependencies
@@ -320,10 +325,17 @@ jobs:
           notebook_target="replica:webr_webr.notebook_local"
           cdn_target="replica:Data_R_Community_Service.web_r_cdn_release_log_local"
           outbox_target="local:Data_R_Community_Log.r_project_direct_insert_outbox"
+          youtube_availability_targets="replica:Data_R_Community_Raw.r_youtube_event_raw_local,\
+          replica:Data_R_Community_Raw.r_youtube_video_snapshot_raw_local,\
+          replica:Data_R_Community_Service.r_youtube_video_current_local,\
+          replica:Data_R_Community_Raw.r_youtube_package_mention_raw_local,\
+          replica:Data_R_Community_Service.r_youtube_package_mention_current_local,\
+          replica:Data_R_Community_Log.api_quota_ledger_local"
           case "${{ steps.opts.outputs.scope }}" in
             all) CLICKHOUSE_PRESSURE_GATE_TARGETS="${package_targets},${social_targets},${community_targets},${notebook_target},${cdn_target},${outbox_target}" ;;
             package) CLICKHOUSE_PRESSURE_GATE_TARGETS="${package_targets},${outbox_target}" ;;
             social) CLICKHOUSE_PRESSURE_GATE_TARGETS="${social_targets},${outbox_target}" ;;
+            youtube-availability) CLICKHOUSE_PRESSURE_GATE_TARGETS="${youtube_availability_targets},${outbox_target}" ;;
             community) CLICKHOUSE_PRESSURE_GATE_TARGETS="${community_targets},${outbox_target}" ;;
             community-digest) CLICKHOUSE_PRESSURE_GATE_TARGETS="${digest_target},${outbox_target}" ;;
             notebook) CLICKHOUSE_PRESSURE_GATE_TARGETS="${notebook_target}" ;;
@@ -385,7 +397,7 @@ jobs:
         run: go run ./cmd/rproject-collector package --job "$RPKG_JOB"
 
       - name: Collect public R YouTube signals
-        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
+        if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social' || steps.opts.outputs.scope == 'youtube-availability'
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -419,7 +431,16 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY || secrets.GOOGLE_YOUTUBE_API_KEY }}
           YOUTUBE_API_KEY_ALIAS: ${{ vars.YOUTUBE_API_KEY_ALIAS || 'default' }}
           YOUTUBE_DL_BIN: yt-dlp
-        run: go run ./cmd/rproject-collector youtube --job "$R_YOUTUBE_JOB"
+        run: |
+          if [ "${{ steps.opts.outputs.scope }}" = "youtube-availability" ]; then
+            export R_YOUTUBE_DISABLE_YTDLP=true
+            export HTTP_TIMEOUT=20
+            export R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN=false
+            export RPROJECT_DIRECT_OUTBOX_DRAIN_LIMIT=0
+            go run ./cmd/rproject-collector youtube --job backfill-metadata --backfill-limit 30
+          else
+            go run ./cmd/rproject-collector youtube --job "$R_YOUTUBE_JOB"
+          fi
 
       - name: Collect R-bloggers
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'social'
