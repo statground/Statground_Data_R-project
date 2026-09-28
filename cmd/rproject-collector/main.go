@@ -5196,7 +5196,7 @@ FROM
         )
         GROUP BY youtube_video_id, source_tag, uuid_article
     )
-)
+) AS current_videos
 LEFT JOIN
 (
     SELECT
@@ -5206,7 +5206,7 @@ LEFT JOIN
     WHERE event_type = 'r.youtube.availability.check.v1'
       AND collected_at >= now() - INTERVAL 14 DAY
     GROUP BY checked_video_id
-) AS availability ON youtube_video_id = checked_video_id
+) AS availability ON current_videos.youtube_video_id = availability.checked_video_id
 WHERE current_active = 1
 ORDER BY greatest(last_collected_at, ifNull(last_checked_at, last_collected_at)) ASC,
     metadata_quality_score DESC, youtube_video_id
