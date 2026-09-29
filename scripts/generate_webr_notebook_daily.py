@@ -2358,7 +2358,7 @@ def insert_json_each_row(env: dict[str, str], table: str, row: dict[str, Any]) -
         last_retryable = retryable
         if attempt >= attempts or not retryable:
             reason = short_clickhouse_reason(last_message)
-            if last_retryable and env_bool(env, "WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN", True):
+            if last_retryable and env_bool(env, "WEBR_NOTEBOOK_DAILY_PUBLISH_TRANSIENT_FAIL_OPEN", False):
                 print(f"[notebook] insert_deferred reason={reason}", file=sys.stderr)
                 return {"inserted": False, "insert_deferred": True, "insert_failure": reason}
             raise SystemExit(f"ClickHouse insert failed: {last_message}")

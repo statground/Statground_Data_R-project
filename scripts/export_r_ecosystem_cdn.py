@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import gzip
 import hashlib
 import hmac
@@ -23,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 
 from clickhouse_http import build_clickhouse_url
+from r_ecosystem_locales import SUPPORTED_LANGUAGES
 from workspace_paths import workspace_repo
 
 
@@ -34,6 +37,15 @@ MANIFEST_SCHEMA = "web-r.r-ecosystem.manifest.plain.v1"
 KEY_PURPOSE = "web-r:r-ecosystem-content:v1"
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
+HANGUL_RE = re.compile(r"[가-힣]")
+NATIVE_ENGLISH_COMMUNITY_SOURCE_TYPES = frozenset({
+    "official_release_notes", "official_blog", "official_journal", "organization_social", "organization_blog",
+})
+COMMUNITY_SOURCE_IDENTITY_FIELDS = (
+    "external_id", "source_id", "source_type", "platform", "source_url",
+    "canonical_url", "source_title", "source_summary", "author",
+    "source_language", "tags_json", "source_version",
+)
 TRANSIENT_CLICKHOUSE_EXPORT_CATEGORIES = {
     "TIMEOUT_EXCEEDED",
     "NOT_INITIALIZED",
@@ -78,6 +90,7 @@ def main() -> int:
     parser.add_argument("--env", default=".env", help="web_r_go .env path")
     parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_contents")), help="web-r_CDN2_contents checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
+    parser.add_argument("--include-native-english-community", action="store_true", help="include source-English community rows only after separate publication approval")
     parser.add_argument("--limit", type=int, default=0, help="optional row limit for smoke exports")
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
@@ -89,10 +102,14 @@ def main() -> int:
     cdn_root = (repo_root / args.cdn_root).resolve()
 
     try:
-        community_rows = fetch_json_rows(env, community_sql(args.limit), query_name="r_ecosystem_community")
-        article_rows = fetch_json_rows(env, article_sql(args.limit), query_name="r_ecosystem_article")
+        # English source text may be reused verbatim only for current,
+        # published community items. Other locales require verified translations.
+        community_rows = fetch_json_rows(env, community_sql(args.limit, language), query_name="r_ecosystem_community") if language == "ko" or (language == "en" and args.include_native_english_community) else []
+        article_rows = fetch_json_rows(env, article_sql(args.limit, language), query_name="r_ecosystem_article")
+        if language != "ko":
+            article_rows.extend(fetch_json_rows(env, official_mastodon_sql(args.limit, language), query_name="r_ecosystem_official_locale"))
     except ClickHouseExportError as exc:
-        if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+        if env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
                 f"[warn] R ecosystem CDN export deferred query={exc.query_name} reason={exc.category}",
                 file=sys.stderr,
@@ -106,12 +123,29 @@ def main() -> int:
     duplicate_count = 0
 
     for row in community_rows:
+        row["source_sha256"] = community_source_sha256(row)
+
+    # A new locale without any verified translations must not publish an
+    # empty manifest that would mask the still-available Korean catalog.
+    # Existing locale manifests may legitimately become empty on withdrawal.
+    if language != "ko" and (community_rows or article_rows):
+        authority = korean_community_authority(cdn_root, key)
+        if community_rows:
+            community_rows = [row for row in community_rows if native_english_row_authorized(row, authority)]
+        article_rows = [row for row in article_rows if locale_article_authorized(row, authority)]
+
+    if language != "ko" and not community_rows and not article_rows and not (cdn_root / f"contents/{language}/index.json").exists():
+        print(json.dumps({**export_result(0, 0, 0, 0), "skipped": "no_verified_locale_rows"}, ensure_ascii=False))
+        return 0
+
+    for row in community_rows:
         uuid = normalize_uuid(row.get("item_uuid"))
         if not uuid:
             continue
         if uuid in payloads:
             duplicate_count += 1
             continue
+        language_meta = community_language_metadata(row, language)
         payload = {
             "schema": CONTENT_SCHEMA,
             "kind": "community",
@@ -127,10 +161,17 @@ def main() -> int:
                 "title": text(row.get("title")),
                 "summary": text(row.get("summary")),
                 "author": text(row.get("author")),
-                "language": text(row.get("language")) or language,
+                "language": language_meta["language"],
+                "source_language": language_meta["source_language"],
+                "title_language": language_meta["title_language"],
+                "summary_language": language_meta["summary_language"],
+                "translation_status": language_meta["translation_status"],
                 "tags_json": text(row.get("tags_json")),
-                "raw_json": text(row.get("raw_json")),
-                "payload_json": text(row.get("payload_json")),
+                # Web-R detail helpers prefer *_ko keys in these source JSON
+                # blobs. Exclude them for native English instead of letting a
+                # Korean translation override the exact source text.
+                "raw_json": text(row.get("raw_json")) if language == "ko" else "",
+                "payload_json": text(row.get("payload_json")) if language == "ko" else "",
                 "published_at": text(row.get("published_at_text")),
                 "collected_at": text(row.get("collected_at_text")),
             },
@@ -141,11 +182,14 @@ def main() -> int:
             "source_id": payload["community_item"]["source_id"],
             "source_name": payload["community_item"]["source_name"],
             "source_type": payload["community_item"]["source_type"],
+            "source_version": text(row.get("source_version")),
+            "source_sha256": text(row.get("source_sha256")),
             "platform": payload["community_item"]["platform"],
             "title": payload["community_item"]["title"],
             "summary": payload["community_item"]["summary"],
             "author": payload["community_item"]["author"],
             "canonical_url": payload["community_item"]["canonical_url"],
+            **language_meta,
         })
 
     for row in article_rows:
@@ -264,6 +308,39 @@ def source_label(source: str) -> str:
     return source
 
 
+def community_language_metadata(row: dict[str, Any], target_language: str) -> dict[str, str]:
+    """Record field provenance; a partial Korean translation must say so."""
+    source = text(row.get("source_language")).lower()
+    supported = {language.lower() for language in SUPPORTED_LANGUAGES}
+    if source not in supported:
+        source = "und"
+    title = text(row.get("title"))
+    summary = text(row.get("summary"))
+    source_title = text(row.get("source_title"))
+    source_summary = text(row.get("source_summary"))
+    title_language = target_language if source == target_language or (title and title != source_title) else source
+    summary_language = target_language if source == target_language or (summary and summary != source_summary) else source
+    if title_language == summary_language:
+        overall = title_language
+    else:
+        overall = source  # conservative for a reader with only one language field
+    if source == target_language:
+        status = "source"
+    elif title_language == target_language and summary_language == target_language:
+        status = "translated"
+    elif title_language == target_language or summary_language == target_language:
+        status = "partial"
+    else:
+        status = "source_fallback"
+    return {
+        "language": overall,
+        "source_language": source,
+        "title_language": title_language,
+        "summary_language": summary_language,
+        "translation_status": status,
+    }
+
+
 def article_category_key(source: str) -> str:
     source = text(source).lower()
     if source == "rblogger":
@@ -299,6 +376,102 @@ def content_secret(env: dict[str, str]) -> str:
 
 def derive_key(secret: str) -> bytes:
     return hashlib.sha256((secret.strip() + "\0" + KEY_PURPOSE).encode("utf-8")).digest()
+
+
+def korean_community_authority(cdn_root: Path, key: bytes) -> dict[str, dict[str, Any]]:
+    rel_path = "contents/ko/index.json"
+    try:
+        path = cdn_root / rel_path
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("Korean manifest envelope exceeds size limit")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(document, dict)
+            or document.get("schema") != ENCRYPTED_SCHEMA
+            or document.get("alg") != "AES-256-GCM"
+            or document.get("kdf") != "SHA256(secret+purpose:v1)"
+            or document.get("language") != "ko"
+            or document.get("path") != rel_path
+            or document.get("compression") not in (None, "gzip")
+        ):
+            raise ValueError("invalid Korean manifest envelope")
+        nonce = base64.urlsafe_b64decode(document["nonce"] + "=" * (-len(document["nonce"]) % 4))
+        ciphertext = base64.urlsafe_b64decode(document["ciphertext"] + "=" * (-len(document["ciphertext"]) % 4))
+        plain = AESGCM(key).decrypt(nonce, ciphertext, rel_path.encode("utf-8"))
+        if document.get("compression") == "gzip":
+            with gzip.GzipFile(fileobj=io.BytesIO(plain)) as stream:
+                plain = stream.read(32 * 1024 * 1024 + 1)
+        if len(plain) > 32 * 1024 * 1024:
+            raise ValueError("Korean manifest exceeds size limit")
+        manifest = json.loads(plain)
+        if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA or manifest.get("language") != "ko" or not isinstance(manifest.get("items"), dict):
+            raise ValueError("invalid Korean manifest payload")
+        community_items = [item for item in manifest["items"].values() if isinstance(item, dict) and item.get("kind") == "community"]
+        if not community_items or any(
+            not text(item.get("source_type"))
+            or not text(item.get("source_version"))
+            or not re.fullmatch(r"[0-9a-f]{64}", text(item.get("source_sha256")))
+            for item in community_items
+        ):
+            raise SystemExit("Korean community manifest lacks source revision/hash; locale export blocked")
+        return manifest["items"]
+    except (OSError, KeyError, TypeError, ValueError, UnicodeError, EOFError, binascii.Error, InvalidTag) as exc:
+        raise SystemExit("Korean community publication authority could not be verified") from exc
+
+
+def native_english_row_authorized(row: dict[str, Any], authority: dict[str, dict[str, Any]]) -> bool:
+    uuid = normalize_uuid(row.get("item_uuid"))
+    item = authority.get(uuid)
+    if (
+        text(row.get("language")) != "en"
+        or row.get("active") != 1
+        or text(row.get("source_type")) not in NATIVE_ENGLISH_COMMUNITY_SOURCE_TYPES
+        or not text(row.get("title"))
+        or not text(row.get("summary"))
+        or any(HANGUL_RE.search(text(row.get(field))) for field in ("title", "summary", "source_name", "author", "platform", "tags_json"))
+    ):
+        return False
+    return bool(
+        item
+        and isinstance(item, dict)
+        and item.get("uuid") == uuid
+        and item.get("kind") == "community"
+        and item.get("language") == "ko"
+        and item.get("source_type") == text(row.get("source_type"))
+        and text(item.get("source_version")) == text(row.get("source_version"))
+        and bool(text(row.get("source_version")))
+        and text(item.get("source_sha256")) == text(row.get("source_sha256"))
+        and bool(re.fullmatch(r"[0-9a-f]{64}", text(row.get("source_sha256"))))
+        and text(item.get("canonical_url")) == text(row.get("canonical_url"))
+        and text(item.get("source_id")) == text(row.get("source_id"))
+        and str(item.get("path", "")).startswith("contents/ko/")
+    )
+
+
+def locale_article_authorized(row: dict[str, Any], authority: dict[str, dict[str, Any]]) -> bool:
+    """A locale can only add text for an article in the current Korean release."""
+    uuid = normalize_uuid(row.get("uuid"))
+    source = text(row.get("source"))
+    item = authority.get(uuid)
+    return bool(
+        uuid and source and item and isinstance(item, dict)
+        and item.get("uuid") == uuid
+        and item.get("kind") == "article"
+        and item.get("language") == "ko"
+        and item.get("article_source") == source
+        and item.get("canonical_url") == text(row.get("url"))
+        and str(item.get("path", "")).startswith("contents/ko/")
+    )
+
+
+def community_source_sha256(row: dict[str, Any]) -> str:
+    if any(field not in row or row[field] is None for field in COMMUNITY_SOURCE_IDENTITY_FIELDS):
+        raise SystemExit("R Community source revision fields are incomplete")
+    if not text(row.get("source_version")):
+        raise SystemExit("R Community source revision is missing")
+    identity = [row[field] if isinstance(row[field], str) else str(row[field]) for field in COMMUNITY_SOURCE_IDENTITY_FIELDS]
+    encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def encrypt_document(plain: dict[str, Any], key: bytes, rel_path: str, language: str, uuid: str, compress: bool = False) -> dict[str, Any]:
@@ -445,7 +618,12 @@ def env_bool(env: dict[str, str], key: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "y", "on"}
 
 
-def community_sql(limit: int) -> str:
+def community_sql(limit: int, language: str = "ko") -> str:
+    language = normalize_language(language)
+    if language == "en":
+        return native_english_community_sql(limit)
+    if language != "ko":
+        raise ValueError("community source text is available only for ko and en")
     suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
     return f"""
 SELECT external_id,
@@ -456,6 +634,11 @@ SELECT external_id,
        platform,
        source_url,
        canonical_url,
+       r.title AS source_title,
+       r.summary AS source_summary,
+       r.language AS source_language,
+       toString(r.version) AS source_version,
+       r.active AS active,
        coalesce(
            nullIf(
                multiIf(
@@ -583,7 +766,7 @@ SELECT external_id,
        toString(payload_json) AS payload_json,
        if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S')) AS published_at_text,
        formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S') AS collected_at_text
-  FROM Data_R_Community_Service.r_community_item_read_current
+  FROM Data_R_Community_Service.r_community_item_read_current AS r
  WHERE active = 1
    AND notEmpty(coalesce(nullIf(JSONExtractString(payload_json, 'title_ko'), ''), nullIf(JSONExtractString(raw_json, 'title_ko'), ''), title))
    AND notEmpty(canonical_url)
@@ -629,13 +812,85 @@ SELECT external_id,
 """
 
 
-def article_sql(limit: int) -> str:
+def native_english_community_sql(limit: int) -> str:
     suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    # Rank every revision before testing active. Filtering active first could
+    # resurrect an older row after a future source withdrawal.
+    return f"""
+SELECT external_id,
+       toString(item_uuid) AS item_uuid,
+       source_id, source_name, source_type, platform, source_url, canonical_url,
+       r.title AS source_title, r.summary AS source_summary,
+       r.language AS source_language, toString(r.version) AS source_version, r.active AS active,
+       title, summary, author, language, tags_json,
+       '' AS raw_json, '' AS payload_json,
+       if(isNull(original_published_at), '', formatDateTime(original_published_at, '%Y-%m-%d %H:%i:%S')) AS published_at_text,
+       formatDateTime(collected_at, '%Y-%m-%d %H:%i:%S') AS collected_at_text
+FROM
+(
+    SELECT external_id, item_uuid, source_id, source_name, source_type, platform,
+           source_url, canonical_url, title, summary, author, language, tags_json,
+           original_published_at, collected_at, ingested_at, active, version
+    FROM Data_R_Community_Service.r_community_item_read_current
+    ORDER BY item_uuid ASC, version DESC, collected_at DESC, ingested_at DESC
+    LIMIT 1 BY item_uuid
+) AS r
+WHERE r.active = 1
+  AND r.language = 'en'
+  AND source_type IN ('official_release_notes', 'official_blog', 'official_journal', 'organization_social', 'organization_blog')
+  AND notEmpty(trimBoth(title)) AND notEmpty(trimBoth(summary)) AND notEmpty(canonical_url)
+  AND NOT match(title, '[가-힣]') AND NOT match(summary, '[가-힣]')
+  AND source_id NOT IN ('official:r-mail:r-packages')
+  AND positionCaseInsensitive(canonical_url, 'journal.r-project.org/issues.html') = 0
+  AND positionCaseInsensitive(canonical_url, 'community.rstudio.com/c/irl') = 0
+  AND positionCaseInsensitive(canonical_url, 'forum.posit.co/c/irl') = 0
+ORDER BY item_uuid ASC{suffix}
+SETTINGS max_execution_time = 30, max_threads = 2
+FORMAT JSONEachRow
+"""
+
+
+def article_sql(limit: int, language: str = "ko") -> str:
+    language = source_language(language)
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    locale_guard = ""
+    locale_filter = "a.source IN ('rblogger', 'rproject')" if language == "ko" else "a.source = 'rblogger'"
+    title_expr = "a.title" if language == "ko" else "verified_locale.title"
+    content_expr = "a.content" if language == "ko" else "verified_locale.content"
+    if language != "ko":
+        # The additional-locale writer records the exact raw source hash in
+        # the board row. Only its latest active version may be published, and
+        # a newer raw withdrawal or edit invalidates an older translation.
+        locale_guard = f"""
+  INNER JOIN
+  (
+      SELECT b.uuid, b.title, b.content
+      FROM
+      (
+          SELECT uuid, active, created_log, title, content,
+                 row_number() OVER (PARTITION BY uuid ORDER BY version_at DESC, created_at DESC) AS rn
+          FROM Data_R_Community_Service.r_blogger_board
+          WHERE language_code = '{language}'
+      ) AS b
+      INNER JOIN
+      (
+          SELECT uuid, active, title, content,
+                 row_number() OVER (PARTITION BY uuid ORDER BY coalesce(updated_at, created_at) DESC, created_at DESC) AS rn
+          FROM Data_R_Community_Raw.r_blogger_article_raw
+          WHERE language_code = 'en'
+      ) AS r ON r.uuid = b.uuid
+      WHERE b.rn = 1 AND r.rn = 1
+        AND coalesce(b.active, 0) = 1 AND coalesce(r.active, 0) = 1
+        AND notEmpty(ifNull(b.title, '')) AND notEmpty(ifNull(b.content, ''))
+        AND JSONExtractString(toString(b.created_log), 'target_language') = '{language}'
+        AND JSONExtractString(toString(b.created_log), 'source_sha256') =
+            lower(hex(SHA256(concat(ifNull(r.title, ''), unhex('0A'), ifNull(r.content, '')))))
+  ) AS verified_locale ON verified_locale.uuid = a.uuid"""
     return f"""
 SELECT a.source,
        toString(a.uuid) AS uuid,
-       coalesce(a.title, '') AS title,
-       coalesce(a.content, '') AS content,
+       coalesce({title_expr}, '') AS title,
+       coalesce({content_expr}, '') AS content,
        if(a.source = 'rblogger',
           coalesce(
              nullIf(if(positionCaseInsensitive(coalesce(raw.canonical_url, ''), 'r-bloggers.com') > 0, coalesce(raw.canonical_url, ''), ''), ''),
@@ -673,11 +928,61 @@ SELECT a.source,
        WHERE active = 1
        GROUP BY uuid
   ) raw ON raw.uuid = a.uuid
- WHERE a.source IN ('rblogger', 'rproject')
-   AND a.language_code = 'ko'
+{locale_guard}
+ WHERE {locale_filter}
+   AND a.language_code = '{language}'
+   AND notEmpty(coalesce({title_expr}, ''))
+   AND notEmpty(coalesce({content_expr}, ''))
  ORDER BY if(a.source = 'rblogger' AND rb.article_dt_utc IS NOT NULL, toUnixTimestamp(rb.article_dt_utc), toUnixTimestamp(a.created_at)) DESC,
           a.created_at DESC{suffix}
  FORMAT JSONEachRow
+"""
+
+
+def official_mastodon_sql(limit: int, language: str) -> str:
+    language = source_language(language)
+    if language == "ko":
+        raise ValueError("Korean official rows are owned by article_sql")
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    # Select the latest raw version before checking its active state. The
+    # translation must match that exact source hash; a withdrawal or source
+    # edit cannot leave an older localized board row visible in the CDN.
+    return f"""
+SELECT 'rproject' AS source,
+       b.uuid AS uuid,
+       coalesce(b.title, '') AS title,
+       coalesce(b.content, '') AS content,
+       r.status_url AS url,
+       r.status_created_at AS created_at,
+       'R Project' AS author,
+       'R Project' AS platform,
+       'Official announcement' AS category,
+       '{language}' AS language
+FROM
+(
+    SELECT toString(uuid) AS uuid, title, content, active, created_log,
+           row_number() OVER (PARTITION BY uuid ORDER BY version_at DESC, created_at DESC) AS rn
+    FROM Data_R_Community_Service.mastodon_board
+    WHERE language_code = '{language}'
+) AS b
+INNER JOIN
+(
+    SELECT toString(uuid) AS uuid, active, visibility, language_code, status_url, toString(status_created_at) AS status_created_at,
+           lower(hex(SHA256(concat(ifNull(content_text, ''), unhex('0A'), ifNull(content_html, ''), unhex('0A'),
+               ifNull(status_url, ''), unhex('0A'), toString(status_created_at), unhex('0A'),
+               ifNull(toString(status_edited_at), ''), unhex('0A'), ifNull(visibility, ''))))) AS source_sha256,
+           row_number() OVER (PARTITION BY uuid ORDER BY fetched_at DESC, ingested_at DESC, event_uuid DESC) AS rn
+    FROM Data_R_Community_Raw.mastodon_status_raw
+    WHERE instance_host = 'fosstodon.org' AND account_acct = 'R_Foundation'
+) AS r ON r.uuid = b.uuid
+WHERE b.rn = 1 AND r.rn = 1
+  AND coalesce(b.active, 0) = 1 AND r.active = 1 AND r.visibility IN ('public', 'unlisted') AND r.language_code = 'en'
+  AND notEmpty(coalesce(b.title, '')) AND notEmpty(coalesce(b.content, ''))
+  AND JSONExtractString(toString(b.created_log), 'target_language') = '{language}'
+  AND JSONExtractString(toString(b.created_log), 'source_sha256') = r.source_sha256
+ORDER BY r.status_created_at DESC, b.uuid ASC{suffix}
+SETTINGS max_execution_time = 30, max_threads = 2
+FORMAT JSONEachRow
 """
 
 
@@ -697,8 +1002,22 @@ def normalize_uuid(value: Any) -> str:
 
 
 def normalize_language(value: str) -> str:
-    value = (value or "ko").strip().lower()
-    return value or "ko"
+    return source_language(value).lower()
+
+
+def source_language(value: str) -> str:
+    value = (value or "ko").strip()
+    for language in SUPPORTED_LANGUAGES:
+        if language.lower() == value.lower():
+            return language
+    raise SystemExit("unsupported R ecosystem content language")
+
+
+def approved_workflow_locales(raw: str) -> list[str]:
+    requested = list(dict.fromkeys(normalize_language(value) for value in raw.split(",") if value.strip()))
+    if "ko" in requested or len(requested) > 2:
+        raise SystemExit("additional R ecosystem locale export must be one or two non-Korean locales")
+    return requested
 
 
 def normalize_path(value: str) -> str:

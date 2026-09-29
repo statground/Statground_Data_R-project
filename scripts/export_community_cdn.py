@@ -11,6 +11,7 @@ import http.client
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import urllib.error
@@ -34,6 +35,16 @@ from export_r_ecosystem_cdn import (
 
 ENCRYPTED_SCHEMA = "web-r.community.encrypted.v1"
 MANIFEST_SCHEMA = "web-r.community.manifest.plain.v1"
+GENERATION_MANIFEST_SCHEMA = "web-r.community.manifest.plain.v2"
+GENERATION_PROOF_SCHEMA = "web-r.community.generation-proof.v2"
+CANDIDATE_PROJECTION_SCHEMA = "web-r.community.candidate-cdn-projection.v1"
+GENERATION_ROW_FIELDS = frozenset({
+    "uuid", "source", "category", "category_url", "category_url_sub",
+    "source_type", "source_id", "source_name", "platform", "title", "content",
+    "user_uuid", "user_nickname", "user_role", "url", "deduped_item_count",
+    "published_at", "updated_at", "withdrawal_revision",
+    "account_authority_revision", "category_authority_revision",
+})
 CONTENT_SCHEMA = "web-r.community.content.plain.v1"
 WORKSHOP_MANIFEST_SCHEMA = "web-r.community.workshop.manifest.plain.v1"
 WORKSHOP_CONTENT_SCHEMA = "web-r.community.workshop.content.plain.v1"
@@ -49,8 +60,22 @@ R_PROJECT_BOT_NAME = "R Project"
 R_PROJECT_BOT_ROLE = "Bot"
 R_PROJECT_CONFERENCE_ID = "official:r:conferences"
 POSIT_COMMUNITY_EVENTS_ID = "community:posit:events"
+POSIT_COMMUNITY_EVENT_TAG = "Conferences & Events"
 USE_R2026_WORKSHOP_KEY = "rconf-user-2026"
+# These five identifiers are in Web-R's curated R Project conference catalog
+# but are absent from the current collected conference rows. Keep them as
+# source-attributed fallbacks only when the collected event did not provide the
+# same identifier; never invent a date for the three undated DSC entries.
+R_PROJECT_CONFERENCE_FALLBACKS = (
+    ("rconf-dsc-2005", "DSC 2005", "Directions in Statistical Computing", "Seattle, WA, USA", "2005-08-13 00:00:00", "2005-08-14 23:59:59", "https://www.r-project.org/conferences/DSC-2005/", ""),
+    ("rconf-dsc-2018", "DSC 2018", "Directions in Statistical Computing", "Stanford, CA, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2018의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-dsc-2019", "DSC 2019", "Directions in Statistical Computing", "Stanford, CA, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2019의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-dsc-2020", "DSC 2020", "Directions in Statistical Computing", "St Louis, MO, USA", "", "", "https://www.r-project.org/conferences/", "R Project conferences 페이지가 DSC 2020의 연도와 장소만 공개해 잘못된 1월 1일 날짜 대신 일정 미정으로 표시합니다."),
+    ("rconf-r-summit-2015", "R Summit 2015", "R Foundation Summit", "Copenhagen, Denmark", "2015-06-27 00:00:00", "2015-06-28 23:59:59", "https://www.r-project.org/conferences/rsummit-2015/rsummit2015/", ""),
+)
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+GENERATION_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})")
 SAFE_ID_RE = re.compile(r"[^0-9A-Za-z._-]+")
 MONTH_LOOKUP = {
@@ -87,23 +112,62 @@ def main() -> int:
     parser.add_argument("--cdn-root", default=str(workspace_repo("web-r_CDN2_community")), help="web-r_CDN2_community checkout path")
     parser.add_argument("--language", default="ko", help="content language code")
     parser.add_argument("--limit", type=int, default=0, help="optional per-source row limit for smoke exports")
+    parser.add_argument(
+        "--generation",
+        help="exact preloaded mart_webr.community_feed_snapshot_v1_local generation",
+    )
+    parser.add_argument("--candidate-receipt", type=Path, help="exact SQL loader receipt for --generation")
+    parser.add_argument("--candidate-projection", type=Path, help="owner-only SQL candidate CDN projection for --generation")
+    parser.add_argument(
+        "--generation-rows-file", type=Path,
+        help="owner-only exact public-serving JSONEachRow output from the SQL publisher principal",
+    )
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
+    language = normalize_language(args.language)
+    # Every selected community generation, digest, notebook, and workshop row
+    # currently comes from a Korean-only serving contract. Do not stamp those
+    # source bytes as a different language in a publishable CDN manifest.
+    if language != "ko":
+        raise SystemExit("community CDN export has only a Korean source contract")
     repo_root = Path.cwd()
     env = load_env(repo_root / args.env)
-    language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
+    generation = normalize_generation(args.generation) if args.generation else ""
+    if generation:
+        if language != "ko" or args.limit != 0 or not args.candidate_receipt or not args.candidate_projection:
+            raise SystemExit("--generation requires ko, no --limit, and exact candidate receipt and projection")
+        candidate_receipt = load_candidate_json(args.candidate_receipt, 64 * 1024)
+        candidate_projection = load_candidate_json(args.candidate_projection, 16 * 1024 * 1024, owner_only=True)
+    else:
+        if args.candidate_receipt or args.candidate_projection or args.generation_rows_file:
+            raise SystemExit("candidate evidence requires --generation")
+        candidate_receipt = None
+        candidate_projection = None
 
     try:
-        digest_rows = fetch_json_rows(env, digest_sql(args.limit), query_name="community_digest")
-        notebook_rows = fetch_json_rows(env, notebook_sql(args.limit), query_name="community_notebook")
+        if generation:
+            if args.generation_rows_file:
+                generation_rows = load_generation_rows_file(args.generation_rows_file)
+            else:
+                generation_rows = fetch_json_rows(
+                    env,
+                    generation_community_sql(generation, args.limit),
+                    query_name="community_generation",
+                )
+            digest_rows: list[dict[str, Any]] = []
+            notebook_rows: list[dict[str, Any]] = []
+        else:
+            generation_rows = []
+            digest_rows = fetch_json_rows(env, digest_sql(args.limit), query_name="community_digest")
+            notebook_rows = fetch_json_rows(env, notebook_sql(args.limit), query_name="community_notebook")
         workshop_rows = fetch_json_rows(env, workshop_sql(args.limit), query_name="community_workshop")
         workshop_event_rows = fetch_json_rows(env, workshop_event_sql(args.limit), query_name="community_workshop_event")
         workshop_post_rows = fetch_json_rows(env, workshop_post_sql(args.limit), query_name="community_workshop_post")
     except ClickHouseExportError as exc:
-        if env_bool(env, "WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
+        if env_bool(env, "WEBR_COMMUNITY_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False) and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
                 f"[warn] Web-R community CDN export deferred query={exc.query_name} reason={exc.category}",
                 file=sys.stderr,
@@ -117,6 +181,24 @@ def main() -> int:
     workshop_manifest_items: dict[str, dict[str, Any]] = {}
     workshop_posts: dict[str, list[dict[str, Any]]] = {}
     duplicate_count = 0
+
+    for row in generation_rows:
+        item = generation_community_item(row, language)
+        uuid = text(item.get("uuid"))
+        if not uuid:
+            continue
+        if uuid in payloads:
+            duplicate_count += 1
+            continue
+        rel_path = community_payload_path(
+            language,
+            text(item.get("kind")),
+            uuid,
+            first_text(item.get("published_at"), item.get("updated_at")),
+        )
+        item["path"] = rel_path
+        payloads[uuid] = (rel_path, {"schema": CONTENT_SCHEMA, "item": item})
+        manifest_items[uuid] = item
 
     for row in digest_rows:
         uuid = normalize_uuid(row.get("uuid"))
@@ -135,6 +217,7 @@ def main() -> int:
             "published_at": text(published_at),
             "updated_at": text(row.get("updated_at")),
             "path": rel_path,
+            "base_url": "",
             "user_uuid": R_COMMUNITY_BOT_UUID,
             "user_nickname": R_COMMUNITY_BOT_NAME,
             "user_role": R_COMMUNITY_BOT_ROLE,
@@ -174,6 +257,7 @@ def main() -> int:
             "published_at": text(published_at),
             "updated_at": text(row.get("updated_at")),
             "path": rel_path,
+            "base_url": "",
             "user_uuid": NOTEBOOK_BOT_UUID,
             "user_nickname": NOTEBOOK_BOT_NAME,
             "user_role": NOTEBOOK_BOT_ROLE,
@@ -230,12 +314,38 @@ def main() -> int:
         payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
         workshop_manifest_items[uuid] = item
 
-    manifest = {
-        "schema": MANIFEST_SCHEMA,
-        "language": language,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "items": manifest_items,
-    }
+    add_r_project_conference_fallbacks(workshop_manifest_items, payloads, workshop_posts, language)
+
+    generation_proof: dict[str, Any] | None = None
+    if generation:
+        generation_proof = community_generation_proof(generation, manifest_items, generation_rows)
+        verify_candidate_evidence(
+            generation_proof,
+            generation_rows,
+            candidate_receipt,
+            candidate_projection,
+        )
+        manifest = {
+            "schema": GENERATION_MANIFEST_SCHEMA,
+            "language": language,
+            "generation": generation,
+            "complete": True,
+            "item_count": generation_proof["item_count"],
+            "identity_hash": generation_proof["identity_hash"],
+            "content_hash": generation_proof["content_hash"],
+            "withdrawal_revision": generation_proof["withdrawal_revision"],
+            "account_authority_revision": generation_proof["account_authority_revision"],
+            "category_authority_revision": generation_proof["category_authority_revision"],
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "items": manifest_items,
+        }
+    else:
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "language": language,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "items": manifest_items,
+        }
     workshop_manifest = {
         "schema": WORKSHOP_MANIFEST_SCHEMA,
         "language": language,
@@ -243,24 +353,24 @@ def main() -> int:
         "catalog_token": workshop_catalog_token(workshop_manifest_items, workshop_posts),
         "items": workshop_manifest_items,
     }
+    workshop_proof = workshop_export_proof(workshop_manifest_items, workshop_posts)
     current_payload_paths = {rel_path for rel_path, _payload in payloads.values()}
 
     if args.dry_run:
-        print(
-            json.dumps(
-                community_export_result(
-                    len(digest_rows),
-                    len(notebook_rows),
-                    len(manifest_items),
-                    len(workshop_manifest_items),
-                    sum(len(posts) for posts in workshop_posts.values()),
-                    len(workshop_manifest_items),
-                    len(payloads),
-                    duplicate_count,
-                ),
-                ensure_ascii=False,
-            )
+        dry_result = community_export_result(
+            len(digest_rows),
+            len(notebook_rows),
+            len(manifest_items),
+            len(workshop_manifest_items),
+            sum(len(posts) for posts in workshop_posts.values()),
+            len(workshop_manifest_items),
+            len(payloads),
+            duplicate_count,
         )
+        if generation_proof is not None:
+            dry_result.update(generation_export_result(generation_proof))
+        dry_result.update(workshop_export_result(workshop_proof))
+        print(json.dumps(dry_result, ensure_ascii=False))
         return 0
 
     for uuid, (rel_path, payload) in payloads.items():
@@ -270,6 +380,8 @@ def main() -> int:
     manifest_path = f"community/{language}/index.json"
     encrypted_manifest = encrypt_document(manifest, key, manifest_path, language, "")
     write_json_atomic(cdn_root / manifest_path, encrypted_manifest)
+    if generation_proof is not None:
+        write_json_atomic(cdn_root / f"community/{language}/generation-proof.json", generation_proof)
     workshop_manifest_path = f"community/{language}/workshop/index.json"
     encrypted_workshop_manifest = encrypt_document(workshop_manifest, key, workshop_manifest_path, language, "")
     write_json_atomic(cdn_root / workshop_manifest_path, encrypted_workshop_manifest)
@@ -288,6 +400,9 @@ def main() -> int:
         duplicate_count,
     )
     result["pruned_payloads"] = pruned_payloads
+    if generation_proof is not None:
+        result.update(generation_export_result(generation_proof))
+    result.update(workshop_export_result(workshop_proof))
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -326,6 +441,330 @@ def deferred_community_export_result(exc: ClickHouseExportError) -> dict[str, An
         }
     )
     return result
+
+
+def generation_export_result(proof: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "generation": proof["generation"],
+        "generation_complete": proof["complete"],
+        "generation_item_count": proof["item_count"],
+        "generation_identity_hash": proof["identity_hash"],
+        "generation_content_hash": proof["content_hash"],
+    }
+
+
+def workshop_export_result(proof: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workshop_complete": proof["complete"],
+        "workshop_item_count": proof["item_count"],
+        "workshop_post_count": proof["post_count"],
+        "workshop_identity_hash": proof["identity_hash"],
+        "workshop_content_hash": proof["content_hash"],
+        "workshop_catalog_token": proof["catalog_token"],
+    }
+
+
+def normalize_generation(value: Any) -> str:
+    normalized = text(value)
+    if not GENERATION_RE.fullmatch(normalized):
+        raise SystemExit("--generation must be an exact UTC DateTime64(6) value")
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S.%f")
+    except ValueError as exc:
+        raise SystemExit("--generation must be an exact UTC DateTime64(6) value") from exc
+    if parsed.strftime("%Y-%m-%d %H:%M:%S.%f") != normalized:
+        raise SystemExit("--generation must be an exact UTC DateTime64(6) value")
+    return normalized
+
+
+def generation_community_sql(generation: str, limit: int) -> str:
+    generation = normalize_generation(generation)
+    suffix = f"\nLIMIT {int(limit)}" if limit and limit > 0 else ""
+    return f"""
+SELECT uuid,
+       source,
+       category,
+       category_url,
+       category_url_sub,
+       source_type,
+       source_id,
+       source_name,
+       platform,
+       title,
+       content,
+       user_uuid,
+       user_nickname,
+       user_role,
+       url,
+       toUInt64(cnt_read) AS deduped_item_count,
+       formatDateTime(created_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul') AS published_at,
+       if(isNull(updated_at), '', formatDateTime(updated_at, '%Y-%m-%d %H:%i:%S', 'Asia/Seoul')) AS updated_at,
+       toUInt64(withdrawal_revision) AS withdrawal_revision,
+       toUInt64(account_authority_revision) AS account_authority_revision,
+       toUInt64(category_authority_revision) AS category_authority_revision
+  FROM mart_webr.community_feed_snapshot_v1_local
+ WHERE generation_id = toDateTime64('{generation}', 6, 'UTC')
+   AND tombstone = 0
+   AND article_active = 1
+   AND user_blocked = 0
+   AND user_active = 1
+   AND is_secret = 0
+   AND language_code = 'ko'
+   AND category_url IN ('rcommunity', 'notebook')
+ ORDER BY uuid{suffix}
+FORMAT JSONEachRow
+"""
+
+
+def generation_community_item(row: dict[str, Any], language: str) -> dict[str, Any]:
+    uuid = normalize_uuid(row.get("uuid"))
+    source = text(row.get("source"))
+    if not uuid or source not in {"rcommunity", "notebook"}:
+        return {}
+    title = text(row.get("title")) or "제목 없음"
+    content = text(row.get("content"))
+    return {
+        "uuid": uuid,
+        "kind": source,
+        "language": language,
+        "published_at": text(row.get("published_at")),
+        "updated_at": text(row.get("updated_at")),
+        "path": "",
+        "base_url": "",
+        "source": source,
+        "user_uuid": text(row.get("user_uuid")),
+        "user_nickname": text(row.get("user_nickname")),
+        "user_role": text(row.get("user_role")),
+        "category": text(row.get("category")),
+        "category_url": text(row.get("category_url")),
+        "category_url_sub": text(row.get("category_url_sub")),
+        "source_type": text(row.get("source_type")),
+        "source_id": text(row.get("source_id")),
+        "source_name": text(row.get("source_name")),
+        "platform": text(row.get("platform")),
+        "title": title,
+        "summary": content,
+        "content": content,
+        "source_items_json": "",
+        "url": text(row.get("url")),
+        "deduped_item_count": int_value(row.get("deduped_item_count")),
+    }
+
+
+def go_canonical_json_bytes(value: Any) -> bytes:
+    body = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    # encoding/json always escapes these two runes even with SetEscapeHTML(false).
+    body = body.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return body.encode("utf-8")
+
+
+def community_generation_proof(
+    generation: str,
+    items: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    generation = normalize_generation(generation)
+    if not items or len(items) != len(rows):
+        raise SystemExit("generation community export is empty or contains invalid/duplicate identities")
+    identities = sorted(items)
+    withdrawal_revisions = [int_value(row.get("withdrawal_revision")) for row in rows]
+    account_revisions = {int_value(row.get("account_authority_revision")) for row in rows}
+    category_revisions = {int_value(row.get("category_authority_revision")) for row in rows}
+    if any(revision < 0 for revision in withdrawal_revisions) or len(account_revisions) != 1 or len(category_revisions) != 1:
+        raise SystemExit("generation community export mixes authority revisions")
+    account_revision = next(iter(account_revisions))
+    category_revision = next(iter(category_revisions))
+    if account_revision <= 0 or category_revision <= 0:
+        raise SystemExit("generation community export has incomplete authority revisions")
+    return {
+        "schema": GENERATION_PROOF_SCHEMA,
+        "generation": generation,
+        "complete": True,
+        "item_count": len(items),
+        "identity_hash": hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest(),
+        "content_hash": hashlib.sha256(go_canonical_json_bytes(items)).hexdigest(),
+        "withdrawal_revision": max(withdrawal_revisions, default=0),
+        "account_authority_revision": account_revision,
+        "category_authority_revision": category_revision,
+    }
+
+
+def strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("candidate evidence contains a duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def load_candidate_json(path: Path, max_bytes: int, *, owner_only: bool = False) -> dict[str, Any]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size <= 0
+                or metadata.st_size > max_bytes
+                or (owner_only and (metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077))
+            ):
+                raise ValueError("candidate evidence file has an invalid owner, mode, or size")
+            body = source.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError("candidate evidence file is too large")
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=strict_json_object)
+        if not isinstance(value, dict):
+            raise ValueError("candidate evidence must be a JSON object")
+        return value
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"candidate evidence is unavailable or invalid: {exc}") from exc
+
+
+def load_generation_rows_file(path: Path) -> list[dict[str, Any]]:
+    """Read only public-serving columns from an owner-only native query result.
+
+    The candidate receipt and per-UUID projection are still checked before any
+    CDN write. This input avoids passing the offline publisher password to the
+    HTTP client used for the unrelated workshop export.
+    """
+    max_bytes = 64 * 1024 * 1024
+    try:
+        directory = path.parent
+        directory_info = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.geteuid()
+            or directory_info.st_mode & 0o077
+        ):
+            raise ValueError("generation rows directory must be owner-only")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077
+                or metadata.st_size <= 0
+                or metadata.st_size > max_bytes
+            ):
+                raise ValueError("generation rows file must be owner-only and bounded")
+            body = source.read(max_bytes + 1)
+        if len(body) > max_bytes or not body.endswith(b"\n"):
+            raise ValueError("generation rows file is incomplete or too large")
+        rows: list[dict[str, Any]] = []
+        for line in body.splitlines():
+            if not line or len(rows) >= 100000:
+                raise ValueError("generation rows file has an invalid row count")
+            row = json.loads(line.decode("utf-8"), object_pairs_hook=strict_json_object)
+            if not isinstance(row, dict) or set(row) != GENERATION_ROW_FIELDS:
+                raise ValueError("generation row contains missing or private fields")
+            for key, value in row.items():
+                if key in {
+                    "deduped_item_count", "withdrawal_revision",
+                    "account_authority_revision", "category_authority_revision",
+                }:
+                    if type(value) is not int and not (isinstance(value, str) and value.isdecimal()):
+                        raise ValueError("generation row contains an invalid count or revision")
+                elif not isinstance(value, str):
+                    raise ValueError("generation row contains an invalid public string")
+            rows.append(row)
+        if not rows:
+            raise ValueError("generation rows file is empty")
+        return rows
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"generation rows input is unavailable or invalid: {exc}") from exc
+
+
+def candidate_projection_json_bytes(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def candidate_projection_item(row: dict[str, Any]) -> dict[str, str]:
+    def raw_string(key: str) -> str:
+        value = row.get(key)
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise SystemExit("candidate CDN row contains a non-string source field")
+        return value
+
+    return {
+        "source": raw_string("source"),
+        "uuid": raw_string("uuid"),
+        "user_uuid": raw_string("user_uuid"),
+        "title": raw_string("title"),
+        "content": raw_string("content"),
+        "url": raw_string("url"),
+        "created_at": raw_string("published_at")[:19],
+        "updated_at": raw_string("updated_at")[:19],
+        "source_type": raw_string("source_type"),
+        "source_id": raw_string("source_id"),
+        "source_name": raw_string("source_name"),
+        "platform": raw_string("platform"),
+    }
+
+
+def verify_candidate_evidence(
+    proof: dict[str, Any],
+    rows: list[dict[str, Any]],
+    receipt: dict[str, Any] | None,
+    projection: dict[str, Any] | None,
+) -> None:
+    if not isinstance(receipt, dict) or not isinstance(projection, dict):
+        raise SystemExit("candidate loader receipt and projection are required")
+    if receipt.get("status") != "candidate_loaded" or receipt.get("generation") != proof["generation"]:
+        raise SystemExit("candidate loader receipt does not identify the exported generation")
+    if (
+        type(receipt.get("row_count")) is not int
+        or type(receipt.get("visible_row_count")) is not int
+        or not receipt["row_count"] >= receipt["visible_row_count"] >= proof["item_count"] > 0
+    ):
+        raise SystemExit("candidate loader receipt has incomplete row counts")
+    expected_projection_keys = {
+        "schema", "generation", "source_sha256", "item_count", "identity_hash",
+        "withdrawal_revision", "account_authority_revision", "category_authority_revision",
+        "items", "projection_sha256",
+    }
+    if set(projection) != expected_projection_keys or projection.get("schema") != CANDIDATE_PROJECTION_SCHEMA:
+        raise SystemExit("candidate CDN projection has an invalid schema")
+    projection_digest = projection.get("projection_sha256")
+    if not isinstance(projection_digest, str) or not SHA256_RE.fullmatch(projection_digest):
+        raise SystemExit("candidate CDN projection digest is invalid")
+    projected_body = {key: value for key, value in projection.items() if key != "projection_sha256"}
+    if hashlib.sha256(candidate_projection_json_bytes(projected_body)).hexdigest() != projection_digest:
+        raise SystemExit("candidate CDN projection digest does not match its contents")
+    source_digest = receipt.get("source_sha256")
+    if not isinstance(source_digest, str) or not SHA256_RE.fullmatch(source_digest) or projection.get("source_sha256") != source_digest:
+        raise SystemExit("candidate source fingerprint does not match the loader receipt")
+    if projection.get("generation") != proof["generation"]:
+        raise SystemExit("candidate CDN projection generation does not match")
+    for field in ("item_count", "withdrawal_revision", "account_authority_revision", "category_authority_revision"):
+        value = proof[field]
+        if type(receipt.get("cdn_item_count" if field == "item_count" else field)) is not int or type(projection.get(field)) is not int:
+            raise SystemExit("candidate count or authority revision is invalid")
+        if receipt["cdn_item_count" if field == "item_count" else field] != value or projection[field] != value:
+            raise SystemExit("candidate count or authority revision differs from the exported generation")
+    if receipt.get("cdn_identity_hash") != proof["identity_hash"] or projection.get("identity_hash") != proof["identity_hash"]:
+        raise SystemExit("candidate CDN identities differ from the loaded generation")
+    projected_items = projection.get("items")
+    if not isinstance(projected_items, dict) or set(projected_items) != {row.get("uuid") for row in rows}:
+        raise SystemExit("candidate CDN projection identities differ from exported rows")
+    for row in rows:
+        uuid = row["uuid"]
+        item_digest = projected_items[uuid]
+        actual_digest = hashlib.sha256(candidate_projection_json_bytes(candidate_projection_item(row))).hexdigest()
+        if not isinstance(item_digest, str) or not SHA256_RE.fullmatch(item_digest) or item_digest != actual_digest:
+            raise SystemExit("candidate CDN source row differs from the loaded generation")
+    if receipt.get("cdn_projection_sha256") != projection_digest:
+        raise SystemExit("candidate CDN projection does not match the loader receipt")
 
 
 def digest_sql(limit: int) -> str:
@@ -458,6 +897,7 @@ SELECT external_id,
        source_name,
        source_type,
        platform,
+       tags_json,
        source_url,
        canonical_url,
        title,
@@ -480,6 +920,10 @@ SELECT external_id,
                   )
           )
           OR source_id = '{POSIT_COMMUNITY_EVENTS_ID}'
+          OR (
+                 platform = 'posit-community'
+                 AND has(JSONExtract(tags_json, 'Array(String)'), '{POSIT_COMMUNITY_EVENT_TAG}')
+             )
        )
  ORDER BY event_year DESC,
           published_at DESC,
@@ -579,13 +1023,13 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
     canonical_url = text(row.get("canonical_url"))
     board_key = classify_r_conference_key(" ".join([title, summary, canonical_url]))
     source_id = text(row.get("source_id"))
+    external_id = text(row.get("external_id"))
     published_at = first_text(row.get("published_at"), row.get("collected_at"))
     if not board_key:
-        if source_id != POSIT_COMMUNITY_EVENTS_ID:
+        if not is_posit_workshop_event_row(row) or not external_id:
             return {}
         start_at, end_at = event_date_range_from_text(" ".join([title, summary, canonical_url]))
-        event_id = text(row.get("external_id")) or canonical_url or title
-        event_hash = hashlib.sha256(("posit-community-event:" + event_id).encode("utf-8")).hexdigest()[:24]
+        event_hash = hashlib.sha256(("posit-community-event:" + external_id).encode("utf-8")).hexdigest()[:24]
         board_key = "posit-event-" + event_hash
         description = first_text(summary, title)
         return {
@@ -672,6 +1116,82 @@ def workshop_event_item(row: dict[str, Any], language: str) -> dict[str, Any]:
         "is_new": False,
         "url": "",
     }
+
+
+def is_posit_workshop_event_row(row: dict[str, Any]) -> bool:
+    if text(row.get("source_id")) == POSIT_COMMUNITY_EVENTS_ID:
+        return True
+    if text(row.get("platform")).lower() != "posit-community":
+        return False
+    try:
+        tags = json.loads(text(row.get("tags_json")))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(tags, list) and POSIT_COMMUNITY_EVENT_TAG in tags
+
+
+def r_project_conference_fallback_items(language: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key, title, series, venue, starts_at, ends_at, canonical_url, note in R_PROJECT_CONFERENCE_FALLBACKS:
+        items.append({
+            "uuid": key,
+            "slug": key,
+            "board_key": key,
+            "language": language,
+            "published_at": starts_at,
+            "updated_at": "",
+            "path": f"community/{language}/workshop/curated/{safe_path_id(key)}.json",
+            "base_url": "",
+            "title": title,
+            "subtitle": series,
+            "summary": "R Project conferences entry.",
+            "description": ("R Project conferences entry.\n\n" + note).strip(),
+            "cover_image_url": "",
+            "venue": venue,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "capacity": 0,
+            "status": "published",
+            "registration_mode": "external",
+            "member_product_uuid": "",
+            "member_product_title": "",
+            "member_price": 0,
+            "nonmember_product_uuid": "",
+            "nonmember_product_title": "",
+            "nonmember_price": 0,
+            "active": True,
+            "sort_order": 80,
+            "paid_count": 0,
+            "total_count": 0,
+            "paid_amount": 0,
+            "external": True,
+            "source_id": R_PROJECT_CONFERENCE_ID,
+            "source_name": "R Project conferences",
+            "source_type": "official_events",
+            "source_url": "https://www.r-project.org/conferences/",
+            "canonical_url": canonical_url,
+            "external_id": "r-project-conference:" + key,
+            "source_note": note,
+            "is_new": False,
+            "url": f"/workshop/read/{urllib.parse.quote(key)}/",
+        })
+    return items
+
+
+def add_r_project_conference_fallbacks(
+    manifest_items: dict[str, dict[str, Any]],
+    payloads: dict[str, tuple[str, dict[str, Any]]],
+    posts_by_workshop: dict[str, list[dict[str, Any]]],
+    language: str,
+) -> None:
+    for item in r_project_conference_fallback_items(language):
+        uuid = item["uuid"]
+        if uuid in manifest_items:
+            continue
+        rel_path = item["path"]
+        posts = posts_by_workshop.get(item["board_key"], [])
+        payloads["workshop:" + uuid] = (rel_path, {"schema": WORKSHOP_CONTENT_SCHEMA, "workshop": item, "posts": posts})
+        manifest_items[uuid] = item
 
 
 def event_date_range_from_text(value: str) -> tuple[str, str]:
@@ -778,9 +1298,46 @@ def classify_r_conference_key(value: str) -> str:
     return ""
 
 
+def canonical_workshop_posts(
+    items: dict[str, dict[str, Any]], posts: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    referenced = {
+        text(item.get("board_key"))
+        for item in items.values()
+        if text(item.get("board_key"))
+    }
+    return {
+        key: sorted(posts.get(key, []), key=go_canonical_json_bytes)
+        for key in sorted(referenced)
+        if posts.get(key)
+    }
+
+
+def workshop_export_proof(
+    items: dict[str, dict[str, Any]], posts: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    if not items:
+        raise SystemExit("workshop export is empty")
+    normalized_posts = canonical_workshop_posts(items, posts)
+    post_count = sum(len(values) for values in normalized_posts.values())
+    if post_count <= 0:
+        raise SystemExit("workshop export has no source posts")
+    identities = sorted(items)
+    content_hash = hashlib.sha256(
+        go_canonical_json_bytes({"items": items, "posts": normalized_posts})
+    ).hexdigest()
+    return {
+        "complete": True,
+        "item_count": len(items),
+        "post_count": post_count,
+        "identity_hash": hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest(),
+        "content_hash": content_hash,
+        "catalog_token": content_hash,
+    }
+
+
 def workshop_catalog_token(items: dict[str, dict[str, Any]], posts: dict[str, list[dict[str, Any]]]) -> str:
-    body = json.dumps({"items": items, "posts": posts}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(body).hexdigest()
+    return workshop_export_proof(items, posts)["catalog_token"]
 
 
 def first_text_line(value: str, max_len: int) -> str:

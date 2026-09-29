@@ -142,9 +142,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="query and encrypt without writing files")
     args = parser.parse_args()
 
+    language = normalize_language(args.language)
+    if language != "ko":
+        raise SystemExit("R package CDN export has no verified localized source rows; only ko may be published")
     repo_root = Path.cwd()
     env = package_export_env(load_env(repo_root / args.env))
-    language = normalize_language(args.language)
     key = derive_key(content_secret(env))
     cdn_root = (repo_root / args.cdn_root).resolve()
 
@@ -156,7 +158,7 @@ def main() -> int:
         fail_open = env_bool(
             env,
             "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
-            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False),
         )
         if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(
@@ -334,7 +336,7 @@ def main() -> int:
         fail_open = env_bool(
             env,
             "R_PACKAGE_CDN_EXPORT_TRANSIENT_FAIL_OPEN",
-            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", True),
+            env_bool(env, "R_ECOSYSTEM_CDN_EXPORT_TRANSIENT_FAIL_OPEN", False),
         )
         if fail_open and is_transient_clickhouse_export_failure(exc.status_code, exc.category, exc.detail):
             print(

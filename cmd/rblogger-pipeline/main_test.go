@@ -99,14 +99,14 @@ func TestRbloggerClickHouseNotInitializedClassification(t *testing.T) {
 
 func TestRbloggerPublishFailureDefersOnlyTransientErrors(t *testing.T) {
 	transient := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-not-initialized")
-	if !shouldDeferRbloggerPublishFailure(transient) {
-		t.Fatal("R-bloggers transient ClickHouse initialization failures should be deferred by default")
-	}
-	t.Setenv("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	t.Setenv("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", "")
 	if shouldDeferRbloggerPublishFailure(transient) {
-		t.Fatal("R-bloggers transient deferral should respect opt-out env")
+		t.Fatal("R-bloggers transient ClickHouse initialization failures must fail closed by default")
 	}
 	t.Setenv("RBLOGGER_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	if !shouldDeferRbloggerPublishFailure(transient) {
+		t.Fatal("R-bloggers transient deferral should require explicit opt-in")
+	}
 	rateLimited := errors.New("ClickHouse R-bloggers direct publish failed target=raw: clickhouse-rate-limited")
 	if !shouldDeferRbloggerPublishFailure(rateLimited) {
 		t.Fatal("R-bloggers rate-limited ClickHouse failures should be deferred by default")

@@ -481,14 +481,14 @@ func TestRProjectDirectOutboxDrainLimitIsHardBounded(t *testing.T) {
 
 func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
 	transient := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-not-initialized")
-	if !shouldDeferYouTubePublishFailure(transient) {
-		t.Fatal("YouTube transient ClickHouse initialization failures should be deferred by default")
-	}
-	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "")
 	if shouldDeferYouTubePublishFailure(transient) {
-		t.Fatal("YouTube transient deferral should respect the opt-out env")
+		t.Fatal("YouTube transient ClickHouse initialization failures must fail closed by default")
 	}
 	t.Setenv("R_YOUTUBE_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	if !shouldDeferYouTubePublishFailure(transient) {
+		t.Fatal("YouTube transient deferral should require explicit opt-in")
+	}
 	auth := errors.New("ClickHouse direct publish failed target=youtube: clickhouse-permission")
 	if shouldDeferYouTubePublishFailure(auth) {
 		t.Fatal("YouTube permission errors must remain fatal")
@@ -497,14 +497,14 @@ func TestShouldDeferYouTubePublishFailureOnlyForTransientErrors(t *testing.T) {
 
 func TestShouldDeferCommunityPublishFailureOnlyForTransientErrors(t *testing.T) {
 	transient := errors.New("ClickHouse direct publish failed target=community: clickhouse-not-initialized")
-	if !shouldDeferCommunityPublishFailure(transient) {
-		t.Fatal("R Community transient ClickHouse initialization failures should be deferred by default")
-	}
-	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "false")
+	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "")
 	if shouldDeferCommunityPublishFailure(transient) {
-		t.Fatal("R Community transient deferral should respect the opt-out env")
+		t.Fatal("R Community transient ClickHouse initialization failures must fail closed by default")
 	}
 	t.Setenv("R_COMMUNITY_PUBLISH_TRANSIENT_FAIL_OPEN", "true")
+	if !shouldDeferCommunityPublishFailure(transient) {
+		t.Fatal("R Community transient deferral should require explicit opt-in")
+	}
 	auth := errors.New("ClickHouse direct publish failed target=community: clickhouse-permission")
 	if shouldDeferCommunityPublishFailure(auth) {
 		t.Fatal("R Community permission errors must remain fatal")
