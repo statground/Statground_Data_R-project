@@ -2660,6 +2660,10 @@ func runYouTube(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
+		events, suppressed := filterSuppressedYouTubeEvents(events)
+		if suppressed > 0 {
+			fmt.Printf("[youtube] suppressed job=%s events=%d authority=youtube_video_id\n", currentJob, suppressed)
+		}
 		if err := pub.publishGeneric(ctx, events); err != nil {
 			if shouldDeferYouTubePublishFailure(err) {
 				fmt.Printf("[youtube] publish_deferred job=%s events=%d reason=%s\n", currentJob, len(events), publishFailureReason(err))
@@ -2672,6 +2676,167 @@ func runYouTube(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("published=%d\n", total)
 	return nil
+}
+
+var suppressedYouTubeVideoIDs = [...]string{
+	"_adWwYQXPd8",
+}
+
+// filterSuppressedYouTubeEvents is the final publication boundary shared by
+// every automatic YouTube job. The immutable YouTube video ID is authoritative;
+// event UUIDs are observation identities and must never be used for suppression.
+func filterSuppressedYouTubeEvents(events []genericEvent) ([]genericEvent, int) {
+	if len(events) == 0 {
+		return events, 0
+	}
+	filtered := make([]genericEvent, 0, len(events))
+	suppressed := 0
+	for _, event := range events {
+		if isSuppressedYouTubeEvent(event) {
+			suppressed++
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	if suppressed == 0 {
+		return events, 0
+	}
+	return filtered, suppressed
+}
+
+func isSuppressedYouTubeEvent(event genericEvent) bool {
+	if !strings.HasPrefix(event.EventType, "r.youtube.") {
+		return false
+	}
+	if containsSuppressedYouTubeReference(event.SourceURL) {
+		return true
+	}
+	return youtubePayloadReferencesSuppressedVideo(event.Payload)
+}
+
+func isSuppressedYouTubeVideoID(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, videoID := range suppressedYouTubeVideoIDs {
+		if value == videoID {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSuppressedYouTubeReference(value string) bool {
+	for _, videoID := range suppressedYouTubeVideoIDs {
+		if containsExactYouTubeVideoID(value, videoID) {
+			return true
+		}
+	}
+	return false
+}
+
+func youtubePayloadReferencesSuppressedVideo(payload string) bool {
+	var decoded any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		// A malformed payload is not, by itself, evidence that it belongs to the
+		// suppressed video. Preserve unrelated failure/diagnostic events while
+		// still catching an exact video ID embedded in their raw payload.
+		return containsSuppressedYouTubeReference(payload)
+	}
+	return youtubePayloadNodeReferencesSuppressedVideo(decoded)
+}
+
+func youtubePayloadNodeReferencesSuppressedVideo(node any) bool {
+	switch value := node.(type) {
+	case map[string]any:
+		for key, child := range value {
+			switch youtubePayloadIdentityKeyKind(key) {
+			case "id":
+				if youtubePayloadIdentityValueMatches(child, false) {
+					return true
+				}
+			case "url":
+				if youtubePayloadIdentityValueMatches(child, true) {
+					return true
+				}
+			}
+			if youtubePayloadNodeReferencesSuppressedVideo(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if youtubePayloadNodeReferencesSuppressedVideo(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func youtubePayloadIdentityKeyKind(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	compact := strings.NewReplacer("_", "", "-", "").Replace(key)
+	switch compact {
+	case "youtubevideoid", "parsedvideoid", "videoid":
+		return "id"
+	case "canonicalurl", "resulturl", "targeturl", "sourceurl", "url":
+		return "url"
+	}
+	if strings.Contains(compact, "thumbnail") {
+		return "url"
+	}
+	return ""
+}
+
+func youtubePayloadIdentityValueMatches(value any, allowURL bool) bool {
+	switch current := value.(type) {
+	case string:
+		if isSuppressedYouTubeVideoID(current) || allowURL && containsSuppressedYouTubeReference(current) {
+			return true
+		}
+	case map[string]any:
+		for _, child := range current {
+			if youtubePayloadIdentityValueMatches(child, allowURL) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range current {
+			if youtubePayloadIdentityValueMatches(child, allowURL) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsExactYouTubeVideoID(value, videoID string) bool {
+	value = strings.TrimSpace(value)
+	videoID = strings.TrimSpace(videoID)
+	if value == "" || videoID == "" {
+		return false
+	}
+	for offset := 0; offset < len(value); {
+		relative := strings.Index(value[offset:], videoID)
+		if relative < 0 {
+			return false
+		}
+		start := offset + relative
+		end := start + len(videoID)
+		beforeBoundary := start == 0 || !isYouTubeVideoIDByte(value[start-1])
+		afterBoundary := end == len(value) || !isYouTubeVideoIDByte(value[end])
+		if beforeBoundary && afterBoundary {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func isYouTubeVideoIDByte(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '-' || value == '_'
 }
 
 func runMastodon(ctx context.Context, args []string) error {
@@ -4989,6 +5154,9 @@ func youtubeSeedEvents(seeds []map[string]any, limit int) []genericEvent {
 			break
 		}
 		payload := normalizeYouTubeSeed(seed)
+		if isSuppressedYouTubeVideoID(stringAny(payload["parsed_video_id"])) || containsSuppressedYouTubeReference(stringAny(payload["url"])) {
+			continue
+		}
 		events = append(events, newGenericEvent("r.youtube.source.seed.v1", "r_youtube_seed_loader_go", stringAny(payload["url"]), "R-YouTube", "", "", "", payload))
 	}
 	return events
@@ -5200,11 +5368,14 @@ func youtubePageEvents(seeds []map[string]any, limit int) []genericEvent {
 		if targetURL == "" || strings.Contains(targetURL, "/results?") {
 			continue
 		}
+		ref := parseYouTubeRef(targetURL)
+		if isSuppressedYouTubeVideoID(ref["parsed_video_id"]) || containsSuppressedYouTubeReference(targetURL) {
+			continue
+		}
 		page := fetchWebsitePayload(targetURL)
 		page["seed_source_code"] = seedPayload["source_code"]
 		page["source_method"] = "youtube_public_html_no_data_api"
 		events = append(events, newGenericEvent("r.youtube.page.snapshot.v1", "youtube_public_html", targetURL, "R-YouTube", "", "", "", page))
-		ref := parseYouTubeRef(targetURL)
 		if ref["parsed_video_id"] != "" {
 			payload := map[string]any{
 				"youtube_video_id":       ref["parsed_video_id"],
@@ -5251,6 +5422,9 @@ func youtubeLinkEvents(limit int) []genericEvent {
 		payload := fetchWebsitePayload(targetURL)
 		for _, link := range anyStringSlice(payload["youtube_urls"]) {
 			ref := parseYouTubeRef(link)
+			if isSuppressedYouTubeVideoID(ref["parsed_video_id"]) || containsSuppressedYouTubeReference(link) {
+				continue
+			}
 			ref["source_url"] = targetURL
 			ref["target_url"] = link
 			ref["source_method"] = "r_website_youtube_link_scan_no_api"
@@ -5503,7 +5677,7 @@ func youtubeMetadataBackfillEvents(limit int) ([]genericEvent, error) {
 	events := make([]genericEvent, 0, len(rows)*3)
 	for _, row := range rows {
 		videoID := stringAny(row["youtube_video_id"])
-		if videoID == "" {
+		if videoID == "" || isSuppressedYouTubeVideoID(videoID) {
 			continue
 		}
 		stableUUID := firstNonEmpty(stringAny(row["stable_uuid"]), stableYouTubeVideoUUID(videoID, stringAny(row["source_tag"]), stringAny(row["uuid_article"])))
@@ -5570,7 +5744,7 @@ func youtubeVideoCandidates(seeds []map[string]any, limit int) []youtubeVideoCan
 	out := make([]youtubeVideoCandidate, 0)
 	add := func(videoID, rawURL string, seed map[string]any) {
 		videoID = strings.TrimSpace(videoID)
-		if videoID == "" || seen[videoID] {
+		if videoID == "" || isSuppressedYouTubeVideoID(videoID) || containsSuppressedYouTubeReference(rawURL) || seen[videoID] {
 			return
 		}
 		seen[videoID] = true
@@ -6089,6 +6263,9 @@ func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
 		for _, result := range results {
 			if limit > 0 && len(events) >= limit {
 				break
+			}
+			if isSuppressedYouTubeVideoID(result["parsed_video_id"]) || containsSuppressedYouTubeReference(result["result_url"]) {
+				continue
 			}
 			payload := mapStringAny(result)
 			events = append(events, newGenericEvent("r.youtube.search.result.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", payload))
