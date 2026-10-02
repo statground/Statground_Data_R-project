@@ -175,11 +175,14 @@ class ClickHousePressureGateTest(unittest.TestCase):
     def test_scheduled_workflow_gates_before_first_writer(self):
         root = Path(__file__).parents[1]
         workflow = (root / ".github/workflows/r-project-all.yml").read_text()
+        collect = workflow.split("  collect:", 1)[1].split("  cdn-export:", 1)[0]
+        cdn_export = workflow.split("  cdn-export:", 1)[1].split("  community-publication:", 1)[0]
         gate_step = "python3 scripts/clickhouse_pressure_gate.py"
-        self.assertEqual(workflow.count(gate_step), 1)
-        self.assertLess(workflow.index(gate_step), workflow.index("go run ./cmd/rproject-collector package"))
-        self.assertLess(workflow.index(gate_step), workflow.index("- name: Generate and insert Web-R Notebook"))
-        self.assertLess(workflow.index(gate_step), workflow.index("- name: Record Web-R CDN2 releases"))
+        self.assertEqual(collect.count(gate_step), 1)
+        self.assertEqual(cdn_export.count(gate_step), 1)
+        self.assertLess(collect.index(gate_step), collect.index("go run ./cmd/rproject-collector package"))
+        self.assertLess(collect.index(gate_step), collect.index("- name: Generate and insert Web-R Notebook"))
+        self.assertLess(cdn_export.index(gate_step), cdn_export.index("- name: Record Web-R CDN2 releases"))
         self.assertEqual(
             workflow.count(
                 "CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME: clickhouse-s1-r1"
@@ -189,7 +192,7 @@ class ClickHousePressureGateTest(unittest.TestCase):
         self.assertNotIn("secrets.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertNotIn("vars.CLICKHOUSE_DIRECT_ENDPOINT_HOSTNAME", workflow)
         self.assertIn(
-            "if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')",
+            "if: steps.opts.outputs.scope != 'publication' && steps.opts.outputs.scope != 'cdn' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')",
             workflow,
         )
         self.assertIn('case "${{ steps.opts.outputs.scope }}" in', workflow)

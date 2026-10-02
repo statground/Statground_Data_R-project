@@ -29,21 +29,24 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/r-project-all.yml", RECONCILE_WORKFLOW)
         self.assertIn("scope: publication", RECONCILE_WORKFLOW)
         self.assertIn("all|package|social|youtube-availability|community|community-digest|notebook|cdn|publication)", MAIN_WORKFLOW)
-        collect = MAIN_WORKFLOW.split("  collect:", 1)[1].split("  community-publication:", 1)[0]
+        collect = MAIN_WORKFLOW.split("  collect:", 1)[1].split("  cdn-export:", 1)[0]
         self.assertIn("if: steps.opts.outputs.scope != 'publication'", collect)
-        self.assertIn("if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook'", collect)
+        self.assertIn("if: steps.opts.outputs.scope != 'publication' && steps.opts.outputs.scope != 'cdn' && (steps.opts.outputs.scope != 'notebook'", collect)
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
-        self.assertIn("inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'", job)
+        self.assertIn("inputs.scope == 'publication' || ((inputs.scope == 'all' || inputs.scope == 'cdn') && needs.cdn-export.result == 'success')", job)
         self.assertIn("Gate exact community publication write targets", job)
         for workflow in (MAIN_WORKFLOW, BOOTSTRAP_WORKFLOW):
             self.assertNotIn("group: statground-internal", workflow)
 
-    def test_cdn_publication_scopes_share_one_non_cancelling_workflow_group(self) -> None:
+    def test_publication_owner_is_released_independently_from_cdn_exports(self) -> None:
         concurrency = MAIN_WORKFLOW.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-        self.assertIn("inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'", concurrency)
-        self.assertIn("'r-project-publication'", concurrency)
+        self.assertIn("github.run_id", concurrency)
+        self.assertNotIn("'r-project-publication'", concurrency)
         self.assertIn("cancel-in-progress: false", concurrency)
         self.assertNotIn("cancel-in-progress: true", concurrency)
+        job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
+        self.assertIn("group: r-project-publication", job)
+        self.assertIn("cancel-in-progress: false", job)
 
     def test_scheduled_publishers_do_not_default_to_fail_open(self) -> None:
         fail_open_lines = [

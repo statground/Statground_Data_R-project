@@ -129,7 +129,7 @@ env:
   CLICKHOUSE_PRESSURE_GATE_TIMEOUT_SECONDS: "15"
 
 concurrency:
-  group: ${{ (inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication') && 'r-project-publication' || format('r-project-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
+  group: ${{ format('r-project-workflow-{0}-{1}-{2}-{3}', github.run_id, inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
   cancel-in-progress: false
 
 jobs:
@@ -137,7 +137,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     # All entrypoints that can update YouTube share one write owner, even
-    # when their workflow-level publication queues use different groups.
+    # after independent CDN exports release their own job-level owner.
     concurrency:
       group: ${{ (inputs.scope == 'all' || inputs.scope == 'social' || inputs.scope == 'youtube-availability') && 'r-project-youtube-ingest' || format('r-project-collect-{0}-{1}-{2}', inputs.scope || 'all', inputs.r_package_job || 'default', inputs.r_package_reverse_shard_index || '0') }}
       cancel-in-progress: false
@@ -244,7 +244,7 @@ jobs:
           fi
 
       - name: Gate ClickHouse writes on storage pressure
-        if: steps.opts.outputs.scope != 'publication' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')
+        if: steps.opts.outputs.scope != 'publication' && steps.opts.outputs.scope != 'cdn' && (steps.opts.outputs.scope != 'notebook' || steps.opts.outputs.webr_notebook_dry_run != 'true')
         env:
           CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
           CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
@@ -785,6 +785,68 @@ jobs:
                   print(f"{key}={value}", file=out)
           print(json.dumps(result, ensure_ascii=False))
           PY
+
+  cdn-export:
+    name: Publish Web-R content and package CDN releases
+    needs: collect
+    if: inputs.scope == 'all' || inputs.scope == 'cdn'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    concurrency:
+      group: r-project-cdn-export
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set CDN run options
+        id: opts
+        run: echo "scope=${{ inputs.scope || 'all' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install CDN exporter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r scripts/requirements.txt
+
+      - name: Select bounded R ecosystem locale batch
+        id: locale_rotation
+        env:
+          LOCALE_ROTATION_APPROVED: ${{ vars.R_ECOSYSTEM_LOCALE_ROTATION_APPROVED == 'true' }}
+          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python3 scripts/test_r_ecosystem_locale_batch.py
+          python3 scripts/r_ecosystem_locale_batch.py \
+            --run-number "$WORKFLOW_RUN_NUMBER" \
+            --approved "$LOCALE_ROTATION_APPROVED" >> "$GITHUB_OUTPUT"
+
+      - name: Validate ClickHouse settings
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
+        run: |
+          test -n "$CH_HOST" || { echo "ClickHouse host secret is required"; exit 1; }
+          test -n "$CH_USER" || { echo "ClickHouse user secret is required"; exit 1; }
+          test -n "$CH_PASSWORD" || { echo "ClickHouse password secret is required"; exit 1; }
+          if [[ "${CH_SECURE,,}" != "true" && "$CH_SECURE" != "1" ]]; then
+            echo "::warning::ClickHouse transport is not TLS-protected; provision a verified HTTPS endpoint and set CH_SECURE=true"
+          fi
+
+      - name: Gate CDN release writes on storage pressure
+        env:
+          CH_HOST: ${{ secrets.CH_HOST || secrets.CLICKHOUSE_HOST }}
+          CH_PORT: ${{ secrets.CH_PORT || secrets.CLICKHOUSE_PORT }}
+          CH_USER: ${{ secrets.CH_USER || secrets.CLICKHOUSE_USER }}
+          CH_PASSWORD: ${{ secrets.CH_PASSWORD || secrets.CLICKHOUSE_PASSWORD }}
+          CH_SECURE: ${{ secrets.CH_SECURE || secrets.CLICKHOUSE_SECURE || 'false' }}
+          CLICKHOUSE_PRESSURE_GATE_TARGETS: replica:Data_R_Community_Service.web_r_cdn_release_log_local
+        run: python3 scripts/clickhouse_pressure_gate.py
 
       - name: Validate Web-R CDN2 publish settings
         if: steps.opts.outputs.scope == 'all' || steps.opts.outputs.scope == 'cdn'
@@ -1342,8 +1404,11 @@ jobs:
 
   community-publication:
     name: Publish exact Web-R community generation
-    needs: collect
-    if: inputs.scope == 'all' || inputs.scope == 'cdn' || inputs.scope == 'publication'
+    needs: [collect, cdn-export]
+    if: always() && !cancelled() && needs.collect.result == 'success' && (inputs.scope == 'publication' || ((inputs.scope == 'all' || inputs.scope == 'cdn') && needs.cdn-export.result == 'success'))
+    concurrency:
+      group: r-project-publication
+      cancel-in-progress: false
     runs-on: [self-hosted, linux, x64, webr-community-publisher]
     environment: web-r-community-publication
     timeout-minutes: 45
