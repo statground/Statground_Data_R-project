@@ -254,18 +254,11 @@ func FromEnv(ctx context.Context, scope string) ([]Candidate, string, error) {
 			}
 		}
 	} else {
-		sql := "SELECT keyword,normalized_word,language,sources,confidence,snapshot_id,scope FROM Data_Content_Lexicon.keyword_candidate_pool_latest WHERE scope=" + literal(scope) + " AND normalized_word GLOBAL NOT IN (SELECT normalized_word FROM (SELECT normalized_word,run_id,argMax(cooldown_until,version) AS until FROM Data_Content_Lexicon.keyword_selection_log WHERE scope=" + literal(scope) + " AND origin='lexicon' AND run_id!=" + literal(RunID()) + " GROUP BY normalized_word,run_id) WHERE until>now()) ORDER BY cityHash64(normalized_word," + literal(RunID()) + ") LIMIT 2000 FORMAT JSON"
-		data, e := request(ctx, sql, nil, "")
+		var e error
+		pool, e = publishedPool(ctx, scope)
 		if e != nil {
 			return nil, "", e
 		}
-		var envelope struct {
-			Data []Candidate `json:"data"`
-		}
-		if json.Unmarshal(data, &envelope) != nil {
-			return nil, "", errors.New("keyword_pool_response_invalid")
-		}
-		pool = envelope.Data
 	}
 	filtered := []Candidate{}
 	snapshot := ""
@@ -279,6 +272,79 @@ func FromEnv(ctx context.Context, scope string) ([]Candidate, string, error) {
 		return nil, "", errors.New("keyword_pool_empty")
 	}
 	return filtered, snapshot, nil
+}
+
+func publishedPool(ctx context.Context, scope string) ([]Candidate, error) {
+	// Published scopes contain at most 2,000 rows. Read the marker-backed pool
+	// separately from cooldowns so nested Distributed reads do not share one
+	// execution budget. An oversized pool must defer rather than filter a prefix.
+	sql := "SELECT keyword,normalized_word,language,sources,confidence,snapshot_id,scope,count() OVER () AS pool_count,toUnixTimestamp(now()) AS cooldown_reference FROM Data_Content_Lexicon.keyword_candidate_pool_latest WHERE scope=" + literal(scope) + " ORDER BY cityHash64(normalized_word," + literal(RunID()) + ") LIMIT 2000 FORMAT JSON"
+	data, e := request(ctx, sql, nil, "")
+	if e != nil {
+		return nil, e
+	}
+	var envelope struct {
+		Data []struct {
+			Candidate
+			PoolCount         json.Number `json:"pool_count"`
+			CooldownReference json.Number `json:"cooldown_reference"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return nil, errors.New("keyword_pool_response_invalid")
+	}
+	if len(envelope.Data) == 0 {
+		return nil, errors.New("keyword_pool_empty")
+	}
+	pool := make([]Candidate, 0, len(envelope.Data))
+	words := []string{}
+	wordSet := map[string]bool{}
+	var reference uint64
+	for _, row := range envelope.Data {
+		count, ce := strconv.ParseUint(row.PoolCount.String(), 10, 64)
+		cutoff, te := strconv.ParseUint(row.CooldownReference.String(), 10, 32)
+		if ce != nil || count > 2000 || count != uint64(len(envelope.Data)) || te != nil || cutoff == 0 || (reference != 0 && reference != cutoff) {
+			return nil, errors.New("keyword_pool_bounds_unverified")
+		}
+		reference = cutoff
+		pool = append(pool, row.Candidate)
+		if validCandidate(row.Candidate) && !wordSet[row.NormalizedWord] {
+			wordSet[row.NormalizedWord] = true
+			words = append(words, literal(row.NormalizedWord))
+		}
+	}
+	if len(words) == 0 {
+		return nil, errors.New("keyword_pool_empty")
+	}
+	// Use the pool request's server clock, including its second precision. Only
+	// prior lexicon runs can cool down a word; returned words stay bounded by pool.
+	sql = "SELECT DISTINCT normalized_word FROM (SELECT normalized_word,run_id,argMax(cooldown_until,version) AS until FROM Data_Content_Lexicon.keyword_selection_log WHERE scope=" + literal(scope) + " AND origin='lexicon' AND run_id!=" + literal(RunID()) + " AND normalized_word IN (" + strings.Join(words, ",") + ") GROUP BY normalized_word,run_id) WHERE until>fromUnixTimestamp(" + strconv.FormatUint(reference, 10) + ") FORMAT JSON"
+	data, e = request(ctx, sql, nil, "")
+	if e != nil {
+		return nil, e
+	}
+	var cooldown struct {
+		Data *[]struct {
+			Word string `json:"normalized_word"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(data, &cooldown) != nil || cooldown.Data == nil || len(*cooldown.Data) > len(words) {
+		return nil, errors.New("keyword_cooldown_response_invalid")
+	}
+	blocked := map[string]bool{}
+	for _, row := range *cooldown.Data {
+		if !wordSet[row.Word] {
+			return nil, errors.New("keyword_cooldown_response_invalid")
+		}
+		blocked[row.Word] = true
+	}
+	eligible := make([]Candidate, 0, len(pool))
+	for _, c := range pool {
+		if !blocked[c.NormalizedWord] {
+			eligible = append(eligible, c)
+		}
+	}
+	return eligible, nil
 }
 
 type receipt struct {
