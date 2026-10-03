@@ -2664,6 +2664,14 @@ func runYouTube(ctx context.Context, args []string) error {
 	for _, currentJob := range jobs {
 		events, err := collectYouTubeJob(currentJob, *seedLimit, *pageLimit, *videoLimit, *backfillLimit, *transcriptLimit, *commentLimit, *refreshVideoID)
 		if err != nil {
+			// A failed discovery outcome receipt stops further provider calls.
+			// Preserve already fetched source events before reporting that error.
+			if currentJob == "search" && len(events) > 0 {
+				filtered, _ := filterSuppressedYouTubeEvents(events)
+				if publishErr := pub.publishGeneric(ctx, filtered); publishErr != nil {
+					return fmt.Errorf("search partial publication failed: %w", publishErr)
+				}
+			}
 			return fmt.Errorf("%s: %w", currentJob, err)
 		}
 		events, suppressed := filterSuppressedYouTubeEvents(events)
@@ -5137,7 +5145,7 @@ func collectYouTubeJob(job string, seedLimit, pageLimit, videoLimit, backfillLim
 	case "pages":
 		return youtubePageEvents(seeds, pageLimit), nil
 	case "search":
-		return youtubeSearchEvents(seeds, envInt("R_YOUTUBE_SEARCH_EVENT_LIMIT", 0)), nil
+		return youtubeSearchEvents(seeds, minInt(50, maxInt(1, envInt("R_YOUTUBE_SEARCH_EVENT_LIMIT", 50))))
 	case "links":
 		return youtubeLinkEvents(pageLimit), nil
 	case "videos":
@@ -6314,93 +6322,7 @@ func fetchYouTubeOEmbedPayload(canonicalURL string) (map[string]any, error) {
 	}, nil
 }
 
-func youtubeSearchEvents(seeds []map[string]any, limit int) []genericEvent {
-	queries := youtubeSearchQueries(seeds)
-	events := make([]genericEvent, 0)
-	enrichedVideos := 0
-	enrichLimit := envInt("R_YOUTUBE_SEARCH_VIDEO_ENRICH_LIMIT", 10)
-	for _, query := range queries {
-		if limit > 0 && len(events) >= limit {
-			break
-		}
-		searchURL := "https://www.youtube.com/results?search_query=" + url.QueryEscape(query)
-		body, err := fetchBytes(searchURL)
-		if err != nil {
-			events = append(events, collectionFailureEvent("r.youtube.collection.failure.v1", "youtube_public_search_html", searchURL, "R-YouTube", "", err))
-			continue
-		}
-		results := extractYouTubeSearchResults(string(body), query, searchURL)
-		for _, result := range results {
-			if limit > 0 && len(events) >= limit {
-				break
-			}
-			if isSuppressedYouTubeVideoID(result["parsed_video_id"]) || containsSuppressedYouTubeReference(result["result_url"]) {
-				continue
-			}
-			payload := mapStringAny(result)
-			events = append(events, newGenericEvent("r.youtube.search.result.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", payload))
-			if result["parsed_video_id"] != "" {
-				if enrichLimit > 0 && enrichedVideos < enrichLimit {
-					seedPayload := map[string]any{
-						"title":             query,
-						"url":               result["result_url"],
-						"category":          "search_result",
-						"source_type":       "video",
-						"source_confidence": "search_html_discovered",
-						"language_hint":     "und",
-					}
-					if videoPayload, err := fetchYouTubeVideoSnapshotPayload(result["parsed_video_id"], result["result_url"], seedPayload); err == nil {
-						videoPayload["source_category"] = "search_result"
-						videoPayload["source_confidence"] = "search_html_discovered"
-						videoPayload["search_query"] = query
-						events = append(events, newGenericEvent("r.youtube.video.snapshot.v1", stringAny(videoPayload["source_method"]), result["result_url"], "R-YouTube", "", "", stringAny(videoPayload["published_at"]), videoPayload))
-						if strings.Contains(stringAny(videoPayload["source_method"]), "youtube_data_api") {
-							events = append(events, youtubeQuotaUsageEvent(result["result_url"]))
-						}
-						events = append(events, youtubeMetadataPackageMentionEvents(result["parsed_video_id"], videoPayload)...)
-						enrichedVideos++
-						continue
-					}
-				}
-				videoPayload := map[string]any{
-					"youtube_video_id":       result["parsed_video_id"],
-					"youtube_channel_id":     "",
-					"playlist_ids_json":      "[]",
-					"video_title":            "YouTube video " + result["parsed_video_id"],
-					"video_description":      "Discovered from YouTube search query: " + query,
-					"canonical_url":          result["result_url"],
-					"thumbnail_url":          "https://i.ytimg.com/vi/" + result["parsed_video_id"] + "/hqdefault.jpg",
-					"published_at":           "",
-					"duration_seconds":       "0",
-					"view_count":             "0",
-					"like_count":             "0",
-					"comment_count":          "0",
-					"favorite_count":         "0",
-					"caption_available":      "0",
-					"default_audio_language": "",
-					"default_language":       "",
-					"language_code":          "und",
-					"tags_json":              "[]",
-					"thumbnail_urls_json":    mustJSON(map[string]any{"hqdefault": map[string]any{"url": "https://i.ytimg.com/vi/" + result["parsed_video_id"] + "/hqdefault.jpg"}}),
-					"channel_title":          "",
-					"privacy_status":         "",
-					"source_method":          "youtube_public_search_html_unenriched_candidate",
-					"source_tag":             "r_project_ecosystem_youtube",
-					"source_category":        "search_result",
-					"source_confidence":      "search_html_discovered_unenriched",
-					"metadata_errors_json":   mustJSON([]string{"metadata_enrich_limit_reached"}),
-					"active":                 "0",
-					"collection_status":      "candidate",
-				}
-				finalizeYouTubeVideoPayload(videoPayload)
-				events = append(events, newGenericEvent("r.youtube.video.candidate.v1", "youtube_public_search_html", result["result_url"], "R-YouTube", "", "", "", videoPayload))
-			}
-		}
-	}
-	return events
-}
-
-func youtubeSearchQueries(seeds []map[string]any) []string {
+func youtubeCuratedSearchQueries(seeds []map[string]any) []string {
 	defaults := []string{
 		"R programming tutorial",
 		"R package tutorial",
@@ -6426,7 +6348,7 @@ func youtubeSearchQueries(seeds []map[string]any) []string {
 			queries = append(queries, category+" R programming YouTube")
 		}
 	}
-	return firstNStrings(uniqueStrings(queries), maxInt(1, envInt("R_YOUTUBE_SEARCH_QUERY_LIMIT", 40)))
+	return uniqueStrings(queries)
 }
 
 func extractYouTubeSearchResults(text, query, searchURL string) []map[string]string {
