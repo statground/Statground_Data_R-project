@@ -10855,7 +10855,7 @@ func utcNow() string {
 }
 
 func nowKST() time.Time {
-	return time.Now().UTC().Add(9 * time.Hour)
+	return time.Now().In(time.FixedZone("KST", 9*3600))
 }
 
 func formatKST(t time.Time) string {
