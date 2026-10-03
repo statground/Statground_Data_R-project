@@ -8468,6 +8468,17 @@ func insertGenericRawEventsDirect(ctx context.Context, events []genericEvent) (g
 	progressEvery := maxInt(1, len(chunks)/10)
 	for index, chunk := range chunks {
 		if err := insertGenericRawEventChunkWithSplit(ctx, cfg, target, chunk); err != nil {
+			if !isDirectOutboxPersistenceError(err) && shouldEnqueueRProjectDirectOutbox(err) {
+				for _, pending := range chunks[index+1:] {
+					body, encodeErr := genericRawEventInsertBody(cfg, target, pending)
+					if encodeErr != nil {
+						return target, encodeErr
+					}
+					if outboxErr := preserveUnattemptedGenericRawEventChunk(ctx, cfg, target, body, len(pending), err); outboxErr != nil {
+						return target, outboxErr
+					}
+				}
+			}
 			return target, err
 		}
 		completed := index + 1
@@ -8516,19 +8527,11 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 	if len(events) == 0 {
 		return nil
 	}
-	var b strings.Builder
-	b.WriteString(genericRawEventInsertPrefix(cfg, target.table))
-	now := time.Now().UTC()
-	for _, event := range events {
-		row := genericRawEventDirectRow(event, now, target.includePackage)
-		body, err := json.Marshal(row)
-		if err != nil {
-			return err
-		}
-		b.Write(body)
-		b.WriteByte('\n')
+	body, err := genericRawEventInsertBody(cfg, target, events)
+	if err != nil {
+		return err
 	}
-	err := execClickHouseDirectChunk(ctx, cfg, b.String(), target.label, len(events))
+	err = execClickHouseDirectChunk(ctx, cfg, body, target.label, len(events))
 	if err == nil {
 		return nil
 	}
@@ -8536,13 +8539,21 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 		mid := len(events) / 2
 		fmt.Printf("[clickhouse] direct publish split target=%s events=%d reason=%s\n", target.label, len(events), publicClickHouseError(err))
 		if splitErr := insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[:mid]); splitErr != nil {
+			if !isDirectOutboxPersistenceError(splitErr) && shouldEnqueueRProjectDirectOutbox(splitErr) {
+				// Keep the exact serialized sibling rows; this branch never attempted them.
+				rows := strings.SplitAfter(directRowsJSONFromInsertBody(body), "\n")
+				pendingBody := genericRawEventInsertPrefix(cfg, target.table) + strings.Join(rows[mid:], "")
+				if outboxErr := preserveUnattemptedGenericRawEventChunk(ctx, cfg, target, pendingBody, len(events)-mid, splitErr); outboxErr != nil {
+					return outboxErr
+				}
+			}
 			return splitErr
 		}
 		return insertGenericRawEventChunkWithSplit(ctx, cfg, target, events[mid:])
 	}
 	if shouldEnqueueRProjectDirectOutbox(err) {
 		label := rProjectDirectTableLabel(target.table)
-		if outboxErr := enqueueRProjectDirectOutbox(ctx, cfg, target.table, label, b.String(), len(events), err); outboxErr == nil {
+		if outboxErr := enqueueRProjectDirectOutbox(ctx, cfg, target.table, label, body, len(events), err); outboxErr == nil {
 			fmt.Printf("[clickhouse] queued R Project direct outbox target=%s rows=%d reason=%s\n", label, len(events), publicClickHouseError(err))
 			return fmt.Errorf("clickhouse direct publish deferred target=%s rows=%d reason=%s", label, len(events), publicClickHouseError(err))
 		} else {
@@ -8551,6 +8562,31 @@ func insertGenericRawEventChunkWithSplit(ctx context.Context, cfg clickHouseQuer
 		}
 	}
 	return err
+}
+
+func genericRawEventInsertBody(cfg clickHouseQueryConfig, target genericDirectTarget, events []genericEvent) (string, error) {
+	var b strings.Builder
+	b.WriteString(genericRawEventInsertPrefix(cfg, target.table))
+	now := time.Now().UTC()
+	for _, event := range events {
+		row := genericRawEventDirectRow(event, now, target.includePackage)
+		body, err := json.Marshal(row)
+		if err != nil {
+			return "", err
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
+}
+
+func preserveUnattemptedGenericRawEventChunk(ctx context.Context, cfg clickHouseQueryConfig, target genericDirectTarget, body string, rowCount int, sourceErr error) error {
+	label := rProjectDirectTableLabel(target.table)
+	if err := enqueueRProjectDirectOutbox(ctx, cfg, target.table, label, body, rowCount, sourceErr); err != nil {
+		return newDirectOutboxPersistenceError(label, sourceErr, err)
+	}
+	fmt.Printf("[clickhouse] queued unattempted R Project direct outbox target=%s rows=%d reason=%s\n", label, rowCount, publicClickHouseError(sourceErr))
+	return nil
 }
 
 func shouldEnqueueRProjectDirectOutbox(err error) bool {
