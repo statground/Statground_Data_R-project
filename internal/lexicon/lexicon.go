@@ -575,19 +575,26 @@ func deliverPending(ctx context.Context, path string) error {
 	if _, e := request(ctx, "INSERT INTO Data_Content_Lexicon.keyword_selection_log FORMAT JSONEachRow", body, digest(body)); e != nil {
 		return e
 	}
-	sql := "SELECT scope,run_id,normalized_word,origin,argMax(keyword,version) AS keyword,argMax(language,version) AS language,argMax(snapshot_id,version) AS snapshot_id,argMax(sources,version) AS sources,argMax(confidence,version) AS confidence,toString(argMax(selected_at,version)) AS selected_at,argMax(outcome,version) AS outcome,argMax(result_count,version) AS result_count,toString(argMax(cooldown_until,version)) AS cooldown_until,max(version) AS version FROM Data_Content_Lexicon.keyword_selection_log WHERE (scope,run_id,normalized_word,origin) IN (" + strings.Join(keys, ",") + ") GROUP BY scope,run_id,normalized_word,origin FORMAT JSON"
+	// Reusing the source column name as an aggregate alias makes ClickHouse
+	// substitute max(version) inside argMax and reject the readback query.
+	sql := "SELECT scope,run_id,normalized_word,origin,argMax(keyword,version) AS keyword,argMax(language,version) AS language,argMax(snapshot_id,version) AS snapshot_id,argMax(sources,version) AS sources,argMax(confidence,version) AS confidence,toString(argMax(selected_at,version)) AS selected_at,argMax(outcome,version) AS outcome,argMax(result_count,version) AS result_count,toString(argMax(cooldown_until,version)) AS cooldown_until,max(version) AS ack_version FROM Data_Content_Lexicon.keyword_selection_log WHERE (scope,run_id,normalized_word,origin) IN (" + strings.Join(keys, ",") + ") GROUP BY scope,run_id,normalized_word,origin FORMAT JSON"
 	data, e := request(ctx, sql, nil, "")
 	if e != nil {
 		return e
 	}
 	var readback struct {
-		Data []deliveryRow `json:"data"`
+		Data []struct {
+			deliveryRow
+			ACKVersion json.Number `json:"ack_version"`
+		} `json:"data"`
 	}
 	if json.Unmarshal(data, &readback) != nil || len(readback.Data) != len(expected) {
 		return errors.New("keyword_selection_readback_mismatch")
 	}
 	got := map[string]deliveryRow{}
-	for _, row := range readback.Data {
+	for _, acknowledged := range readback.Data {
+		row := acknowledged.deliveryRow
+		row.Version = acknowledged.ACKVersion
 		identity := row.Scope + "\x00" + row.RunID + "\x00" + row.NormalizedWord + "\x00" + row.Origin
 		if _, seen := got[identity]; seen {
 			return errors.New("keyword_selection_readback_mismatch")
