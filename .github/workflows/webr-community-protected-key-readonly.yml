@@ -1,0 +1,79 @@
+name: Web-R Protected Publication Key Read Only
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["webr-community-key-readonly-20261005-12fa9932ee2808268602009ea594c4d1"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webr-community-key-readonly-12fa9932ee2808268602009ea594c4d1
+  cancel-in-progress: false
+
+jobs:
+  read:
+    if: >-
+      github.repository == 'statground/Statground_Data_R-project' &&
+      github.run_attempt == 1 &&
+      ((github.event_name == 'push' && github.ref == 'refs/tags/webr-community-key-readonly-20261005-12fa9932ee2808268602009ea594c4d1') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    name: Fixed protected environment public key and three metadata GETs
+    runs-on: ubuntu-latest
+    environment: web-r-community-publication
+    timeout-minutes: 2
+    outputs:
+      complete: ${{ steps.read.outputs.complete }}
+      state: ${{ steps.read.outputs.state }}
+      reason: ${{ steps.read.outputs.reason }}
+      http_status: ${{ steps.read.outputs.http_status }}
+      nonce: ${{ steps.read.outputs.nonce }}
+      source_sha: ${{ steps.read.outputs.source_sha }}
+      run_id: ${{ steps.read.outputs.run_id }}
+      repository_id: ${{ steps.read.outputs.repository_id }}
+      observed_at: ${{ steps.read.outputs.observed_at }}
+      key_id: ${{ steps.read.outputs.key_id }}
+      key: ${{ steps.read.outputs.key }}
+      configs: ${{ steps.read.outputs.configs }}
+      readers: ${{ steps.read.outputs.readers }}
+      tokens: ${{ steps.read.outputs.tokens }}
+    steps:
+      - name: Checkout exact triggering source without persisted credentials
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Fixed-origin bounded read-only key protocol
+        id: read
+        env:
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          PROTECTED_KEY_READONLY_NONCE: 12fa9932ee2808268602009ea594c4d1
+        run: python3 scripts/webr_community_protected_key_readonly.py
+
+  key:
+    if: ${{ always() && needs.read.outputs.complete == 'true' }}
+    needs: read
+    name: "Protected public key repo=${{ needs.read.outputs.repository_id }} id=${{ needs.read.outputs.key_id }} key=${{ needs.read.outputs.key }} at=${{ needs.read.outputs.observed_at }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Public encryption key only; GET permission does not establish setter permission."
+
+  presence:
+    if: ${{ always() && needs.read.outputs.complete == 'true' }}
+    needs: read
+    name: "Protected metadata GET200 configs=${{ needs.read.outputs.configs }} readers=${{ needs.read.outputs.readers }} tokens=${{ needs.read.outputs.tokens }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "False records metadata404; not-found and hidden metadata remain indistinguishable."
+
+  receipt:
+    if: ${{ always() }}
+    needs: read
+    name: "Protected readonly ${{ needs.read.outputs.state || 'unknown' }} reason=${{ needs.read.outputs.reason || 'unknown' }} http=${{ needs.read.outputs.http_status || 'unknown' }} source=${{ needs.read.outputs.source_sha || 'unknown' }} run=${{ needs.read.outputs.run_id || 'unknown' }} nonce=${{ needs.read.outputs.nonce || 'unknown' }} at=${{ needs.read.outputs.observed_at || 'unknown' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Finite GET-only receipt; no setting, runner, privilege or publication changes."
