@@ -96,8 +96,9 @@ def validate_xml_configs(value: Any) -> dict[str, str]:
             root = ET.fromstring(xml)
         except ET.ParseError as exc:
             raise RuntimeInputError("ClickHouse endpoint config is invalid XML") from exc
-        if root.tag != "clickhouse":
-            raise RuntimeInputError("ClickHouse endpoint config root must be clickhouse")
+        # The versioned SQL owner emits <config>; existing inputs use <clickhouse>.
+        if root.tag not in ("config", "clickhouse"):
+            raise RuntimeInputError("ClickHouse endpoint config root must be config or clickhouse")
         configs[endpoint] = xml
     return configs
 
