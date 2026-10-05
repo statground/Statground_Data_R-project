@@ -1,0 +1,89 @@
+name: Web-R Sealed Runner Enrollment
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [readback]
+        default: readback
+        required: true
+      runner_id:
+        description: Reviewed locally configured runner ID; GET only
+        required: true
+        type: string
+  push:
+    tags:
+      - "webr-runner-sealed-bootstrap-*"
+      - "webr-runner-sealed-readback-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webr-runner-sealed-enrollment
+  cancel-in-progress: false
+
+jobs:
+  enroll:
+    name: Reviewed sealed enrollment or GET-only readback
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      state: ${{ steps.sealed.outputs.state }}
+      source: ${{ steps.sealed.outputs.source }}
+      run: ${{ steps.sealed.outputs.run }}
+      nonce: ${{ steps.sealed.outputs.nonce }}
+      key: ${{ steps.sealed.outputs.key }}
+      observed: ${{ steps.sealed.outputs.observed }}
+      matrix: ${{ steps.sealed.outputs.matrix }}
+      runner_id: ${{ steps.sealed.outputs.runner_id }}
+      name_match: ${{ steps.sealed.outputs.name_match }}
+      labels_match: ${{ steps.sealed.outputs.labels_match }}
+      status: ${{ steps.sealed.outputs.status }}
+      busy: ${{ steps.sealed.outputs.busy }}
+      total: ${{ steps.sealed.outputs.total }}
+      publishers: ${{ steps.sealed.outputs.publishers }}
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Fixed repository bounded enrollment protocol
+        id: sealed
+        env:
+          RUNNER_BOOTSTRAP_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          BOOTSTRAP_MODE: ${{ inputs.mode }}
+          EXPECTED_RUNNER_ID: ${{ inputs.runner_id }}
+        run: python3 scripts/webr_runner_sealed_bootstrap.py
+
+  metadata:
+    if: ${{ needs.enroll.outputs.state == 'sealed' }}
+    needs: enroll
+    name: "Sealed metadata v1 source=${{ needs.enroll.outputs.source }} run=${{ needs.enroll.outputs.run }} nonce=${{ needs.enroll.outputs.nonce }} key=${{ needs.enroll.outputs.key }} at=${{ needs.enroll.outputs.observed }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Public context only; no plaintext enrollment token."
+
+  chunks:
+    if: ${{ needs.enroll.outputs.state == 'sealed' }}
+    needs: enroll
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.enroll.outputs.matrix || '[]') }}
+    name: "Sealed chunk ${{ matrix.index }}/8 ${{ matrix.chunk }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Ciphertext-only carrier; no registration or service operation."
+
+  readback:
+    if: ${{ always() }}
+    needs: enroll
+    name: "Runner readback ${{ needs.enroll.outputs.state || 'unknown' }} id=${{ needs.enroll.outputs.runner_id || 'unknown' }} name=${{ needs.enroll.outputs.name_match || 'unknown' }} labels=${{ needs.enroll.outputs.labels_match || 'unknown' }} status=${{ needs.enroll.outputs.status || 'unknown' }} busy=${{ needs.enroll.outputs.busy || 'unknown' }} total=${{ needs.enroll.outputs.total || 'unknown' }} publisher=${{ needs.enroll.outputs.publishers || 'unknown' }} at=${{ needs.enroll.outputs.observed || 'unknown' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Safe scalar receipt; failures remain unknown and block activation."
