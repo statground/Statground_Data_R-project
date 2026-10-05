@@ -136,6 +136,22 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertIn('git -C statground-sql rev-parse HEAD', job)
         self.assertIn("STATGROUND_SQL_READ_TOKEN", job)
 
+    def test_existing_admin_sql_fallback_is_limited_to_immutable_checkout(self) -> None:
+        job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
+        expression = "${{ secrets.STATGROUND_SQL_READ_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN }}"
+        validation = job.split("- name: Validate protected publication settings", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("STATGROUND_SQL_READ_TOKEN: " + expression, validation)
+        for workflow in (job, BOOTSTRAP_WORKFLOW):
+            checkout = workflow.split("- name: Checkout immutable Statground SQL publisher", 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn("token: " + expression, checkout)
+            self.assertIn("persist-credentials: false", checkout)
+            self.assertIn(f"ref: {SQL_SHA}", checkout)
+        # No publisher client, token bundle or collection setting can receive
+        # this checkout-only credential, and no broader GitHub token is used.
+        self.assertEqual(MAIN_WORKFLOW.count(expression), 2)
+        self.assertEqual(BOOTSTRAP_WORKFLOW.count(expression), 1)
+        self.assertNotIn("secrets.GITHUB_TOKEN", validation)
+
     def test_community_export_receives_exact_loader_generation(self) -> None:
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
         self.assertIn('echo "generation=$generation" >> "$GITHUB_OUTPUT"', job)

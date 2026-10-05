@@ -88,7 +88,7 @@ jobs:
           repository: statground/Statground_SQL
           ref: 488f88ffe3370f71430162a60b47fc075a68b7db
           path: statground-sql
-          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           persist-credentials: false
 
       - name: Checkout exact community CDN generation

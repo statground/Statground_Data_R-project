@@ -1451,7 +1451,7 @@ jobs:
 
       - name: Validate protected publication settings
         env:
-          STATGROUND_SQL_READ_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          STATGROUND_SQL_READ_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
           WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
@@ -1476,7 +1476,7 @@ jobs:
           repository: statground/Statground_SQL
           ref: 488f88ffe3370f71430162a60b47fc075a68b7db
           path: statground-sql
-          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          token: ${{ secrets.STATGROUND_SQL_READ_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
           persist-credentials: false
 
       - name: Verify immutable Statground SQL checkout
