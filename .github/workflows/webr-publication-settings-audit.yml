@@ -1,0 +1,80 @@
+name: Web-R Publication Settings Audit
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["webr-publication-settings-audit-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webr-publication-settings-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Bounded read-only protected publication settings audit
+    runs-on: ubuntu-latest
+    environment: web-r-community-publication
+    timeout-minutes: 2
+    outputs:
+      sql: ${{ steps.audit.outputs.sql }}
+      cdn: ${{ steps.audit.outputs.cdn }}
+      key: ${{ steps.audit.outputs.key }}
+      configs: ${{ steps.audit.outputs.configs }}
+      readers: ${{ steps.audit.outputs.readers }}
+      tokens: ${{ steps.audit.outputs.tokens }}
+      sql_read: ${{ steps.audit.outputs.sql_read }}
+      auth: ${{ steps.audit.outputs.auth }}
+      at: ${{ steps.audit.outputs.at }}
+    steps:
+      - name: Audit presence and fixed immutable SQL read only
+        id: audit
+        env:
+          SQL_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          CDN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+          CH_CONFIGS: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
+          READERS: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
+          READER_TOKENS: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
+        run: |
+          python3 - <<'PY'
+          import json, os, signal, time, urllib.error, urllib.request
+          def stop(*_): raise TimeoutError()
+          signal.signal(signal.SIGALRM, stop)
+          signal.alarm(20)
+          mapping = {'sql':'SQL_TOKEN','cdn':'CDN_TOKEN','key':'CONTENT_KEY','configs':'CH_CONFIGS','readers':'READERS','tokens':'READER_TOKENS'}
+          values = {key:str(bool(os.environ.get(name))).lower() for key,name in mapping.items()}
+          token = os.environ.get('SQL_TOKEN') or os.environ.get('CDN_TOKEN')
+          values['auth'] = 'designated' if os.environ.get('SQL_TOKEN') else 'existing-admin' if token else 'none'
+          values['sql_read'] = 'unknown'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs): raise ValueError()
+          if token:
+              url='https://api.github.com/repos/statground/Statground_SQL/commits/488f88ffe3370f71430162a60b47fc075a68b7db'
+              request=urllib.request.Request(url,method='GET',headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'})
+              try:
+                  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+                  with opener.open(request,timeout=8) as response:
+                      raw=response.read((1<<20)+1)
+                      assert response.status==200 and response.geturl()==url and len(raw)<=1<<20
+                  values['sql_read']=str(json.loads(raw).get('sha')=='488f88ffe3370f71430162a60b47fc075a68b7db').lower()
+              except urllib.error.HTTPError as error:
+                  error.close()
+              except Exception:
+                  pass
+          values['at']=str(int(time.time()))
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='ascii') as output:
+              for key,value in values.items(): output.write(key+'='+value+'\n')
+          print(json.dumps({'read_only':True,'secret_values_output':False,'settings_presence_only':True}))
+          signal.alarm(0)
+          PY
+
+  receipt:
+    needs: audit
+    name: "Publication settings SQL=${{ needs.audit.outputs.sql }} CDN=${{ needs.audit.outputs.cdn }} key=${{ needs.audit.outputs.key }} configs=${{ needs.audit.outputs.configs }} readers=${{ needs.audit.outputs.readers }} tokens=${{ needs.audit.outputs.tokens }} immutableSQL=${{ needs.audit.outputs.sql_read }} auth=${{ needs.audit.outputs.auth }} at=${{ needs.audit.outputs.at }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo "Presence and immutable GET-only read proof; no configuration writes or publication."
