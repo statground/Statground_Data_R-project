@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
+import textwrap
 import unittest
 
 
@@ -23,6 +25,27 @@ SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
+    def test_protected_settings_fail_before_checkout_and_report_all_missing_names(self) -> None:
+        job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
+        self.assertLess(job.index("- name: Validate protected publication settings"), job.index("- name: Checkout immutable Statground SQL publisher"))
+        validation = job.split("- name: Validate protected publication settings", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(validation.split("        run: |\n", 1)[1])
+        required = (
+            "STATGROUND_SQL_READ_TOKEN", "STATGROUND_CDN2_ADMIN_TOKEN", "R_ECOSYSTEM_CONTENT_KEY",
+            "WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64", "WEBR_COMMUNITY_READER_INVENTORY_B64", "WEBR_COMMUNITY_READER_TOKENS_B64",
+        )
+        marker = "fixture-private-never-output"
+        healthy = {name: marker for name in required}
+        complete = subprocess.run(["/bin/bash", "-c", script], env=healthy, capture_output=True, text=True, timeout=3)
+        self.assertEqual(complete.returncode, 0)
+        self.assertEqual(complete.stdout + complete.stderr, "")
+        absent = (required[0], *required[3:])
+        incomplete = subprocess.run(["/bin/bash", "-c", script], env={name: marker for name in required if name not in absent}, capture_output=True, text=True, timeout=3)
+        self.assertNotEqual(incomplete.returncode, 0)
+        self.assertEqual(incomplete.stdout, "")
+        self.assertEqual(incomplete.stderr.splitlines(), [name + " is required" for name in absent])
+        self.assertNotIn(marker, incomplete.stdout + incomplete.stderr)
+
     def test_new_posts_trigger_the_existing_fenced_publication_job(self) -> None:
         self.assertIn('cron: "7,37 * * * *"', RECONCILE_WORKFLOW)
         self.assertIn("workflow_dispatch:", RECONCILE_WORKFLOW)

@@ -1449,6 +1449,27 @@ jobs:
       - name: Checkout R Project publication source
         uses: actions/checkout@v7
 
+      - name: Validate protected publication settings
+        env:
+          STATGROUND_SQL_READ_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
+          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
+          WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
+          WEBR_COMMUNITY_READER_INVENTORY_B64: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
+          WEBR_COMMUNITY_READER_TOKENS_B64: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
+        run: |
+          publication_missing_settings=0
+          for publication_setting in \
+            STATGROUND_SQL_READ_TOKEN STATGROUND_CDN2_ADMIN_TOKEN R_ECOSYSTEM_CONTENT_KEY \
+            WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 WEBR_COMMUNITY_READER_INVENTORY_B64 \
+            WEBR_COMMUNITY_READER_TOKENS_B64; do
+            if [ -z "${!publication_setting}" ]; then
+              printf '%s is required\n' "$publication_setting" >&2
+              publication_missing_settings=1
+            fi
+          done
+          test "$publication_missing_settings" -eq 0
+
       - name: Checkout immutable Statground SQL publisher
         uses: actions/checkout@v7
         with:
@@ -1476,22 +1497,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r scripts/requirements.txt
-
-      - name: Validate protected publication settings
-        env:
-          STATGROUND_SQL_READ_TOKEN: ${{ secrets.STATGROUND_SQL_READ_TOKEN }}
-          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
-          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
-          WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64: ${{ secrets.WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 }}
-          WEBR_COMMUNITY_READER_INVENTORY_B64: ${{ secrets.WEBR_COMMUNITY_READER_INVENTORY_B64 }}
-          WEBR_COMMUNITY_READER_TOKENS_B64: ${{ secrets.WEBR_COMMUNITY_READER_TOKENS_B64 }}
-        run: |
-          test -n "$STATGROUND_SQL_READ_TOKEN" || { echo "STATGROUND_SQL_READ_TOKEN is required" >&2; exit 1; }
-          test -n "$STATGROUND_CDN2_ADMIN_TOKEN" || { echo "STATGROUND_CDN2_ADMIN_TOKEN is required" >&2; exit 1; }
-          test -n "$R_ECOSYSTEM_CONTENT_KEY" || { echo "R_ECOSYSTEM_CONTENT_KEY is required" >&2; exit 1; }
-          test -n "$WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64" || { echo "WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 is required" >&2; exit 1; }
-          test -n "$WEBR_COMMUNITY_READER_INVENTORY_B64" || { echo "WEBR_COMMUNITY_READER_INVENTORY_B64 is required" >&2; exit 1; }
-          test -n "$WEBR_COMMUNITY_READER_TOKENS_B64" || { echo "WEBR_COMMUNITY_READER_TOKENS_B64 is required" >&2; exit 1; }
 
       - name: Materialize owner-only community publication runtime
         env:
