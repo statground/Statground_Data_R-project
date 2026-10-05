@@ -74,13 +74,14 @@ def environment(output, event="push"):
     return {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": reader.REPOSITORY,
             "GITHUB_SERVER_URL": "https://github.com", "GITHUB_API_URL": reader.ORIGIN,
             "GITHUB_RUN_ATTEMPT": "1", "PROTECTED_KEY_READONLY_NONCE": reader.NONCE,
+            "PROTECTED_KEY_CREDENTIAL_CONTEXT": reader.CREDENTIAL_CONTEXT,
             "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
             "GITHUB_SHA": SHA, "GITHUB_WORKFLOW_SHA": SHA,
             "GITHUB_WORKFLOW_REF": reader.REPOSITORY + "/" + reader.WORKFLOW + "@" + ref,
             "GITHUB_RUN_ID": "12345", "GITHUB_REPOSITORY_ID": "123",
             "GITHUB_EVENT_NAME": event, "GITHUB_REF": ref,
             "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(output.parent),
-            "STATGROUND_CDN2_ADMIN_TOKEN": TOKEN}
+            "RUNNER_BOOTSTRAP_TOKEN": TOKEN}
 
 
 class ProtectedKeyReadTests(unittest.TestCase):
@@ -114,6 +115,7 @@ class ProtectedKeyReadTests(unittest.TestCase):
         self.assertEqual(result["repository_id"], 123)
         self.assertEqual(result["source_sha"], SHA)
         self.assertEqual(result["run_attempt"], 1)
+        self.assertEqual(result["credential_context"], "repo-bootstrap-admin")
         self.assertRegex(result["observed_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertEqual([req.full_url for req in opener.requests],
                          [reader.REPO_URL, reader.SECRETS_URL + "public-key"] + [reader.SECRETS_URL + name for name in reader.SECRET_NAMES])
@@ -145,6 +147,7 @@ class ProtectedKeyReadTests(unittest.TestCase):
                     self.assertEqual(code, 1)
                     self.assertEqual(result["reason"], "http_error")
                     self.assertEqual(result["http_status"], status)
+                    self.assertEqual(result["get_stage"], reader.GET_STAGES[position])
                     self.assertIsNone(result["key"])
                     self.assertIsNone(result["metadata_get_200"])
                     self.assertEqual(len(opener.requests), position + 1)
@@ -157,6 +160,7 @@ class ProtectedKeyReadTests(unittest.TestCase):
                 values[position] = http_error(404)
                 code, result, _ = self.main_with(Opener(values))
                 self.assertEqual((code, result["http_status"]), (1, 404))
+                self.assertEqual(result["get_stage"], reader.GET_STAGES[position])
                 self.assertIsNone(result["metadata_get_200"])
 
     def test_wrong_repository_never_reaches_environment(self):
@@ -255,6 +259,7 @@ class ProtectedKeyReadTests(unittest.TestCase):
         bad = {"GITHUB_ACTIONS": "false", "GITHUB_REPOSITORY": "other/repo", "GITHUB_API_URL": "https://private.invalid",
                "GITHUB_SERVER_URL": "https://private.invalid", "GITHUB_RUN_ATTEMPT": "2",
                "PROTECTED_KEY_READONLY_NONCE": "wrong", "RUNNER_ENVIRONMENT": "self-hosted",
+               "PROTECTED_KEY_CREDENTIAL_CONTEXT": "protected-environment-admin",
                "RUNNER_OS": "Windows", "GITHUB_WORKFLOW_SHA": "b" * 40,
                "GITHUB_WORKFLOW_REF": "other.yml", "GITHUB_REPOSITORY_ID": "123\n" + TOKEN,
                "GITHUB_RUN_ID": "1\n" + TOKEN, "GITHUB_SHA": "A" * 40,
@@ -314,7 +319,8 @@ class ProtectedKeyReadTests(unittest.TestCase):
         jobs = workflow["jobs"]
         self.assertEqual(set(jobs), {"read", "key", "presence", "receipt"})
         job = jobs["read"]
-        self.assertEqual(job["environment"], reader.ENVIRONMENT)
+        self.assertNotIn("environment", job)
+        self.assertEqual(reader.ENVIRONMENT, "web-r-community-publication")
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["timeout-minutes"], "2")
         self.assertIn("github.run_attempt == 1", job["if"])
@@ -324,8 +330,9 @@ class ProtectedKeyReadTests(unittest.TestCase):
         self.assertEqual(len(job["steps"]), 2)
         checkout, read = job["steps"]
         self.assertEqual(checkout["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
-        self.assertEqual(read["env"], {"STATGROUND_CDN2_ADMIN_TOKEN": "${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}",
-                                      "PROTECTED_KEY_READONLY_NONCE": reader.NONCE})
+        self.assertEqual(read["env"], {"RUNNER_BOOTSTRAP_TOKEN": "${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}",
+                                      "PROTECTED_KEY_READONLY_NONCE": reader.NONCE,
+                                      "PROTECTED_KEY_CREDENTIAL_CONTEXT": reader.CREDENTIAL_CONTEXT})
         self.assertEqual(read["run"], "python3 scripts/webr_community_protected_key_readonly.py")
         self.assertEqual(text.count("secrets.STATGROUND_CDN2_ADMIN_TOKEN"), 1)
         for name in ("key", "presence", "receipt"):
@@ -336,6 +343,24 @@ class ProtectedKeyReadTests(unittest.TestCase):
         self.assertIn("False records metadata404", text)
         self.assertIn("does not establish setter permission", text)
         self.assertEqual(reader.WALL_SECONDS, 100)
+
+    def test_previous_tag_is_rejected_and_existing_selector_keeps_publisher_protection(self):
+        old = "webr-community-key-readonly-20261005-12fa9932ee2808268602009ea594c4d1"
+        self.assertNotEqual(reader.TAG, old)
+        env = dict(self.env, GITHUB_REF="refs/tags/" + old)
+        env["GITHUB_WORKFLOW_REF"] = reader.REPOSITORY + "/" + reader.WORKFLOW + "@" + env["GITHUB_REF"]
+        with self.assertRaises(reader.ReadFailure):
+            reader.workflow_context(env, SHA)
+        root = Path(__file__).resolve().parent.parent
+        bootstrap = yaml.load((root / ".github/workflows/webr-runner-sealed-bootstrap.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["enroll"]
+        key_job = yaml.load((root / reader.WORKFLOW).read_text(), Loader=yaml.BaseLoader)["jobs"]["read"]
+        self.assertNotIn("environment", bootstrap)
+        self.assertNotIn("environment", key_job)
+        self.assertEqual(key_job["steps"][1]["env"]["RUNNER_BOOTSTRAP_TOKEN"],
+                         bootstrap["steps"][1]["env"]["RUNNER_BOOTSTRAP_TOKEN"])
+        publisher = yaml.load((root / ".github/workflows/r-project-all.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]["community-publication"]
+        self.assertEqual(publisher["environment"], reader.ENVIRONMENT)
+        self.assertEqual(reader.SECRETS_URL, reader.REPO_URL + "/environments/web-r-community-publication/secrets/")
 
     def test_exact_readonly_tag_cannot_trigger_other_active_workflows(self):
         root = Path(__file__).resolve().parent.parent

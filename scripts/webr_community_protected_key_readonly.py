@@ -25,11 +25,13 @@ SECRET_NAMES = (
     "WEBR_COMMUNITY_READER_INVENTORY_B64",
     "WEBR_COMMUNITY_READER_TOKENS_B64",
 )
-NONCE = "12fa9932ee2808268602009ea594c4d1"
+NONCE = "2dc637f61d5f92c34fc99b4ba39abd5b"
+CREDENTIAL_CONTEXT = "repo-bootstrap-admin"
 TAG = "webr-community-key-readonly-20261005-" + NONCE
 WORKFLOW = ".github/workflows/webr-community-protected-key-readonly.yml"
 MAX_BODY, REQUEST_SECONDS, READ_SECONDS, WALL_SECONDS = 8192, 12, 80, 100
 SCHEMA = "webr.community.protected-key-readonly.v1"
+GET_STAGES = ("repo", "key", "configs", "readers", "tokens")
 REASONS = frozenset((
     "context_invalid", "checkout_identity_invalid", "designated_secret_missing",
     "authorization_header_invalid", "http_error", "redirect_rejected",
@@ -40,9 +42,10 @@ REASONS = frozenset((
 
 
 class ReadFailure(Exception):
-    def __init__(self, reason: str, status: int | None = None):
+    def __init__(self, reason: str, status: int | None = None, stage: str | None = None):
         self.reason = reason if reason in REASONS else "transport_unavailable"
         self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.stage = stage if stage in GET_STAGES else None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -69,6 +72,7 @@ def workflow_context(env, head: str) -> dict:
         and env.get("GITHUB_API_URL") == ORIGIN
         and env.get("GITHUB_RUN_ATTEMPT") == "1"
         and env.get("PROTECTED_KEY_READONLY_NONCE") == NONCE
+        and env.get("PROTECTED_KEY_CREDENTIAL_CONTEXT") == CREDENTIAL_CONTEXT
         and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
         and env.get("RUNNER_OS") == "Linux"
         and re.fullmatch(r"[0-9a-f]{40}", sha)
@@ -132,20 +136,25 @@ def read_protected_key(token: str, context: dict, opener=None, clock=time.monoto
     opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     started = clock()
 
-    def read(url, missing_ok=False):
-        remaining = READ_SECONDS - (clock() - started)
-        if remaining <= 0:
-            raise ReadFailure("wall_deadline")
-        value = get_json(opener, token, url, remaining, missing_ok)
-        if clock() - started >= READ_SECONDS:
-            raise ReadFailure("wall_deadline")
-        return value
+    def read(url, stage, missing_ok=False):
+        try:
+            remaining = READ_SECONDS - (clock() - started)
+            if remaining <= 0:
+                raise ReadFailure("wall_deadline")
+            value = get_json(opener, token, url, remaining, missing_ok)
+            if clock() - started >= READ_SECONDS:
+                raise ReadFailure("wall_deadline")
+            return value
+        except ReadFailure as error:
+            raise ReadFailure(error.reason, error.status, stage) from None
+        except Exception:
+            raise ReadFailure("transport_unavailable", stage=stage) from None
 
-    repo = read(REPO_URL)
+    repo = read(REPO_URL, "repo")
     if (type(repo.get("id")) is not int or repo["id"] != context["repository_id"]
             or repo.get("full_name") != REPOSITORY):
-        raise ReadFailure("repository_identity_invalid")
-    public = read(SECRETS_URL + "public-key")
+        raise ReadFailure("repository_identity_invalid", stage="repo")
+    public = read(SECRETS_URL + "public-key", "key")
     key, key_id = public.get("key"), public.get("key_id")
     try:
         valid = (isinstance(key, str) and len(key) == 44
@@ -155,22 +164,22 @@ def read_protected_key(token: str, context: dict, opener=None, clock=time.monoto
     except Exception:
         valid = False
     if not valid:
-        raise ReadFailure("public_key_shape_invalid")
+        raise ReadFailure("public_key_shape_invalid", stage="key")
     if token in (key, key_id, str(repo["id"])):
-        raise ReadFailure("public_material_collision")
+        raise ReadFailure("public_material_collision", stage="key")
     presence = {}
-    for name in SECRET_NAMES:
-        metadata = read(SECRETS_URL + name, missing_ok=True)
+    for stage, name in zip(GET_STAGES[2:], SECRET_NAMES):
+        metadata = read(SECRETS_URL + name, stage, missing_ok=True)
         if metadata is not None and metadata.get("name") != name:
-            raise ReadFailure("secret_metadata_identity_invalid")
+            raise ReadFailure("secret_metadata_identity_invalid", stage=stage)
         presence[name] = metadata is not None
-    return {"complete": True, "state": "complete", "reason": None, "http_status": None,
+    return {"complete": True, "state": "complete", "reason": None, "http_status": None, "get_stage": None,
             "key": key, "key_id": key_id, "metadata_get_200": presence}
 
 
-def failure(reason: str, status=None) -> dict:
+def failure(reason: str, status=None, stage=None) -> dict:
     return {"complete": False, "state": "blocked", "reason": reason,
-            "http_status": status, "key": None, "key_id": None, "metadata_get_200": None}
+            "http_status": status, "get_stage": stage, "key": None, "key_id": None, "metadata_get_200": None}
 
 
 def write_outputs(result: dict, env) -> None:
@@ -187,6 +196,7 @@ def write_outputs(result: dict, env) -> None:
                 raise ValueError()
             values = {"complete": str(result["complete"]).lower(), "state": result["state"],
                       "reason": result["reason"] or "none", "http_status": str(result["http_status"] or "none"),
+                      "get_stage": result["get_stage"] or "none", "credential_context": CREDENTIAL_CONTEXT,
                       "nonce": NONCE, "observed_at": result["observed_at"]}
             for name in ("source_sha", "run_id", "repository_id"):
                 values[name] = str(result.get(name, "unknown"))
@@ -211,9 +221,9 @@ def main() -> int:
         if len(sys.argv) != 1:
             raise ReadFailure("context_invalid")
         context = workflow_context(os.environ, checkout_head())
-        result = read_protected_key(os.environ.get("STATGROUND_CDN2_ADMIN_TOKEN", ""), context)
+        result = read_protected_key(os.environ.get("RUNNER_BOOTSTRAP_TOKEN", ""), context)
     except ReadFailure as error:
-        result = failure(error.reason, error.status)
+        result = failure(error.reason, error.status, error.stage)
     except Exception:
         result = failure("transport_unavailable")
     finally:
@@ -222,6 +232,7 @@ def main() -> int:
     result.update(context)
     result.update({"schema": SCHEMA, "repository": REPOSITORY, "environment": ENVIRONMENT,
                    "nonce": NONCE, "read_only": True,
+                   "credential_context": CREDENTIAL_CONTEXT,
                    "observed_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     try:
         write_outputs(result, os.environ)

@@ -3,13 +3,13 @@ name: Web-R Protected Publication Key Read Only
 on:
   workflow_dispatch:
   push:
-    tags: ["webr-community-key-readonly-20261005-12fa9932ee2808268602009ea594c4d1"]
+    tags: ["webr-community-key-readonly-20261005-2dc637f61d5f92c34fc99b4ba39abd5b"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: webr-community-key-readonly-12fa9932ee2808268602009ea594c4d1
+  group: webr-community-key-readonly-2dc637f61d5f92c34fc99b4ba39abd5b
   cancel-in-progress: false
 
 jobs:
@@ -17,17 +17,18 @@ jobs:
     if: >-
       github.repository == 'statground/Statground_Data_R-project' &&
       github.run_attempt == 1 &&
-      ((github.event_name == 'push' && github.ref == 'refs/tags/webr-community-key-readonly-20261005-12fa9932ee2808268602009ea594c4d1') ||
+      ((github.event_name == 'push' && github.ref == 'refs/tags/webr-community-key-readonly-20261005-2dc637f61d5f92c34fc99b4ba39abd5b') ||
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
-    name: Fixed protected environment public key and three metadata GETs
+    name: Existing runner-bootstrap Admin selector; fixed protected-target GETs
     runs-on: ubuntu-latest
-    environment: web-r-community-publication
     timeout-minutes: 2
     outputs:
       complete: ${{ steps.read.outputs.complete }}
       state: ${{ steps.read.outputs.state }}
       reason: ${{ steps.read.outputs.reason }}
       http_status: ${{ steps.read.outputs.http_status }}
+      get_stage: ${{ steps.read.outputs.get_stage }}
+      credential_context: ${{ steps.read.outputs.credential_context }}
       nonce: ${{ steps.read.outputs.nonce }}
       source_sha: ${{ steps.read.outputs.source_sha }}
       run_id: ${{ steps.read.outputs.run_id }}
@@ -47,8 +48,9 @@ jobs:
       - name: Fixed-origin bounded read-only key protocol
         id: read
         env:
-          STATGROUND_CDN2_ADMIN_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
-          PROTECTED_KEY_READONLY_NONCE: 12fa9932ee2808268602009ea594c4d1
+          RUNNER_BOOTSTRAP_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+          PROTECTED_KEY_READONLY_NONCE: 2dc637f61d5f92c34fc99b4ba39abd5b
+          PROTECTED_KEY_CREDENTIAL_CONTEXT: repo-bootstrap-admin
         run: python3 scripts/webr_community_protected_key_readonly.py
 
   key:
@@ -72,7 +74,7 @@ jobs:
   receipt:
     if: ${{ always() }}
     needs: read
-    name: "Protected readonly ${{ needs.read.outputs.state || 'unknown' }} reason=${{ needs.read.outputs.reason || 'unknown' }} http=${{ needs.read.outputs.http_status || 'unknown' }} source=${{ needs.read.outputs.source_sha || 'unknown' }} run=${{ needs.read.outputs.run_id || 'unknown' }} nonce=${{ needs.read.outputs.nonce || 'unknown' }} at=${{ needs.read.outputs.observed_at || 'unknown' }}"
+    name: "Protected readonly ${{ needs.read.outputs.state || 'unknown' }} reason=${{ needs.read.outputs.reason || 'unknown' }} http=${{ needs.read.outputs.http_status || 'unknown' }} stage=${{ needs.read.outputs.get_stage || 'unknown' }} ctx=${{ needs.read.outputs.credential_context || 'unknown' }} source=${{ needs.read.outputs.source_sha || 'unknown' }} run=${{ needs.read.outputs.run_id || 'unknown' }} nonce=${{ needs.read.outputs.nonce || 'unknown' }} at=${{ needs.read.outputs.observed_at || 'unknown' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
