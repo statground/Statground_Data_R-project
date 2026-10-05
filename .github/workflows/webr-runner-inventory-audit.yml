@@ -1,0 +1,46 @@
+name: Web-R Runner Inventory Audit
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "webr-runner-inventory-audit-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webr-runner-inventory-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Read exact repository runner inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      inventory_state: ${{ steps.inventory.outputs.inventory_state }}
+      total_count: ${{ steps.inventory.outputs.total_count }}
+      publisher_count: ${{ steps.inventory.outputs.publisher_count }}
+      publisher_online_count: ${{ steps.inventory.outputs.publisher_online_count }}
+      publisher_idle_count: ${{ steps.inventory.outputs.publisher_idle_count }}
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Read only designated repository runner inventory
+        id: inventory
+        env:
+          RUNNER_AUDIT_TOKEN: ${{ secrets.STATGROUND_CDN2_ADMIN_TOKEN }}
+        run: python3 scripts/webr_runner_inventory_audit.py
+
+  report:
+    if: ${{ always() }}
+    needs: audit
+    name: "Runner inventory ${{ needs.audit.outputs.inventory_state || 'unknown' }} total=${{ needs.audit.outputs.total_count || 'unknown' }} publisher=${{ needs.audit.outputs.publisher_count || 'unknown' }} online=${{ needs.audit.outputs.publisher_online_count || 'unknown' }} idle=${{ needs.audit.outputs.publisher_idle_count || 'unknown' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Aggregate receipt is in this job name
+        run: echo "Read-only inventory audit; no runner registration or pipeline publication."
