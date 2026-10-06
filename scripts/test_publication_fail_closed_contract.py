@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import pathlib
+import ast
 import base64
 import json
 import os
+import pathlib
 import sys
 import subprocess
 import textwrap
@@ -28,7 +29,8 @@ BOOTSTRAP_WORKFLOW = (
 RECONCILE_WORKFLOW = (
     ROOT / ".github" / "workflows" / "r-project-community-publication.yml"
 ).read_text(encoding="utf-8")
-SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
+SQL_SHA = "0d0501398f649ca869f6477132c3363ded0d6c61"
+BOOTSTRAP_SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
@@ -199,6 +201,10 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertIn("repository: statground/Statground_SQL", job)
         self.assertIn(f"ref: {SQL_SHA}", job)
         self.assertIn(f"STATGROUND_SQL_COMMIT_SHA: {SQL_SHA}", job)
+        materializer = ast.parse((ROOT / "scripts" / "materialize_community_publication_runtime.py").read_text())
+        sql_pin = next(node.value.value for node in materializer.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "SQL_SHA" for target in node.targets))
+        self.assertEqual(sql_pin, SQL_SHA)
         self.assertIn('git -C statground-sql rev-parse HEAD', job)
         self.assertIn("STATGROUND_SQL_READ_TOKEN", job)
 
@@ -207,11 +213,11 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         expression = "${{ secrets.STATGROUND_SQL_READ_TOKEN || secrets.STATGROUND_CDN2_ADMIN_TOKEN }}"
         validation = job.split("- name: Validate protected publication settings", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("STATGROUND_SQL_READ_TOKEN: " + expression, validation)
-        for workflow in (job, BOOTSTRAP_WORKFLOW):
+        for workflow, pin in ((job, SQL_SHA), (BOOTSTRAP_WORKFLOW, BOOTSTRAP_SQL_SHA)):
             checkout = workflow.split("- name: Checkout immutable Statground SQL publisher", 1)[1].split("\n      - name:", 1)[0]
             self.assertIn("token: " + expression, checkout)
             self.assertIn("persist-credentials: false", checkout)
-            self.assertIn(f"ref: {SQL_SHA}", checkout)
+            self.assertIn(f"ref: {pin}", checkout)
         # No publisher client, token bundle or collection setting can receive
         # this checkout-only credential, and no broader GitHub token is used.
         self.assertEqual(MAIN_WORKFLOW.count(expression), 2)
@@ -310,7 +316,7 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         self.assertIn("environment: web-r-community-publication-bootstrap", BOOTSTRAP_WORKFLOW)
         self.assertIn("group: r-project-publication", BOOTSTRAP_WORKFLOW)
         self.assertIn("cancel-in-progress: false", BOOTSTRAP_WORKFLOW)
-        self.assertIn(f"ref: {SQL_SHA}", BOOTSTRAP_WORKFLOW)
+        self.assertIn(f"ref: {BOOTSTRAP_SQL_SHA}", BOOTSTRAP_WORKFLOW)
         self.assertEqual(BOOTSTRAP_WORKFLOW.count('"$publisher" bootstrap'), 1)
         self.assertIn("if: steps.preflight.outputs.bootstrap_required == 'true'", BOOTSTRAP_WORKFLOW)
         self.assertIn('current not in (None, expected)', BOOTSTRAP_WORKFLOW)
