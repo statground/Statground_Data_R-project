@@ -321,6 +321,51 @@ class OwnerPublicationInputsTest(unittest.TestCase):
                 (owner / "manifest.json").write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(RuntimeInputError, "consumers changed"):self.load(owner)
 
+    def test_publication_history_preserves_reviewed_ancestor_in_shallow_descendant(self):
+        original_output = subprocess.check_output
+        original_run = subprocess.run
+        with self.fixture() as (owner, manifest):
+            origin = owner.parent / "origin"; origin.mkdir()
+            paths = ("scripts/materialize_community_publication_runtime.py", ".github/workflows/r-project-all.yml")
+            actual_root = Path(runtime_inputs.__file__).resolve().parents[1]
+            for name in paths:
+                path = origin / name; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((actual_root / name).read_bytes())
+            def git(root, *arguments):
+                subprocess.check_call(["git", "-C", str(root), *arguments], stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+            def native_output(root, *arguments):
+                with subprocess.Popen(["git", "-C", str(root), *arguments], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL) as process:
+                    output, _ = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 0)
+                    return output.decode().strip()
+            def commit():
+                git(origin, "add", "--all")
+                git(origin, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-m", "public fixture")
+                return native_output(origin, "rev-parse", "HEAD")
+            git(origin, "init", "-q"); reviewed = commit()
+            (origin / "unrelated.txt").write_text("unrelated public fixture")
+            descendant = commit(); clone = owner.parent / "shallow"
+            subprocess.check_call(["git", "clone", "--depth", "1", "--no-local", origin.as_uri(), str(clone)],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual(native_output(clone, "rev-parse", "--is-shallow-repository"), "true")
+            manifest["source_sha"] = reviewed; (owner / "manifest.json").write_text(json.dumps(manifest))
+            self.source_sha = descendant; self.environment["GITHUB_SHA"] = descendant
+            with mock.patch.object(runtime_inputs, "__file__", str(clone / paths[0])), \
+                 mock.patch.object(runtime_inputs.subprocess, "check_output", side_effect=original_output), \
+                 mock.patch.object(runtime_inputs.subprocess, "run", side_effect=original_run):
+                with self.assertRaisesRegex(RuntimeInputError, "not an ancestor"):
+                    self.load(owner)
+                git(clone, "fetch", "--unshallow", "origin")
+                self.assertEqual(native_output(clone, "rev-parse", "--is-shallow-repository"), "false")
+                self.assertEqual(self.load(owner)[1]["reader_inventory_revision"], 17)
+            # The native checkout must provide the history the exact guard requires.
+            workflow = (actual_root / paths[1]).read_text()
+            checkout = workflow.split("- name: Checkout R Project publication source\n", 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn("uses: actions/checkout@v7\n        with:\n          fetch-depth: 0", checkout)
+
     def test_fd_owner_and_changed_read_are_rejected_without_private_content(self):
         with self.fixture() as (owner, _):
             path = owner / "reader-tokens.json"; metadata = path.stat()
