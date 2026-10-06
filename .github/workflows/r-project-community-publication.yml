@@ -4,6 +4,9 @@ on:
   schedule:
     # Reconcile user-written posts with the fenced public generation twice hourly.
     - cron: "7,37 * * * *"
+  push:
+    tags:
+      - "webr-community-publish-*"
   workflow_dispatch:
 
 permissions:

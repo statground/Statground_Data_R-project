@@ -10,6 +10,9 @@ import sys
 import subprocess
 import textwrap
 import unittest
+import fnmatch
+
+import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -29,6 +32,42 @@ SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
+    def test_scoped_publication_tags_keep_the_existing_native_entrypoints(self) -> None:
+        wrapper = yaml.load(RECONCILE_WORKFLOW, Loader=yaml.BaseLoader)
+        self.assertEqual(wrapper["on"], {
+            "schedule": [{"cron": "7,37 * * * *"}],
+            "push": {"tags": ["webr-community-publish-*"]},
+            "workflow_dispatch": "",
+        })
+        self.assertEqual(wrapper["permissions"], {"contents": "write"})
+        self.assertEqual(wrapper["jobs"], {"publication": {
+            "name": "Publish complete Web-R community generation",
+            "uses": "./.github/workflows/r-project-all.yml",
+            "with": {"scope": "publication"},
+            "secrets": "inherit",
+        }})
+        pattern, = wrapper["on"]["push"]["tags"]
+        self.assertTrue(fnmatch.fnmatchcase(
+            "webr-community-publish-recovery-20261006T000000Z-4dd774b9c206", pattern))
+        for unrelated in ("main", "webr-cdn-publish-recovery-20261006", "webr-community-key-readonly-20261006"):
+            self.assertFalse(fnmatch.fnmatchcase(unrelated, pattern), unrelated)
+
+    def test_publication_tag_scope_does_not_admit_cdn_exports_or_failed_intake(self) -> None:
+        from test_workflow_target_concurrency import evaluate
+
+        wrapper = yaml.load(RECONCILE_WORKFLOW, Loader=yaml.BaseLoader)
+        scope = wrapper["jobs"]["publication"]["with"]["scope"]
+        worker = yaml.safe_load(MAIN_WORKFLOW)
+        self.assertFalse(evaluate(worker["jobs"]["cdn-export"]["if"], scope, 1))
+        condition = worker["jobs"]["community-publication"]["if"]
+        for intake, cancelled, allowed in (("success", False, True), ("failure", False, False), ("success", True, False)):
+            with self.subTest(intake=intake, cancelled=cancelled):
+                self.assertEqual(evaluate(condition, scope, 1, **{
+                    "needs.collect.result": intake,
+                    "needs.cdn-export.result": "skipped",
+                    "cancelled": cancelled,
+                }), allowed)
+
     def test_protected_settings_fail_before_checkout_and_keep_other_credentials_required(self) -> None:
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
         self.assertLess(job.index("- name: Validate protected publication settings"), job.index("- name: Checkout immutable Statground SQL publisher"))
