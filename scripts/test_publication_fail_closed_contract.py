@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import pathlib
+import base64
+import json
+import os
+import sys
 import subprocess
 import textwrap
 import unittest
@@ -25,7 +29,7 @@ SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
 class PublicationFailClosedContractTest(unittest.TestCase):
-    def test_protected_settings_fail_before_checkout_and_report_all_missing_names(self) -> None:
+    def test_protected_settings_fail_before_checkout_and_keep_other_credentials_required(self) -> None:
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
         self.assertLess(job.index("- name: Validate protected publication settings"), job.index("- name: Checkout immutable Statground SQL publisher"))
         validation = job.split("- name: Validate protected publication settings", 1)[1].split("\n      - name:", 1)[0]
@@ -36,15 +40,38 @@ class PublicationFailClosedContractTest(unittest.TestCase):
         )
         marker = "fixture-private-never-output"
         healthy = {name: marker for name in required}
-        complete = subprocess.run(["/bin/bash", "-c", script], env=healthy, capture_output=True, text=True, timeout=3)
+        bundles = [dict.fromkeys(("s1r1", "s1r2", "s2r1", "s2r2"), "<config/>"),
+                   {"schema": "web-r.community.reader-inventory.v1", "reader_inventory_revision": 1,
+                    "readers": [{"app_service": "web-r", "instance_id": "fixture", "inventory_endpoint": "https://reader.example/inventory", "url": "https://reader.example/transition"}]},
+                   {"fixture": marker}]
+        healthy.update({name: base64.b64encode(json.dumps(value).encode()).decode() for name, value in zip(required[3:], bundles)})
+        healthy["PATH"] = os.path.dirname(sys.executable) + ":/usr/bin:/bin"
+        complete = subprocess.run(["/bin/bash", "-c", script], env=healthy, cwd=ROOT, capture_output=True, text=True, timeout=3)
         self.assertEqual(complete.returncode, 0)
-        self.assertEqual(complete.stdout + complete.stderr, "")
+        self.assertEqual(json.loads(complete.stdout), {"status": "validated", "endpoint_count": 4, "reader_count": 1})
+        self.assertEqual(complete.stderr, "")
         absent = (required[0], *required[3:])
-        incomplete = subprocess.run(["/bin/bash", "-c", script], env={name: marker for name in required if name not in absent}, capture_output=True, text=True, timeout=3)
+        incomplete = subprocess.run(["/bin/bash", "-c", script], env={name: value for name, value in healthy.items() if name not in absent}, cwd=ROOT, capture_output=True, text=True, timeout=3)
         self.assertNotEqual(incomplete.returncode, 0)
         self.assertEqual(incomplete.stdout, "")
-        self.assertEqual(incomplete.stderr.splitlines(), [name + " is required" for name in absent])
+        self.assertEqual(incomplete.stderr.splitlines(), [required[0] + " is required"])
         self.assertNotIn(marker, incomplete.stdout + incomplete.stderr)
+        for missing in (required[3:], required[3:5]):
+            unavailable = subprocess.run(["/bin/bash", "-c", script], env={name: value for name, value in healthy.items() if name not in missing}, cwd=ROOT, capture_output=True, text=True, timeout=3)
+            self.assertNotEqual(unavailable.returncode, 0); self.assertEqual(unavailable.stdout, "")
+            self.assertNotIn(marker, unavailable.stderr)
+        for name in required[:3]:
+            unavailable = subprocess.run(["/bin/bash", "-c", script], env={key: value for key, value in healthy.items() if key != name}, cwd=ROOT, capture_output=True, text=True, timeout=3)
+            self.assertNotEqual(unavailable.returncode, 0);self.assertEqual(unavailable.stderr.strip(), name + " is required")
+
+    def test_local_owner_input_option_is_scoped_to_existing_protected_publisher(self) -> None:
+        job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
+        self.assertEqual(job.count("--owner-input-dir /var/lib/webr-community-publication-inputs"), 2)
+        self.assertEqual(job.count('--source-sha "$GITHUB_SHA" --sql-sha "$STATGROUND_SQL_COMMIT_SHA"'), 2)
+        self.assertIn("runs-on: [self-hosted, linux, x64, webr-community-publisher]", job)
+        self.assertIn("environment: web-r-community-publication", job)
+        self.assertNotIn("--owner-input-dir", BOOTSTRAP_WORKFLOW)
+        self.assertEqual(MAIN_WORKFLOW.count("--owner-input-dir"), 2)
 
     def test_new_posts_trigger_the_existing_fenced_publication_job(self) -> None:
         self.assertIn('cron: "7,37 * * * *"', RECONCILE_WORKFLOW)

@@ -1460,15 +1460,16 @@ jobs:
         run: |
           publication_missing_settings=0
           for publication_setting in \
-            STATGROUND_SQL_READ_TOKEN STATGROUND_CDN2_ADMIN_TOKEN R_ECOSYSTEM_CONTENT_KEY \
-            WEBR_COMMUNITY_CLICKHOUSE_CONFIGS_B64 WEBR_COMMUNITY_READER_INVENTORY_B64 \
-            WEBR_COMMUNITY_READER_TOKENS_B64; do
+            STATGROUND_SQL_READ_TOKEN STATGROUND_CDN2_ADMIN_TOKEN R_ECOSYSTEM_CONTENT_KEY; do
             if [ -z "${!publication_setting}" ]; then
               printf '%s is required\n' "$publication_setting" >&2
               publication_missing_settings=1
             fi
           done
-          test "$publication_missing_settings" -eq 0
+          test "$publication_missing_settings" -eq 0 || exit 1
+          python scripts/materialize_community_publication_runtime.py --validate-inputs \
+            --owner-input-dir /var/lib/webr-community-publication-inputs \
+            --source-sha "$GITHUB_SHA" --sql-sha "$STATGROUND_SQL_COMMIT_SHA"
 
       - name: Checkout immutable Statground SQL publisher
         uses: actions/checkout@v7
@@ -1506,7 +1507,9 @@ jobs:
         run: |
           python scripts/materialize_community_publication_runtime.py \
             --runtime-dir "$COMMUNITY_RUNTIME_DIR" \
-            --runner-temp "$RUNNER_TEMP"
+            --runner-temp "$RUNNER_TEMP" \
+            --owner-input-dir /var/lib/webr-community-publication-inputs \
+            --source-sha "$GITHUB_SHA" --sql-sha "$STATGROUND_SQL_COMMIT_SHA"
           test "$(stat -c '%a' "$COMMUNITY_RUNTIME_DIR")" = 700
           if find "$COMMUNITY_RUNTIME_DIR" -type f ! -perm 0600 -print -quit | grep -q .; then
             echo "community publication secret files are not owner-only" >&2
