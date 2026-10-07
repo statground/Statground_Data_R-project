@@ -1708,13 +1708,16 @@ jobs:
           [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid community commit identity" >&2; exit 1; }
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Verify immutable jsDelivr generation proof
+      - name: Verify immutable jsDelivr generation and complete Workshop
+        env:
+          R_ECOSYSTEM_CONTENT_KEY: ${{ secrets.R_ECOSYSTEM_CONTENT_KEY }}
         run: |
           python scripts/verify_community_generation_cdn.py \
             --base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
             --proof web-r_CDN2_community/community/ko/generation-proof.json \
             --asset community/ko/index.json web-r_CDN2_community/community/ko/index.json \
             --asset community/ko/workshop/index.json web-r_CDN2_community/community/ko/workshop/index.json \
+            --workshop-root web-r_CDN2_community \
             --attempts 8 \
             --backoff-seconds 5
 
