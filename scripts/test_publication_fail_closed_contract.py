@@ -181,7 +181,7 @@ class PublicationFailClosedContractTest(unittest.TestCase):
             "- name: Preflight and load exact community generation",
             "- name: Export the exact loaded community generation",
             "- name: Commit and push exact Web-R community generation",
-            "- name: Verify immutable jsDelivr generation proof",
+            "- name: Verify immutable jsDelivr generation and complete Workshop",
             "- name: Preflight exact application reader transition",
             "- name: Publish and reopen exact application readers",
         ]
