@@ -29,7 +29,7 @@ BOOTSTRAP_WORKFLOW = (
 RECONCILE_WORKFLOW = (
     ROOT / ".github" / "workflows" / "r-project-community-publication.yml"
 ).read_text(encoding="utf-8")
-SQL_SHA = "e4ffbd091b4c0fe0a2ccd946bae823cfa7762c45"
+SQL_SHA = "308ba67670337065ccaf5e6b0d2765cc2b80c68c"
 BOOTSTRAP_SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
