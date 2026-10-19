@@ -1766,7 +1766,7 @@ jobs:
             --cdn-proof web-r_CDN2_community/community/ko/generation-proof.json \
             --cdn-base-url "https://cdn.jsdelivr.net/gh/statground/web-r_CDN2_community@${{ steps.web_r_cdn2_community.outputs.commit_sha }}" \
             --reader-inventory "$COMMUNITY_RUNTIME_DIR/reader-inventory.json" \
-            --reader-timeout-seconds 60 \
+            --reader-timeout-seconds 90 \
             --clickhouse-client "$client" "${endpoints[@]}" \
             > "$COMMUNITY_RUNTIME_DIR/community-publish-receipt.json"
           python - <<'PY'
