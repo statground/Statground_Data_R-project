@@ -29,7 +29,7 @@ BOOTSTRAP_WORKFLOW = (
 RECONCILE_WORKFLOW = (
     ROOT / ".github" / "workflows" / "r-project-community-publication.yml"
 ).read_text(encoding="utf-8")
-SQL_SHA = "b6c382523738979b248f969b76c000ba25fea429"
+SQL_SHA = "05c486996a6bf31b9485c820292b56851b7894e3"
 BOOTSTRAP_SQL_SHA = "488f88ffe3370f71430162a60b47fc075a68b7db"
 
 
@@ -242,7 +242,8 @@ class PublicationFailClosedContractTest(unittest.TestCase):
     def test_community_publish_receipt_requires_release_and_withdrawal_ack(self) -> None:
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]
         publish = job.split("- name: Publish and reopen exact application readers", 1)[1]
-        self.assertEqual(job.count("--reader-timeout-seconds 60"), 1)
+        self.assertEqual(job.count("--reader-timeout-seconds 90"), 1)
+        self.assertNotIn("--reader-timeout-seconds 60", job)
         self.assertNotIn("--reader-timeout-seconds 600", job)
         self.assertEqual(BOOTSTRAP_WORKFLOW.count("--reader-timeout-seconds 60"), 1)
         self.assertNotIn("--reader-timeout-seconds 600", BOOTSTRAP_WORKFLOW)

@@ -1,6 +1,6 @@
 """Scheduled CLI contract and optional pinned-SQL, RAM-only protocol checks.
 
-Set STATGROUND_SQL_PUBLISHER_SOURCE to the original b6 publisher to run the
+Set STATGROUND_SQL_PUBLISHER_SOURCE to the pinned READY95 publisher to run the
 cross-repository checks. Data-only CI always checks the emitted command and
 schedule; it reports the unavailable private SQL integration explicitly.
 """
@@ -28,8 +28,8 @@ import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL_SHA = "b6c382523738979b248f969b76c000ba25fea429"
-PUBLISHER_SHA256 = "9792783a40ea7e5a72e0ac206806052d4de5a87381ae2089b1c8f6f1096de955"
+SQL_SHA = "05c486996a6bf31b9485c820292b56851b7894e3"
+PUBLISHER_SHA256 = "68f988fbab0beee89138cb291da24b6acfce922cabb01294457cf054b2151bf9"
 
 
 def scheduled_arguments():
@@ -75,8 +75,8 @@ def checked(path, size, digest):
 
 
 def pinned_fixtures(path):
-    raw = checked(path, 184767, PUBLISHER_SHA256)
-    module = types.ModuleType("natural_reader90_original_b6")
+    raw = checked(path, 195351, PUBLISHER_SHA256)
+    module = types.ModuleType("natural_reader95_pinned_sql")
     module.__file__ = str(path)
     sys.modules[module.__name__] = module
     exec(compile(raw, str(path), "exec"), vars(module))
@@ -100,8 +100,8 @@ def pinned_fixtures(path):
     # original fixture's independent filesystem/module loader is not executed.
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), vars(fixture))
     source = Path(path).parent / "tests/test_webr_community_pre_pointer_commit_budget.py"
-    raw = checked(source, 12700,
-                  "690820b667a546e1f109f6a2cd43e74a5b4b995a2c69a12276a2d54978273502")
+    raw = checked(source, 28049,
+                  "4b99103306f3f0b7957efb38d5b059fb101d4a43096cb7cd01ce39b453552f1b")
     selected = [n for n in ast.parse(raw).body if isinstance(n, ast.ClassDef)
                 and n.name in {"Response", "WireHarness"}]
     assert len(selected) == 2
@@ -218,7 +218,8 @@ class PinnedPublisherWindowTests(unittest.TestCase):
                          ["prepare", "prepare", "abort", "abort"])
 
     def test_original_reserve185_boundary_and_original_same_old_abort(self):
-        with redirect_stderr(io.StringIO()):
+        with redirect_stderr(io.StringIO()), mock.patch.object(
+                self.m.Publisher, "ready_commit_pair", return_value=None):
             for seconds, boundary in ((60, 135.0), (90, 75.0)):
                 h = self.wire.WireHarness(boundary)
                 self.assertEqual(h.publish(seconds)["status"], "released")
@@ -228,9 +229,40 @@ class PinnedPublisherWindowTests(unittest.TestCase):
                     h.publish(90)
                 self.assert_no_pointer_and_old_reopened(h)
 
+    def test_scheduled_cli_uses_owned_ready95_or_original_same_old_abort(self):
+        for elapsed, status in ((126.532, 0), (165.0, 0), (165.001, 2)):
+            with self.subTest(elapsed=elapsed):
+                h = self.wire.WireHarness(elapsed)
+                pairs = []
+                original = h.service.ready_commit_pair
+                def capture(*args):
+                    pair = original(*args)
+                    pairs.append(pair)
+                    return pair
+                h.service.ready_commit_pair = capture
+                insert = h.client.insert
+                def guarded_pointer(endpoint, table, *args):
+                    if table == self.m.POINTER:
+                        self.assertEqual(pairs[0].state, "parked")
+                        self.assertTrue(pairs[0].ready_verified)
+                        self.assertFalse(any(op == "commit" for op, _, _ in h.requests))
+                    return insert(endpoint, table, *args)
+                h.client.insert = guarded_pointer
+                self.assertEqual(self.run_cli(h), status)
+                self.assertEqual(len(pairs), 1)
+                self.assertTrue(pairs[0].joined)
+                self.assertTrue(all(f.done() for f in pairs[0].futures))
+                if status == 0:
+                    self.assertEqual(pairs[0].state, "opened")
+                    self.assertEqual([timeout for op, _, timeout in h.requests if op == "commit"], [90, 90])
+                else:
+                    self.assertEqual(pairs[0].state, "cancelled")
+                    self.assert_no_pointer_and_old_reopened(h)
+
     def test_insufficient_reserve_with_abort_guard_failure_never_writes_pointer(self):
         h = self.wire.WireHarness(75.001, drift="current")
-        with redirect_stderr(io.StringIO()), self.assertRaises(self.m.PublishError):
+        with redirect_stderr(io.StringIO()), mock.patch.object(
+                h.service, "ready_commit_pair", return_value=None), self.assertRaises(self.m.PublishError):
             h.publish(90)
         self.assertTrue(h.aborting)
         self.assertFalse(h.client.ack_rows)
