@@ -27,10 +27,11 @@ INSTANCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 OWNER_INPUT_DIR = Path("/var/lib/webr-community-publication-inputs")
 RUNNER_NAME = "webr-community-publisher-local"
 PUBLISHER_USER = "webr_community_generation_publisher"
-SQL_SHA = "05c486996a6bf31b9485c820292b56851b7894e3"
+SQL_SHA = "37e3f5d2e9a382b75d5b3b4a1f559e1d4f75549e"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 OWNER_FILES = ("clickhouse-configs.json", "reader-inventory.json", "reader-tokens.json")
+PRELEASE_BUNDLE_FILE = "prelease-runtime-proof.json"
 
 
 class RuntimeInputError(RuntimeError):
@@ -189,11 +190,85 @@ def private_json(body: bytes) -> Any:
         raise RuntimeInputError("owner input JSON is invalid") from None
 
 
-def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environment: dict[str, str]) -> tuple[Any, Any, Any]:
+def prelease_source_selection() -> dict:
+    import webr_community_prelease_runtime_proof as proof
+    try:
+        return proof.validate_source_selection(proof.PRELEASE_RUNTIME_SOURCE_SELECTION)
+    except ValueError:
+        raise RuntimeInputError("public runtime qualification source is unbound or invalid") from None
+
+
+def stable_fields(entry: os.stat_result) -> tuple:
+    return tuple(getattr(entry, name) for name in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                                                    "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+
+def checked_prelease_parser_source(source_root: Path, source_sha: str) -> None:
+    """The imported trust selector must be the fixed selected-commit source."""
+    import webr_community_prelease_runtime_proof as proof
+    name = "scripts/webr_community_prelease_runtime_proof.py"
+    path = source_root / name
+    if path.resolve() != path or Path(proof.__file__).resolve() != path:
+        raise RuntimeInputError("public qualification parser source path differs")
+    before = path.lstat()
+    current = path.read_bytes()
+    after = path.lstat()
+    committed = subprocess.check_output(["git", "-C", str(source_root), "show", source_sha + ":" + name],
+                                        stderr=subprocess.DEVNULL, timeout=5)
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < len(current) == before.st_size <= 512 * 1024 or
+            stable_fields(before) != stable_fields(after) or current != committed):
+        raise RuntimeInputError("public qualification parser differs from committed source")
+
+
+def public_owner_bytes(path: Path) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_nlink != 1 or
+                stat.S_IMODE(before.st_mode) != 0o600 or not 0 < before.st_size <= 65536):
+            raise RuntimeInputError("public qualification file identity, mode or size differs")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            body = stream.read(65537)
+        if stable_fields(before) != stable_fields(os.fstat(descriptor)) or stable_fields(before) != stable_fields(path.lstat()) or len(body) != before.st_size:
+            raise RuntimeInputError("public qualification changed during validation")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def validate_prelease_bundle(body: bytes, inventory: dict, selected: dict) -> dict:
+    import webr_community_prelease_runtime_proof as proof
+    normalized = {"schema": inventory["schema"], "reader_inventory_revision": inventory["reader_inventory_revision"],
+                  "readers": [{key: row[key] for key in ("app_service", "instance_id", "inventory_endpoint")}
+                              for row in inventory["readers"]]}
+    try:
+        return proof.validate_runtime_proof_bundle(body, expected_selection=selected, inventory=normalized)
+    except ValueError:
+        raise RuntimeInputError("public runtime qualification differs from source and inventory") from None
+
+
+def owner_prelease_bundle(owner_dir: Path, manifest: dict, selected: dict) -> bytes:
+    import webr_community_prelease_runtime_proof as proof
+    metadata = manifest.get("prelease_runtime_proof")
+    if (type(metadata) is not dict or set(metadata) != {"bundle_file", "bundle_sha256", "qualification_contract", "qualification_contract_sha256"} or
+            metadata["bundle_file"] != PRELEASE_BUNDLE_FILE or metadata["bundle_sha256"] != selected["bundle_sha256"] or
+            metadata["qualification_contract"] != selected["qualification_contract"] or
+            metadata["qualification_contract_sha256"] != proof.canonical_sha256(selected["qualification_contract"])):
+        raise RuntimeInputError("owner public qualification source pins differ")
+    binding = {"data_source_sha": manifest["source_sha"], "sql_commit_sha": manifest["sql_commit_sha"],
+               "workflow_sha256": manifest["workflow_sha256"], "materializer_sha256": manifest["materializer_sha256"]}
+    if selected["source_binding"] != binding:
+        raise RuntimeInputError("owner public qualification source provenance differs")
+    return public_owner_bytes(owner_dir / PRELEASE_BUNDLE_FILE)
+
+
+def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environment: dict[str, str],
+                        *, prelease_runtime_proof: bool = False) -> tuple[Any, ...]:
     """Persistent inputs remain readable to the existing runner owner outside jobs.
 
     Environment/Git checks prove consistency, not protected-job authentication.
     """
+    selected = prelease_source_selection() if prelease_runtime_proof else None
     if (owner_dir != OWNER_INPUT_DIR or os.geteuid() == 0 or
             environment.get("RUNNER_NAME") != RUNNER_NAME or environment.get("RUNNER_ENVIRONMENT") != "self-hosted" or
             environment.get("GITHUB_REPOSITORY") != "statground/Statground_Data_R-project" or
@@ -211,6 +286,8 @@ def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environm
             if len(committed) > 512 * 1024 or current != committed:
                 raise RuntimeInputError("owner input consumer differs from committed source")
             source_hashes[name] = hashlib.sha256(committed).hexdigest()
+        if prelease_runtime_proof:
+            checked_prelease_parser_source(source_root, source_sha)
     except (OSError, subprocess.SubprocessError, UnicodeError):
         raise RuntimeInputError("owner input source identity unavailable") from None
     if actual_source != source_sha or environment.get("GITHUB_SHA") != source_sha:
@@ -220,15 +297,20 @@ def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environm
         names = set()
         for entry in entries:
             names.add(entry.name)
-            if len(names) > 4:
+            if len(names) > (5 if prelease_runtime_proof else 4):
                 raise RuntimeInputError("owner input directory has unexpected entries")
-    if names != {"manifest.json", *OWNER_FILES}:
+    required_names = {"manifest.json", *OWNER_FILES}
+    if prelease_runtime_proof:
+        required_names.add(PRELEASE_BUNDLE_FILE)
+    if names != required_names:
         raise RuntimeInputError("owner input directory has unexpected entries")
     manifest = private_json(private_owner_bytes(owner_dir / "manifest.json", 16 * 1024))
     expected = {"schema", "source_sha", "sql_commit_sha", "workflow_sha256", "materializer_sha256",
                 "runner_name", "reader_inventory_revision", "files"}
+    if prelease_runtime_proof:
+        expected.add("prelease_runtime_proof")
     if (not isinstance(manifest, dict) or set(manifest) != expected or
-            manifest.get("schema") != "web-r.community.owner-inputs.v1" or
+            manifest.get("schema") != ("web-r.community.owner-inputs.v2" if prelease_runtime_proof else "web-r.community.owner-inputs.v1") or
             not isinstance(manifest.get("source_sha"), str) or not SHA40.fullmatch(manifest["source_sha"]) or
             manifest.get("sql_commit_sha") != sql_sha or
             manifest.get("runner_name") != RUNNER_NAME or
@@ -238,6 +320,9 @@ def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environm
             not isinstance(manifest.get("files"), dict) or set(manifest["files"]) != set(OWNER_FILES) or
             not all(isinstance(value, str) and SHA64.fullmatch(value) for value in manifest["files"].values())):
         raise RuntimeInputError("owner input manifest identity or schema differs")
+    public_body = None
+    if prelease_runtime_proof:
+        public_body = owner_prelease_bundle(owner_dir, manifest, selected)
     try:
         ancestry = subprocess.run(["git", "-C", str(source_root), "merge-base", "--is-ancestor",
                                    manifest["source_sha"], source_sha], stdout=subprocess.DEVNULL,
@@ -268,12 +353,32 @@ def owner_input_bundles(owner_dir: Path, source_sha: str, sql_sha: str, environm
             raise RuntimeInputError("owner input publisher principal differs")
     if bundles[1]["reader_inventory_revision"] != manifest["reader_inventory_revision"]:
         raise RuntimeInputError("owner input reader revision differs")
+    if prelease_runtime_proof:
+        validate_prelease_bundle(public_body, bundles[1], selected)
+        if stable_fields(before) != stable_fields(after) or prelease_source_selection() != selected:
+            raise RuntimeInputError("owner public qualification custody differs")
+        return (*bundles, public_body)
     return tuple(bundles)
 
 
-def input_bundles(environment: dict[str, str], owner_dir: Path | None, source_sha: str, sql_sha: str) -> tuple[Any, Any, Any]:
+def input_bundles(environment: dict[str, str], owner_dir: Path | None, source_sha: str, sql_sha: str,
+                  *, prelease_runtime_proof_bundle: Path | None = None) -> tuple[Any, ...]:
+    if prelease_runtime_proof_bundle is not None:
+        prelease_source_selection()  # Unbound source refuses before owner/bundle IO.
+        if owner_dir != OWNER_INPUT_DIR or prelease_runtime_proof_bundle != owner_dir / PRELEASE_BUNDLE_FILE:
+            raise RuntimeInputError("public qualification must use the fixed owner bundle")
     names = (CONFIGS_ENV, INVENTORY_ENV, TOKENS_ENV)
     present = [bool(environment.get(name, "")) for name in names]
+    if prelease_runtime_proof_bundle is not None:
+        if any(present) and not all(present):
+            raise RuntimeInputError("protected publication inputs must be all present or all absent")
+        try:
+            owned = owner_input_bundles(owner_dir, source_sha, sql_sha, environment, prelease_runtime_proof=True)
+        except (OSError, KeyError):
+            raise RuntimeInputError("owner publication qualification unavailable; private details withheld") from None
+        if all(present) and tuple(decode_bundle(name, environment[name]) for name in names) != owned[:3]:
+            raise RuntimeInputError("protected and owner publication inputs differ")
+        return owned
     if all(present):
         return tuple(decode_bundle(name, environment[name]) for name in names)
     if any(present):
@@ -292,9 +397,13 @@ def materialize(
     configs_bundle: Any,
     inventory_bundle: Any,
     tokens_bundle: Any,
+    *, prelease_runtime_proof: bytes | None = None,
 ) -> dict[str, int | str]:
+    selected = prelease_source_selection() if prelease_runtime_proof is not None else None
     runtime_dir, _ = checked_destination(runtime_dir, runner_temp)
     configs, readers = validate_bundles(configs_bundle, inventory_bundle, tokens_bundle)
+    if prelease_runtime_proof is not None:
+        validate_prelease_bundle(prelease_runtime_proof, inventory_bundle, selected)
 
     old_umask = os.umask(0o077)
     try:
@@ -320,6 +429,16 @@ def materialize(
             runtime_dir / "reader-inventory.json",
             (json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         )
+        if prelease_runtime_proof is not None:
+            path = runtime_dir / PRELEASE_BUNDLE_FILE
+            write_owner_only(path, prelease_runtime_proof)
+            if public_owner_bytes(path) != prelease_runtime_proof:
+                raise RuntimeInputError("runtime public qualification changed")
+            descriptor = os.open(runtime_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     finally:
         os.umask(old_umask)
     for directory in (runtime_dir, runtime_dir / "endpoints", runtime_dir / "reader-tokens"):
@@ -342,16 +461,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--owner-input-dir", type=Path)
     parser.add_argument("--source-sha", default="")
     parser.add_argument("--sql-sha", default="")
+    parser.add_argument("--prelease-runtime-proof-bundle", type=Path)
     args = parser.parse_args(argv)
     try:
-        bundles = input_bundles(dict(os.environ), args.owner_input_dir, args.source_sha, args.sql_sha)
+        loaded = input_bundles(dict(os.environ), args.owner_input_dir, args.source_sha, args.sql_sha,
+                               prelease_runtime_proof_bundle=args.prelease_runtime_proof_bundle)
+        bundles = loaded[:3]
+        public_body = loaded[3] if args.prelease_runtime_proof_bundle is not None else None
         if args.validate_inputs:
             _, readers = validate_bundles(*bundles)
             result = {"status": "validated", "endpoint_count": 4, "reader_count": len(readers)}
         else:
             if args.runtime_dir is None or args.runner_temp is None:
                 raise RuntimeInputError("runtime-dir and runner-temp are required")
-            result = materialize(args.runtime_dir, args.runner_temp, *bundles)
+            result = materialize(args.runtime_dir, args.runner_temp, *bundles, prelease_runtime_proof=public_body)
     except RuntimeInputError as exc:
         print(json.dumps({"status": "blocked", "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2

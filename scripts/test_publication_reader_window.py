@@ -28,8 +28,8 @@ import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL_SHA = "05c486996a6bf31b9485c820292b56851b7894e3"
-PUBLISHER_SHA256 = "68f988fbab0beee89138cb291da24b6acfce922cabb01294457cf054b2151bf9"
+SQL_SHA = "37e3f5d2e9a382b75d5b3b4a1f559e1d4f75549e"
+PUBLISHER_SHA256 = "abb3786c2456c50fc7b3e49df9ff07ab1d0209d493e597083a246509eedb2744"
 
 
 def scheduled_arguments():
@@ -75,7 +75,7 @@ def checked(path, size, digest):
 
 
 def pinned_fixtures(path):
-    raw = checked(path, 195351, PUBLISHER_SHA256)
+    raw = checked(path, 199273, PUBLISHER_SHA256)
     module = types.ModuleType("natural_reader95_pinned_sql")
     module.__file__ = str(path)
     sys.modules[module.__name__] = module
