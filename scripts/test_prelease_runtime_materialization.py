@@ -312,7 +312,8 @@ class SourceSelectedDispatch(unittest.TestCase):
                        "</user><password>fixture-not-operational</password></config>" for endpoint in M.ENDPOINTS}
             tokens = {row["instance_id"]: "fixture-not-operational" for row in inventory["readers"]}
             runtime = root / "runtime"
-            M.materialize(runtime, root, configs, inventory, tokens, prelease_runtime_proof=body)
+            with mock.patch.object(M, "workflow_source_selection", return_value=selected):
+                M.materialize(runtime, root, configs, inventory, tokens, prelease_runtime_proof=body)
             args = ["publish", "--generation", "2026-10-22 00:00:00.000001", "--cdn-proof", str(root / "unused-proof"),
                     "--cdn-base-url", "https://cdn.jsdelivr.net/gh/statground/Statground_CDN@" + "a" * 40,
                     "--reader-inventory", str(runtime / "reader-inventory.json"), "--reader-timeout-seconds", "90"]

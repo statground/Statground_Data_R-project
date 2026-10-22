@@ -278,8 +278,13 @@ class OwnerPublicationInputsTest(unittest.TestCase):
             (owner / "manifest.json").write_text('{"schema":1,"schema":2}')
             with self.assertRaises(RuntimeInputError): self.load(owner)
         with tempfile.TemporaryDirectory() as temp:
+            # The supervisor selects a trusted HDD TMPDIR. Make the unsafe
+            # ancestor explicit instead of depending on the host /tmp mode.
+            parent = Path(temp) / "untrusted-parent"
+            parent.mkdir(mode=0o700); parent.chmod(0o777)
+            owner = parent / "owner"; owner.mkdir(mode=0o700)
             with self.assertRaisesRegex(RuntimeInputError, "parent"):
-                runtime_inputs.private_owner_directory(Path(temp))
+                runtime_inputs.private_owner_directory(owner)
 
     def test_descendant_source_accepts_only_unchanged_consumer_blobs(self):
         original_output = subprocess.check_output
