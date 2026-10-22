@@ -28,7 +28,7 @@ import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL_SHA = "56ce5211d78be9b806bdf5ec6f828d2dff1d9f6d"
+SQL_SHA = "6ef76aa0586dbcd212722040a958d6a091b00160"
 PUBLISHER_SHA256 = "aef0589bb259e249be4cba50705b86b87d0dc59f6a6e06609010f2f499d65bfb"
 
 
