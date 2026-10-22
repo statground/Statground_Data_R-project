@@ -28,8 +28,8 @@ import uuid
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-SQL_SHA = "37e3f5d2e9a382b75d5b3b4a1f559e1d4f75549e"
-PUBLISHER_SHA256 = "abb3786c2456c50fc7b3e49df9ff07ab1d0209d493e597083a246509eedb2744"
+SQL_SHA = "56ce5211d78be9b806bdf5ec6f828d2dff1d9f6d"
+PUBLISHER_SHA256 = "aef0589bb259e249be4cba50705b86b87d0dc59f6a6e06609010f2f499d65bfb"
 
 
 def scheduled_arguments():
@@ -57,7 +57,12 @@ def scheduled_arguments():
         result = subprocess.run(["/bin/bash", "-e", "-u", "-o", "pipefail", "-c", prefix],
                                 cwd=ROOT, env=environment, capture_output=True, timeout=3)
         assert result.returncode == 0, result.stderr.decode()
-        return json.loads((tmp / "argv.json").read_text())
+        captured = json.loads((tmp / "argv.json").read_text())
+        # The fixed Data entry preserves the original SDK argv. Its source-mode
+        # branches are exercised separately at the real materializer boundary.
+        assert captured[0] == "-c" and "m.invoke_source_selected_publisher(sys.argv[1:])" in captured[1]
+        assert "materialize_community_publication_runtime.py" in captured[1]
+        return ["statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py", *captured[2:]]
 
 
 def checked(path, size, digest):
@@ -75,7 +80,7 @@ def checked(path, size, digest):
 
 
 def pinned_fixtures(path):
-    raw = checked(path, 199273, PUBLISHER_SHA256)
+    raw = checked(path, 199709, PUBLISHER_SHA256)
     module = types.ModuleType("natural_reader95_pinned_sql")
     module.__file__ = str(path)
     sys.modules[module.__name__] = module

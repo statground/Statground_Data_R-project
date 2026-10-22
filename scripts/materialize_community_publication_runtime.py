@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import binascii
 import hashlib
@@ -27,7 +28,7 @@ INSTANCE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 OWNER_INPUT_DIR = Path("/var/lib/webr-community-publication-inputs")
 RUNNER_NAME = "webr-community-publisher-local"
 PUBLISHER_USER = "webr_community_generation_publisher"
-SQL_SHA = "37e3f5d2e9a382b75d5b3b4a1f559e1d4f75549e"
+SQL_SHA = "56ce5211d78be9b806bdf5ec6f828d2dff1d9f6d"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA64 = re.compile(r"^[0-9a-f]{64}$")
 OWNER_FILES = ("clickhouse-configs.json", "reader-inventory.json", "reader-tokens.json")
@@ -191,11 +192,157 @@ def private_json(body: bytes) -> Any:
 
 
 def prelease_source_selection() -> dict:
+    selected = workflow_source_selection()
+    if selected is None:
+        raise RuntimeInputError("public runtime qualification source is unbound or invalid")
+    return selected
+
+
+def workflow_source_selection() -> dict | None:
+    """Read literal source operands without executing an imported selector.
+
+    None preserves the original workflow. Every selector must be a clean,
+    tracked file in the exact executing Data commit; the owner reviewed ancestor
+    remains a separate, unchanged provenance check.
+    """
     import webr_community_prelease_runtime_proof as proof
+    source_root = Path(__file__).resolve().parents[1]
+    name = "scripts/webr_community_prelease_selection.py"
+    path = source_root / name
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        body = stream.read(65537)
+        after = os.fstat(stream.fileno())
+    if (path.resolve() != path or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+            stable_fields(before) != stable_fields(after) or stable_fields(before) != stable_fields(path.lstat()) or
+            not 0 < len(body) == before.st_size <= 65536):
+        raise RuntimeInputError("public qualification selector source changed")
     try:
-        return proof.validate_source_selection(proof.PRELEASE_RUNTIME_SOURCE_SELECTION)
-    except ValueError:
+        nodes = ast.parse(body.decode("utf-8"), filename=str(path)).body
+        if nodes and isinstance(nodes[0], ast.Expr) and isinstance(nodes[0].value, ast.Constant) and isinstance(nodes[0].value.value, str):
+            nodes = nodes[1:]
+        if (len(nodes) != 1 or not isinstance(nodes[0], ast.Assign) or len(nodes[0].targets) != 1 or
+                not isinstance(nodes[0].targets[0], ast.Name) or nodes[0].targets[0].id != "PRELEASE_RUNTIME_SOURCE_SELECTION"):
+            raise ValueError("selector must contain one literal")
+        selected = ast.literal_eval(nodes[0].value)
+        if selected is not None:
+            selected = proof.validate_source_selection(selected)
+    except (UnicodeError, SyntaxError, ValueError, TypeError):
         raise RuntimeInputError("public runtime qualification source is unbound or invalid") from None
+    source_sha = os.environ.get("GITHUB_SHA", "")
+    if source_sha and not SHA40.fullmatch(source_sha) or selected is not None and not source_sha:
+        raise RuntimeInputError("public qualification executing source is unavailable")
+    try:
+        def git(*arguments: str) -> bytes:
+            result = subprocess.run(["git", "-C", str(source_root), *arguments], capture_output=True, timeout=5,
+                                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+            if result.returncode != 0 or len(result.stdout) > 65536 or len(result.stderr) > 65536:
+                raise RuntimeInputError("public qualification selector provenance differs")
+            return result.stdout
+        current_sha = git("rev-parse", "HEAD").decode("ascii").strip()
+        if (not SHA40.fullmatch(current_sha) or source_sha and current_sha != source_sha or
+                git("ls-files", "--error-unmatch", "--", name).decode("utf-8").strip() != name or
+                git("status", "--porcelain=v1", "--untracked-files=no", "--", name) or
+                git("show", current_sha + ":" + name) != body or
+                stable_fields(before) != stable_fields(path.lstat())):
+            raise RuntimeInputError("public qualification selector differs from current committed source")
+        if selected is not None:
+            ancestor = selected["source_binding"]["data_source_sha"]
+            git("merge-base", "--is-ancestor", ancestor, current_sha)
+            if ancestor == current_sha or git("diff", "--name-only", ancestor, current_sha).decode("utf-8").splitlines() != [name]:
+                raise RuntimeInputError("public qualification child must change only the source selector")
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        raise RuntimeInputError("public qualification selector provenance unavailable") from None
+    return selected
+
+
+def invoke_prelease_publisher(argv: list[str]) -> int:
+    """Fixed Data-owned entry; expected operands are source trust, not caller authentication."""
+    selected = prelease_source_selection()  # Refuse None before owner/bundle/SQL IO.
+    if (type(argv) is not list or not argv or argv[0] != "publish" or
+            not all(type(arg) is str and len(arg) <= 8192 for arg in argv) or len(argv) > 128 or
+            any(arg == "--prelease-runtime-proof-bundle" or arg.startswith("--prelease-runtime-proof-bundle=") for arg in argv)):
+        raise RuntimeInputError("source-qualified publisher arguments differ")
+    environment = dict(os.environ)
+    owned = input_bundles(environment, OWNER_INPUT_DIR, environment.get("GITHUB_SHA", ""), SQL_SHA,
+                          prelease_runtime_proof_bundle=OWNER_INPUT_DIR / PRELEASE_BUNDLE_FILE)
+    try:
+        inventory_index = argv.index("--reader-inventory")
+        inventory_path = Path(argv[inventory_index + 1])
+    except (ValueError, IndexError):
+        raise RuntimeInputError("source-qualified publisher inventory is unavailable") from None
+    runtime = inventory_path.parent
+    if (not inventory_path.is_absolute() or inventory_path.resolve() != inventory_path or
+            inventory_path.name != "reader-inventory.json" or
+            runtime.parent != Path(environment.get("RUNNER_TEMP", "")).resolve() or
+            not runtime.is_dir() or stat.S_IMODE(runtime.lstat().st_mode) != 0o700 or runtime.lstat().st_uid != os.geteuid()):
+        raise RuntimeInputError("source-qualified publisher runtime differs")
+    public_path = runtime / PRELEASE_BUNDLE_FILE
+    if public_owner_bytes(public_path) != owned[3] or prelease_source_selection() != selected:
+        raise RuntimeInputError("source-qualified publisher bundle changed")
+    source_root = Path(__file__).resolve().parents[1]
+    sql_root = source_root / "statground-sql"
+    directory = sql_root / "docker-compose/50005_Clickhouse_Statground"
+    names = ("webr_community_prelease_runtime_proof", "webr_community_prelease_artifacts",
+             "webr_community_generation_publisher")
+    bodies = {}
+    metadata = {}
+    try:
+        head = subprocess.check_output(["git", "-C", str(sql_root), "rev-parse", "HEAD"],
+                                       stderr=subprocess.DEVNULL, timeout=5).decode("ascii").strip()
+        if sql_root.resolve() != sql_root or head != SQL_SHA:
+            raise RuntimeInputError("source-qualified SQL checkout differs")
+        for name in names:
+            path = directory / (name + ".py")
+            before = path.lstat()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as stream:
+                body = stream.read(262145)
+                after = os.fstat(stream.fileno())
+            committed = subprocess.check_output(["git", "-C", str(sql_root), "show",
+                SQL_SHA + ":docker-compose/50005_Clickhouse_Statground/" + name + ".py"],
+                stderr=subprocess.DEVNULL, timeout=5)
+            if (path.resolve() != path or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                    stable_fields(before) != stable_fields(after) or stable_fields(before) != stable_fields(path.lstat()) or
+                    not 0 < len(body) == before.st_size <= 262144 or body != committed):
+                raise RuntimeInputError("source-qualified SQL source changed")
+            bodies[name], metadata[name] = body, stable_fields(before)
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        raise RuntimeInputError("source-qualified SQL source unavailable") from None
+    import types
+    previous = {name: sys.modules.get(name) for name in names}
+    previous_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(directory))
+        for name in names:
+            module = types.ModuleType(name)
+            module.__file__ = str(directory / (name + ".py"))
+            sys.modules[name] = module
+            exec(compile(bodies[name], module.__file__, "exec", dont_inherit=True), vars(module))
+        result = sys.modules[names[-1]].main(
+            [*argv, "--prelease-runtime-proof-bundle", str(public_path)],
+            prelease_source_selection=selected)
+        if (prelease_source_selection() != selected or any(
+                stable_fields((directory / (name + ".py")).lstat()) != metadata[name] for name in names)):
+            raise RuntimeInputError("source-qualified publisher source custody changed")
+        return result
+    finally:
+        sys.path[:] = previous_path
+        for name in names:
+            if previous[name] is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous[name]
+
+
+def invoke_source_selected_publisher(argv: list[str]) -> int:
+    """The fixed workflow has both branches before its bytes are qualified."""
+    if workflow_source_selection() is not None:
+        return invoke_prelease_publisher(argv)
+    publisher = Path(__file__).resolve().parents[1] / "statground-sql/docker-compose/50005_Clickhouse_Statground/webr_community_generation_publisher.py"
+    os.execv(sys.executable, [sys.executable, str(publisher), *argv])
+    raise RuntimeInputError("legacy publisher did not execute")
 
 
 def stable_fields(entry: os.stat_result) -> tuple:
@@ -464,10 +611,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prelease-runtime-proof-bundle", type=Path)
     args = parser.parse_args(argv)
     try:
+        selected = workflow_source_selection()
+        public_bundle = args.prelease_runtime_proof_bundle
+        if selected is not None:
+            expected_bundle = OWNER_INPUT_DIR / PRELEASE_BUNDLE_FILE
+            if args.owner_input_dir != OWNER_INPUT_DIR or public_bundle not in (None, expected_bundle):
+                raise RuntimeInputError("source-selected publication requires the fixed owner bundle")
+            public_bundle = expected_bundle
+        elif public_bundle is not None:
+            prelease_source_selection()
         loaded = input_bundles(dict(os.environ), args.owner_input_dir, args.source_sha, args.sql_sha,
-                               prelease_runtime_proof_bundle=args.prelease_runtime_proof_bundle)
+                               prelease_runtime_proof_bundle=public_bundle)
         bundles = loaded[:3]
-        public_body = loaded[3] if args.prelease_runtime_proof_bundle is not None else None
+        public_body = loaded[3] if public_bundle is not None else None
         if args.validate_inputs:
             _, readers = validate_bundles(*bundles)
             result = {"status": "validated", "endpoint_count": 4, "reader_count": len(readers)}
@@ -475,6 +631,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.runtime_dir is None or args.runner_temp is None:
                 raise RuntimeInputError("runtime-dir and runner-temp are required")
             result = materialize(args.runtime_dir, args.runner_temp, *bundles, prelease_runtime_proof=public_body)
+        if workflow_source_selection() != selected:
+            raise RuntimeInputError("source-selected workflow mode changed")
     except RuntimeInputError as exc:
         print(json.dumps({"status": "blocked", "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2

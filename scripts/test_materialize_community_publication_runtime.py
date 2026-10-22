@@ -185,6 +185,7 @@ class OwnerPublicationInputsTest(unittest.TestCase):
                 if argv[-2:] == ["rev-parse", "HEAD"]: return (self.source_sha + "\n").encode()
                 return (source_root / argv[-1].split(":", 1)[1]).read_bytes()
             with mock.patch.object(runtime_inputs, "OWNER_INPUT_DIR", owner), \
+                 mock.patch.object(runtime_inputs, "workflow_source_selection", return_value=None), \
                  mock.patch.object(runtime_inputs.subprocess, "check_output", side_effect=git_output), \
                  mock.patch.object(runtime_inputs.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), \
                  mock.patch.object(Path, "lstat", autospec=True, side_effect=fixture_lstat):
