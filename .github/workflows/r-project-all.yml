@@ -1412,7 +1412,7 @@ jobs:
   community-publication:
     name: Publish exact Web-R community generation
     needs: [collect, cdn-export]
-    if: always() && !cancelled() && needs.collect.result == 'success' && (inputs.scope == 'publication' || ((inputs.scope == 'all' || inputs.scope == 'cdn') && needs.cdn-export.result == 'success'))
+    if: false && (always() && !cancelled() && needs.collect.result == 'success' && (inputs.scope == 'publication' || ((inputs.scope == 'all' || inputs.scope == 'cdn') && needs.cdn-export.result == 'success')))
     concurrency:
       group: r-project-publication
       cancel-in-progress: false
