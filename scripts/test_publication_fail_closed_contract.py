@@ -55,20 +55,26 @@ class PublicationFailClosedContractTest(unittest.TestCase):
             self.assertFalse(fnmatch.fnmatchcase(unrelated, pattern), unrelated)
 
     def test_publication_tag_scope_does_not_admit_cdn_exports_or_failed_intake(self) -> None:
-        from test_workflow_target_concurrency import evaluate
+        from test_workflow_target_concurrency import (
+            PUBLICATION_HOLD_CONDITION, evaluate, publication_admission_condition,
+        )
 
         wrapper = yaml.load(RECONCILE_WORKFLOW, Loader=yaml.BaseLoader)
         scope = wrapper["jobs"]["publication"]["with"]["scope"]
         worker = yaml.safe_load(MAIN_WORKFLOW)
         self.assertFalse(evaluate(worker["jobs"]["cdn-export"]["if"], scope, 1))
         condition = worker["jobs"]["community-publication"]["if"]
+        self.assertEqual(condition, PUBLICATION_HOLD_CONDITION)
+        admission = publication_admission_condition(condition)
         for intake, cancelled, allowed in (("success", False, True), ("failure", False, False), ("success", True, False)):
             with self.subTest(intake=intake, cancelled=cancelled):
-                self.assertEqual(evaluate(condition, scope, 1, **{
+                context = {
                     "needs.collect.result": intake,
                     "needs.cdn-export.result": "skipped",
                     "cancelled": cancelled,
-                }), allowed)
+                }
+                self.assertFalse(evaluate(condition, scope, 1, **context))
+                self.assertEqual(evaluate(admission, scope, 1, **context), allowed)
 
     def test_protected_settings_fail_before_checkout_and_keep_other_credentials_required(self) -> None:
         job = MAIN_WORKFLOW.split("  community-publication:", 1)[1]

@@ -10,6 +10,19 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
+PUBLICATION_ADMISSION_CONDITION = (
+    "always() && !cancelled() && needs.collect.result == 'success' && "
+    "(inputs.scope == 'publication' || ((inputs.scope == 'all' || "
+    "inputs.scope == 'cdn') && needs.cdn-export.result == 'success'))"
+)
+PUBLICATION_HOLD_CONDITION = f"false && ({PUBLICATION_ADMISSION_CONDITION})"
+
+
+def publication_admission_condition(expression: str) -> str:
+    """Keep the reviewed admission rule testable beneath the temporary hold."""
+    if expression not in (PUBLICATION_ADMISSION_CONDITION, PUBLICATION_HOLD_CONDITION):
+        raise AssertionError("Publication admission condition differs from the reviewed rule")
+    return PUBLICATION_ADMISSION_CONDITION
 
 
 def evaluate(expression: str, scope: str, run_id: int, **values):
@@ -34,6 +47,8 @@ def evaluate(expression: str, scope: str, run_id: int, **values):
     def read(node):
         if isinstance(node, ast.Constant):
             return node.value
+        if isinstance(node, ast.Name) and node.id in ("true", "false"):
+            return node.id == "true"
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not read(node.operand)
         if isinstance(node, ast.BoolOp):
@@ -62,6 +77,35 @@ def evaluate(expression: str, scope: str, run_id: int, **values):
         raise AssertionError(f"Unsupported workflow expression: {ast.dump(node)}")
 
     return read(ast.parse(source, mode="eval").body)
+
+
+class WorkflowExpressionTest(unittest.TestCase):
+    def test_github_boolean_literals_and_expression_wrapper(self):
+        for expression, expected in (
+            ("true", True), ("false", False),
+            ("${{ true }}", True), ("${{ false }}", False),
+            ("true && false", False), ("false || true", True),
+            ("false && unsupported()", False), ("true || unsupported()", True),
+        ):
+            with self.subTest(expression=expression):
+                self.assertIs(evaluate(expression, "publication", 1), expected)
+
+    def test_boolean_text_inside_a_string_stays_a_string(self):
+        self.assertEqual(evaluate("format('{0}/{1}', 'false', 'true')", "publication", 1),
+                         "false/true")
+
+    def test_unreviewed_names_and_calls_still_fail(self):
+        for expression in ("FALSE", "true_value", "unreviewed_flag", "true()", "false()"):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(AssertionError, "Unsupported workflow expression"):
+                    evaluate(expression, "publication", 1)
+
+    def test_hold_extraction_rejects_changed_admission_rules(self):
+        for expression in ("false", "false && true", f"true && ({PUBLICATION_ADMISSION_CONDITION})",
+                           PUBLICATION_HOLD_CONDITION.replace("!cancelled()", "always()")):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(AssertionError, "differs from the reviewed rule"):
+                    publication_admission_condition(expression)
 
 
 class WorkflowTargetConcurrencyTest(unittest.TestCase):
@@ -123,6 +167,7 @@ class WorkflowTargetConcurrencyTest(unittest.TestCase):
     def test_failed_intake_or_cdn_export_cannot_publish(self):
         publisher = self.jobs["community-publication"]
         self.assertEqual(publisher["needs"], ["collect", "cdn-export"])
+        admission = publication_admission_condition(publisher["if"])
         cases = (
             ("publication", "success", "skipped", True),
             ("publication", "failure", "skipped", False),
@@ -135,17 +180,31 @@ class WorkflowTargetConcurrencyTest(unittest.TestCase):
         )
         for scope, intake, export, allowed in cases:
             with self.subTest(scope=scope, intake=intake, export=export):
-                result = evaluate(publisher["if"], scope, 100, **{
+                result = evaluate(admission, scope, 100, **{
                     "needs.collect.result": intake, "needs.cdn-export.result": export,
                 })
                 self.assertEqual(result, allowed)
         self.assertEqual(self.jobs["cdn-export"]["needs"], "collect")
         for scope, export in (("publication", "skipped"), ("all", "success"), ("cdn", "success")):
             with self.subTest(scope=scope, cancelled=True):
-                self.assertFalse(evaluate(publisher["if"], scope, 100, **{
+                self.assertFalse(evaluate(admission, scope, 100, **{
                     "needs.collect.result": "success", "needs.cdn-export.result": export,
                     "cancelled": True,
                 }))
+
+    def test_temporary_publication_hold_denies_every_intake_export_and_cancellation_state(self):
+        condition = self.jobs["community-publication"]["if"]
+        self.assertEqual(condition, PUBLICATION_HOLD_CONDITION)
+        for scope in ("all", "package", "social", "youtube-availability", "community",
+                      "community-digest", "notebook", "cdn", "publication"):
+            for intake in ("success", "failure", "cancelled", "skipped"):
+                for export in ("success", "failure", "cancelled", "skipped"):
+                    for cancelled in (False, True):
+                        with self.subTest(scope=scope, intake=intake, export=export, cancelled=cancelled):
+                            self.assertIs(evaluate(condition, scope, 100, **{
+                                "needs.collect.result": intake, "needs.cdn-export.result": export,
+                                "cancelled": cancelled,
+                            }), False)
 
     def test_export_job_regates_its_exact_write_target_before_mutation(self):
         steps = self.jobs["cdn-export"]["steps"]
